@@ -59,6 +59,10 @@ static void _LoadBlobs(ArchiveHandle *AH, bool drop);
 static void _Clone(ArchiveHandle *AH);
 static void _DeClone(ArchiveHandle *AH);
 
+static char *_StartMasterParallel(ArchiveHandle *AH, TocEntry *te, T_Action act);
+static int _EndMasterParallel(ArchiveHandle *AH, TocEntry *te, const char *str, T_Action act);
+char *_WorkerJobRestoreCustom(ArchiveHandle *AH, TocEntry *te);
+
 typedef struct
 {
 	CompressorState *cs;
@@ -125,6 +129,14 @@ InitArchiveFmt_Custom(ArchiveHandle *AH)
 	AH->EndBlobsPtr = _EndBlobs;
 	AH->ClonePtr = _Clone;
 	AH->DeClonePtr = _DeClone;
+
+	AH->StartMasterParallelPtr = _StartMasterParallel;
+	AH->EndMasterParallelPtr = _EndMasterParallel;
+
+	AH->GetParallelStatePtr = NULL;
+	/* no parallel dump in the custom archive */
+	AH->WorkerJobDumpPtr = NULL;
+	AH->WorkerJobRestorePtr = _WorkerJobRestoreCustom;
 
 	/* Set up a private area. */
 	ctx = (lclContext *) calloc(1, sizeof(lclContext));
@@ -718,7 +730,7 @@ _CloseArchive(ArchiveHandle *AH)
 	if (fclose(AH->FH) != 0)
 		die_horribly(AH, modulename, "could not close archive file: %s\n", strerror(errno));
 
-	AH->FH = NULL;
+	//AH->FH = NULL;
 }
 
 /*
@@ -794,6 +806,59 @@ _DeClone(ArchiveHandle *AH)
 {
 	lclContext *ctx = (lclContext *) AH->formatData;
 	free(ctx);
+}
+
+char *
+_WorkerJobRestoreCustom(ArchiveHandle *AH, TocEntry *te)
+{
+	static char	buf[64]; /* short fixed-size string + some numbers so far */
+	ParallelArgs pargs;
+	int			status;
+	lclTocEntry *tctx;
+
+	tctx = (lclTocEntry *) te->formatData;
+
+	pargs.AH = AH;
+	pargs.te = te;
+
+	status = parallel_restore(&pargs);
+
+	snprintf(buf, sizeof(buf), "OK RESTORE %d %d %d", te->dumpId, status,
+			 status == WORKER_IGNORED_ERRORS ? AH->public.n_errors : 0);
+
+	return buf;
+}
+
+static char *
+_StartMasterParallel(ArchiveHandle *AH, TocEntry *te, T_Action act)
+{
+	static char			buf[64]; /* short fixed-size string + number */
+
+	/* no parallel dump in the custom archive format */
+	Assert(act == ACT_RESTORE);
+
+	snprintf(buf, sizeof(buf), "RESTORE %d", te->dumpId);
+
+	return buf;
+}
+
+static int
+_EndMasterParallel(ArchiveHandle *AH, TocEntry *te, const char *str, T_Action act)
+{
+	DumpId				dumpId;
+	int					nBytes, status, n_errors;
+
+	/* no parallel dump in the custom archive */
+	Assert(act == ACT_RESTORE);
+
+	sscanf(str, "%u %u %u%n", &dumpId, &status, &n_errors, &nBytes);
+
+	Assert(nBytes == strlen(str));
+	Assert(dumpId == te->dumpId);
+
+	AH->public.n_errors += n_errors;
+
+	return status;
 }
 
 /*--------------------------------------------------
