@@ -3913,11 +3913,13 @@ getTables(int *numTables)
 		if (tblinfo[i].dobj.dump && tblinfo[i].relkind == RELKIND_RELATION)
 		{
 			resetPQExpBuffer(query);
+			printf("Locking table %s\n", tblinfo[i].dobj.name);
 			appendPQExpBuffer(query,
 							  "LOCK TABLE %s IN ACCESS SHARE MODE",
 						 fmtQualifiedId(tblinfo[i].dobj.namespace->dobj.name,
 										tblinfo[i].dobj.name,
 										g_fout->remoteVersion));
+			printf("Query: %s\n", query->data);
 			do_sql_command(g_conn, query->data);
 		}
 

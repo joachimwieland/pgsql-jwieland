@@ -834,7 +834,7 @@ setupArchDirectory(ArchiveHandle *AH, int numWorkers)
 static char *
 _StartMasterParallel(ArchiveHandle *AH, TocEntry *te, T_Action act)
 {
-	static char			buf[64];
+	static char	buf[64];
 
 	if (act == ACT_DUMP)
 		snprintf(buf, sizeof(buf), "DUMP %d", te->dumpId);
@@ -852,8 +852,9 @@ _StartMasterParallel(ArchiveHandle *AH, TocEntry *te, T_Action act)
 static int
 _EndMasterParallel(ArchiveHandle *AH, TocEntry *te, const char *str, T_Action act)
 {
-	DumpId				dumpId;
-	int					nBytes, status, n_errors;
+	DumpId		dumpId;
+	int			nBytes, n_errors;
+	int			status = 0;
 
 	if (act == ACT_DUMP)
 	{
@@ -861,8 +862,6 @@ _EndMasterParallel(ArchiveHandle *AH, TocEntry *te, const char *str, T_Action ac
 
 		Assert(dumpId == te->dumpId);
 		Assert(nBytes == strlen(str));
-
-		status = 0;
 	}
 	else if (act == ACT_RESTORE)
 	{
