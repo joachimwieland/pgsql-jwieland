@@ -20,6 +20,9 @@ $(call recurse,world,doc src config contrib,all)
 world:
 	+@echo "PostgreSQL, contrib, and documentation successfully made. Ready to install."
 
+# build src/ before contrib/
+world-contrib-recurse: world-src-recurse
+
 html man:
 	$(MAKE) -C doc $@
 
@@ -32,6 +35,9 @@ install-docs:
 $(call recurse,install-world,doc src config contrib,install)
 install-world:
 	+@echo "PostgreSQL, contrib, and documentation installation complete."
+
+# build src/ before contrib/
+install-world-contrib-recurse: install-world-src-recurse
 
 $(call recurse,installdirs uninstall coverage,doc src config)
 
@@ -60,7 +66,11 @@ check: all
 check installcheck installcheck-parallel:
 	$(MAKE) -C src/test $@
 
+$(call recurse,check-world,src/test src/pl src/interfaces/ecpg contrib,check)
+
 $(call recurse,installcheck-world,src/test src/pl src/interfaces/ecpg contrib,installcheck)
+
+$(call recurse,maintainer-check,doc src config contrib)
 
 GNUmakefile: GNUmakefile.in $(top_builddir)/config.status
 	./config.status $@
@@ -121,4 +131,4 @@ distcheck: dist
 	rm -rf $(distdir) $(dummy)
 	@echo "Distribution integrity checks out."
 
-.PHONY: dist distdir distcheck docs install-docs world install-world installcheck-world
+.PHONY: dist distdir distcheck docs install-docs world check-world install-world installcheck-world

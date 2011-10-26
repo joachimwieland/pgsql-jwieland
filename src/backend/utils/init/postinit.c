@@ -222,8 +222,8 @@ PerformAuthentication(Port *port)
 	{
 		if (am_walsender)
 			ereport(LOG,
-				(errmsg("replication connection authorized: user=%s",
-						port->user_name)));
+					(errmsg("replication connection authorized: user=%s",
+							port->user_name)));
 		else
 			ereport(LOG,
 					(errmsg("connection authorized: user=%s database=%s",
@@ -324,7 +324,7 @@ CheckMyDatabase(const char *name, bool am_superuser)
 					PGC_INTERNAL, PGC_S_OVERRIDE);
 	/* If we have no other source of client_encoding, use server encoding */
 	SetConfigOption("client_encoding", GetDatabaseEncodingName(),
-					PGC_BACKEND, PGC_S_DEFAULT);
+					PGC_BACKEND, PGC_S_DYNAMIC_DEFAULT);
 
 	/* assign locale variables */
 	collate = NameStr(dbform->datcollate);
@@ -489,7 +489,7 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 	SharedInvalBackendInit(false);
 
 	if (MyBackendId > MaxBackends || MyBackendId <= 0)
-		elog(FATAL, "bad backend id: %d", MyBackendId);
+		elog(FATAL, "bad backend ID: %d", MyBackendId);
 
 	/* Now that we have a BackendId, we can participate in ProcSignal */
 	ProcSignalInit(MyBackendId);
@@ -571,6 +571,8 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 	 */
 	if (!bootstrap)
 	{
+		/* statement_timestamp must be set for timeouts to work correctly */
+		SetCurrentStatementStartTimestamp();
 		StartTransactionCommand();
 		(void) GetTransactionSnapshot();
 	}
@@ -626,6 +628,16 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 	}
 
 	/*
+	 * Binary upgrades only allowed super-user connections
+	 */
+	if (IsBinaryUpgrade && !am_superuser)
+	{
+		ereport(FATAL,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+			 errmsg("must be superuser to connect in binary upgrade mode")));
+	}
+
+	/*
 	 * The last few connections slots are reserved for superusers. Although
 	 * replication connections currently require superuser privileges, we
 	 * don't allow them to consume the reserved slots, which are intended for
@@ -639,9 +651,9 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 				 errmsg("remaining connection slots are reserved for non-replication superuser connections")));
 
 	/*
-	 * If walsender, we don't want to connect to any particular database.
-	 * Just finish the backend startup by processing any options from the
-	 * startup packet, and we're done.
+	 * If walsender, we don't want to connect to any particular database. Just
+	 * finish the backend startup by processing any options from the startup
+	 * packet, and we're done.
 	 */
 	if (am_walsender)
 	{

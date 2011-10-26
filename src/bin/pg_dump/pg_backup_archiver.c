@@ -48,8 +48,8 @@ const char *progname;
 static const char *modulename = gettext_noop("archiver");
 
 /* index array created by fix_dependencies -- only used in parallel restore */
-static TocEntry	  **tocsByDumpId;			/* index by dumpId - 1 */
-static DumpId		maxDumpId;				/* length of above array */
+static TocEntry **tocsByDumpId; /* index by dumpId - 1 */
+static DumpId maxDumpId;		/* length of above array */
 
 
 static ArchiveHandle *_allocAH(const char *FileSpec, const ArchiveFormat fmt,
@@ -77,9 +77,10 @@ static TocEntry *getTocEntryByDumpId(ArchiveHandle *AH, DumpId id);
 static void _moveBefore(ArchiveHandle *AH, TocEntry *pos, TocEntry *te);
 static int	_discoverArchiveFormat(ArchiveHandle *AH);
 
+static int	RestoringToDB(ArchiveHandle *AH);
 static void dump_lo_buf(ArchiveHandle *AH);
-static void _write_msg(const char *modulename, const char *fmt, va_list ap);
-static void _die_horribly(ArchiveHandle *AH, const char *modulename, const char *fmt, va_list ap);
+static void _write_msg(const char *modulename, const char *fmt, va_list ap) __attribute__((format(PG_PRINTF_ATTRIBUTE, 2, 0)));
+static void _die_horribly(ArchiveHandle *AH, const char *modulename, const char *fmt, va_list ap) __attribute__((format(PG_PRINTF_ATTRIBUTE, 3, 0)));
 
 static void dumpTimestamp(ArchiveHandle *AH, const char *msg, time_t tim);
 static void SetOutput(ArchiveHandle *AH, char *filename, int compression);
@@ -208,6 +209,7 @@ void
 RestoreArchive(Archive *AHX, RestoreOptions *ropt)
 {
 	ArchiveHandle *AH = (ArchiveHandle *) AHX;
+	bool		parallel_mode;
 	TocEntry   *te;
 	teReqs		reqs;
 	OutputContext sav;
@@ -232,6 +234,27 @@ RestoreArchive(Archive *AHX, RestoreOptions *ropt)
 	 */
 	if (ropt->createDB && ropt->single_txn)
 		die_horribly(AH, modulename, "-C and -1 are incompatible options\n");
+
+	/*
+	 * If we're going to do parallel restore, there are some restrictions.
+	 */
+	parallel_mode = (ropt->number_of_jobs > 1 && ropt->useDB);
+	if (parallel_mode)
+	{
+		/* We haven't got round to making this work for all archive formats */
+		if (AH->ClonePtr == NULL || AH->ReopenPtr == NULL)
+			die_horribly(AH, modulename, "parallel restore is not supported with this archive file format\n");
+
+		/* Doesn't work if the archive represents dependencies as OIDs */
+		if (AH->version < K_VERS_1_8)
+			die_horribly(AH, modulename, "parallel restore is not supported with archives made by pre-8.0 pg_dump\n");
+
+		/*
+		 * It's also not gonna work if we can't reopen the input file, so
+		 * let's try that immediately.
+		 */
+		(AH->ReopenPtr) (AH);
+	}
 
 	/*
 	 * Make sure we won't need (de)compression we haven't got
@@ -380,7 +403,7 @@ RestoreArchive(Archive *AHX, RestoreOptions *ropt)
 	 *
 	 * In parallel mode, turn control over to the parallel-restore logic.
 	 */
-	if (ropt->number_of_jobs > 1 && ropt->useDB)
+	if (parallel_mode)
 	{
 		ParallelState *pstate;
 		/* this will actually fork the processes */
@@ -591,13 +614,7 @@ restore_toc_entry(ArchiveHandle *AH, TocEntry *te,
 					}
 
 					/*
-					 * If we have a copy statement, use it. As of V1.3, these
-					 * are separate to allow easy import from withing a
-					 * database connection. Pre 1.3 archives can not use DB
-					 * connections and are sent to output only.
-					 *
-					 * For V1.3+, the table data MUST have a copy statement so
-					 * that we can go into appropriate mode with libpq.
+					 * If we have a copy statement, use it.
 					 */
 					if (te->copyStmt && strlen(te->copyStmt) > 0)
 					{
@@ -607,7 +624,15 @@ restore_toc_entry(ArchiveHandle *AH, TocEntry *te,
 
 					(*AH->PrintTocDataPtr) (AH, te, ropt);
 
-					AH->writingCopyData = false;
+					/*
+					 * Terminate COPY if needed.
+					 */
+					if (AH->writingCopyData)
+					{
+						if (RestoringToDB(AH))
+							EndDBCopyMode(AH, te);
+						AH->writingCopyData = false;
+					}
 
 					/* close out the transaction started above */
 					if (is_parallel && te->created)
@@ -1009,11 +1034,8 @@ SortTocFromFile(Archive *AHX, RestoreOptions *ropt)
 {
 	ArchiveHandle *AH = (ArchiveHandle *) AHX;
 	FILE	   *fh;
-	char		buf[1024];
-	char	   *cmnt;
-	char	   *endptr;
-	DumpId		id;
-	TocEntry   *te;
+	char		buf[100];
+	bool		incomplete_line;
 
 	/* Allocate space for the 'wanted' array, and init it */
 	ropt->idWanted = (bool *) malloc(sizeof(bool) * AH->maxDumpId);
@@ -1025,8 +1047,30 @@ SortTocFromFile(Archive *AHX, RestoreOptions *ropt)
 		die_horribly(AH, modulename, "could not open TOC file \"%s\": %s\n",
 					 ropt->tocFile, strerror(errno));
 
+	incomplete_line = false;
 	while (fgets(buf, sizeof(buf), fh) != NULL)
 	{
+		bool		prev_incomplete_line = incomplete_line;
+		int			buflen;
+		char	   *cmnt;
+		char	   *endptr;
+		DumpId		id;
+		TocEntry   *te;
+
+		/*
+		 * Some lines in the file might be longer than sizeof(buf).  This is
+		 * no problem, since we only care about the leading numeric ID which
+		 * can be at most a few characters; but we have to skip continuation
+		 * bufferloads when processing a long line.
+		 */
+		buflen = strlen(buf);
+		if (buflen > 0 && buf[buflen - 1] == '\n')
+			incomplete_line = false;
+		else
+			incomplete_line = true;
+		if (prev_incomplete_line)
+			continue;
+
 		/* Truncate line at comment, if any */
 		cmnt = strchr(buf, ';');
 		if (cmnt != NULL)
@@ -1235,17 +1279,13 @@ ahprintf(ArchiveHandle *AH, const char *fmt,...)
 {
 	char	   *p = NULL;
 	va_list		ap;
-	int			bSize = strlen(fmt) + 256;		/* Should be enough */
+	int			bSize = strlen(fmt) + 256;		/* Usually enough */
 	int			cnt = -1;
 
 	/*
 	 * This is paranoid: deal with the possibility that vsnprintf is willing
-	 * to ignore trailing null
-	 */
-
-	/*
-	 * or returns > 0 even if string does not fit. It may be the case that it
-	 * returns cnt = bufsize
+	 * to ignore trailing null or returns > 0 even if string does not fit.
+	 * It may be the case that it returns cnt = bufsize.
 	 */
 	while (cnt < 0 || cnt >= (bSize - 1))
 	{
@@ -1327,7 +1367,7 @@ dump_lo_buf(ArchiveHandle *AH)
 
 
 /*
- *	Write buffer to the output file (usually stdout). This is user for
+ *	Write buffer to the output file (usually stdout). This is used for
  *	outputting 'restore' scripts etc. It is even possible for an archive
  *	format to create a custom output routine to 'fake' a restore if it
  *	wants to generate a script (see TAR output).
@@ -1359,7 +1399,7 @@ ahwrite(const void *ptr, size_t size, size_t nmemb, ArchiveHandle *AH)
 	}
 	else if (AH->gzOut)
 	{
-		res = GZWRITE((void *) ptr, size, nmemb, AH->OF);
+		res = GZWRITE(ptr, size, nmemb, AH->OF);
 		if (res != (nmemb * size))
 			die_horribly(AH, modulename, "could not write to output file: %s\n", strerror(errno));
 		return res;
@@ -1379,10 +1419,10 @@ ahwrite(const void *ptr, size_t size, size_t nmemb, ArchiveHandle *AH)
 		 * connected then send it to the DB.
 		 */
 		if (RestoringToDB(AH))
-			return ExecuteSqlCommandBuf(AH, (void *) ptr, size * nmemb);		/* Always 1, currently */
+			return ExecuteSqlCommandBuf(AH, (const char *) ptr, size * nmemb);
 		else
 		{
-			res = fwrite((void *) ptr, size, nmemb, AH->OF);
+			res = fwrite(ptr, size, nmemb, AH->OF);
 			if (res != nmemb)
 				die_horribly(AH, modulename, "could not write to output file: %s\n",
 							 strerror(errno));
@@ -1516,7 +1556,6 @@ _moveAfter(ArchiveHandle *AH, TocEntry *pos, TocEntry *te)
 	pos->next->prev = te;
 	pos->next = te;
 }
-
 #endif
 
 static void
@@ -1758,7 +1797,7 @@ _discoverArchiveFormat(ArchiveHandle *AH)
 
 	if (AH->fSpec)
 	{
-		struct stat	st;
+		struct stat st;
 
 		wantClose = 1;
 
@@ -1769,6 +1808,7 @@ _discoverArchiveFormat(ArchiveHandle *AH)
 		if (stat(AH->fSpec, &st) == 0 && S_ISDIR(st.st_mode))
 		{
 			char		buf[MAXPGPATH];
+
 			if (snprintf(buf, MAXPGPATH, "%s/toc.dat", AH->fSpec) >= MAXPGPATH)
 				die_horribly(AH, modulename, "directory name too long: \"%s\"\n",
 							 AH->fSpec);
@@ -1790,7 +1830,7 @@ _discoverArchiveFormat(ArchiveHandle *AH)
 #endif
 			die_horribly(AH, modulename, "directory \"%s\" does not appear to be a valid archive (\"toc.dat\" does not exist)\n",
 						 AH->fSpec);
-			fh = NULL; /* keep compiler quiet */
+			fh = NULL;			/* keep compiler quiet */
 		}
 		else
 		{
@@ -1971,9 +2011,6 @@ _allocAH(const char *FileSpec, const ArchiveFormat fmt,
 
 	AH->mode = mode;
 	AH->compression = compression;
-
-	AH->pgCopyBuf = createPQExpBuffer();
-	AH->sqlBuf = createPQExpBuffer();
 
 	/* Open stdout with no compression for AH output handle */
 	AH->gzOut = 0;
@@ -2401,7 +2438,7 @@ _tocEntryRequired(TocEntry *te, RestoreOptions *ropt, bool include_acls)
 		return 0;
 
 	/* If it's security labels, maybe ignore it */
-	if (ropt->skip_seclabel && strcmp(te->desc, "SECURITY LABEL") == 0)
+	if (ropt->no_security_labels && strcmp(te->desc, "SECURITY LABEL") == 0)
 		return 0;
 
 	/* Ignore DATABASE entry unless we should create it */
@@ -2845,7 +2882,8 @@ _getObjectDescription(PQExpBuffer buf, TocEntry *te, ArchiveHandle *AH)
 		type = "TABLE";
 
 	/* objects named by a schema and name */
-	if (strcmp(type, "CONVERSION") == 0 ||
+	if (strcmp(type, "COLLATION") == 0 ||
+		strcmp(type, "CONVERSION") == 0 ||
 		strcmp(type, "DOMAIN") == 0 ||
 		strcmp(type, "TABLE") == 0 ||
 		strcmp(type, "TYPE") == 0 ||
@@ -3029,6 +3067,7 @@ _printTocEntry(ArchiveHandle *AH, TocEntry *te, RestoreOptions *ropt, bool isDat
 	{
 		if (strcmp(te->desc, "AGGREGATE") == 0 ||
 			strcmp(te->desc, "BLOB") == 0 ||
+			strcmp(te->desc, "COLLATION") == 0 ||
 			strcmp(te->desc, "CONVERSION") == 0 ||
 			strcmp(te->desc, "DATABASE") == 0 ||
 			strcmp(te->desc, "DOMAIN") == 0 ||
@@ -3286,18 +3325,20 @@ dumpTimestamp(ArchiveHandle *AH, const char *msg, time_t tim)
  * Main engine for parallel restore.
  *
  * Work is done in three phases.
- * First we process tocEntries until we come to one that is marked
- * SECTION_DATA or SECTION_POST_DATA, in a single connection, just as for a
- * standard restore.  Second we process the remaining non-ACL steps in
- * parallel worker children (threads on Windows, processes on Unix), each of
- * which connects separately to the database.  Finally we process all the ACL
- * entries in a single connection (that happens back in RestoreArchive).
+ * First we process all SECTION_PRE_DATA tocEntries, in a single connection,
+ * just as for a standard restore.	Second we process the remaining non-ACL
+ * steps in parallel worker children (threads on Windows, processes on Unix),
+ * each of which connects separately to the database.  Finally we process all
+ * the ACL entries in a single connection (that happens back in
+ * RestoreArchive).
  */
 static void
 restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate)
 {
 	RestoreOptions *ropt = AH->ropt;
 	int			work_status;
+	int			next_slot;
+	bool		skipped_some;
 	TocEntry	pending_list;
 	TocEntry	ready_list;
 	TocEntry   *next_work_item;
@@ -3306,6 +3347,7 @@ restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate)
 
 	ahlog(AH, 2, "entering restore_toc_entries_parallel\n");
 
+	/* XXX merged */
 	/* we haven't got round to making this work for all archive formats */
 	if (AH->ClonePtr == NULL || AH->ReopenPtr == NULL)
 		die_horribly(AH, modulename, "parallel restore is not supported with this archive file format\n");
@@ -3314,6 +3356,8 @@ restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate)
 	if (AH->version < K_VERS_1_8)
 		die_horribly(AH, modulename, "parallel restore is not supported with archives made by pre-8.0 pg_dump\n");
 
+	slots = (ParallelSlot *) calloc(sizeof(ParallelSlot), n_slots);
+
 	/* Adjust dependency information */
 	fix_dependencies(AH);
 
@@ -3321,16 +3365,35 @@ restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate)
 	 * Do all the early stuff in a single connection in the parent. There's no
 	 * great point in running it in parallel, in fact it will actually run
 	 * faster in a single connection because we avoid all the connection and
-	 * setup overhead.  Also, pg_dump is not currently very good about
-	 * showing all the dependencies of SECTION_PRE_DATA items, so we do not
-	 * risk trying to process them out-of-order.
+	 * setup overhead.	Also, pg_dump is not currently very good about showing
+	 * all the dependencies of SECTION_PRE_DATA items, so we do not risk
+	 * trying to process them out-of-order.
 	 */
+	skipped_some = false;
 	for (next_work_item = AH->toc->next; next_work_item != AH->toc; next_work_item = next_work_item->next)
 	{
-		/* Non-PRE_DATA items are just ignored for now */
-		if (next_work_item->section == SECTION_DATA ||
-			next_work_item->section == SECTION_POST_DATA)
-			continue;
+		/* NB: process-or-continue logic must be the inverse of loop below */
+		if (next_work_item->section != SECTION_PRE_DATA)
+		{
+			/* DATA and POST_DATA items are just ignored for now */
+			if (next_work_item->section == SECTION_DATA ||
+				next_work_item->section == SECTION_POST_DATA)
+			{
+				skipped_some = true;
+				continue;
+			}
+			else
+			{
+				/*
+				 * SECTION_NONE items, such as comments, can be processed now
+				 * if we are still in the PRE_DATA part of the archive.  Once
+				 * we've skipped any items, we have to consider whether the
+				 * comment's dependencies are satisfied, so skip it for now.
+				 */
+				if (skipped_some)
+					continue;
+			}
+		}
 
 		ahlog(AH, 1, "processing item %d %s %s\n",
 			  next_work_item->dumpId,
@@ -3373,17 +3436,32 @@ restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate)
 	 */
 	par_list_header_init(&pending_list);
 	par_list_header_init(&ready_list);
+	skipped_some = false;
 	for (next_work_item = AH->toc->next; next_work_item != AH->toc; next_work_item = next_work_item->next)
 	{
-		/* All PRE_DATA items were dealt with above */
+		/* NB: process-or-continue logic must be the inverse of loop above */
+		if (next_work_item->section == SECTION_PRE_DATA)
+		{
+			/* All PRE_DATA items were dealt with above */
+			continue;
+		}
 		if (next_work_item->section == SECTION_DATA ||
 			next_work_item->section == SECTION_POST_DATA)
 		{
-			if (next_work_item->depCount > 0)
-				par_list_append(&pending_list, next_work_item);
-			else
-				par_list_append(&ready_list, next_work_item);
+			/* set this flag at same point that previous loop did */
+			skipped_some = true;
 		}
+		else
+		{
+			/* SECTION_NONE items must be processed if previous loop didn't */
+			if (!skipped_some)
+				continue;
+		}
+
+		if (next_work_item->depCount > 0)
+			par_list_append(&pending_list, next_work_item);
+		else
+			par_list_append(&ready_list, next_work_item);
 	}
 
 	/*
@@ -3824,8 +3902,8 @@ fix_dependencies(ArchiveHandle *AH)
 
 	/*
 	 * Count the incoming dependencies for each item.  Also, it is possible
-	 * that the dependencies list items that are not in the archive at
-	 * all.  Subtract such items from the depCounts.
+	 * that the dependencies list items that are not in the archive at all.
+	 * Subtract such items from the depCounts.
 	 */
 	for (te = AH->toc->next; te != AH->toc; te = te->next)
 	{
@@ -3841,8 +3919,8 @@ fix_dependencies(ArchiveHandle *AH)
 	}
 
 	/*
-	 * Allocate space for revDeps[] arrays, and reset nRevDeps so we can
-	 * use it as a counter below.
+	 * Allocate space for revDeps[] arrays, and reset nRevDeps so we can use
+	 * it as a counter below.
 	 */
 	for (te = AH->toc->next; te != AH->toc; te = te->next)
 	{
@@ -3852,8 +3930,8 @@ fix_dependencies(ArchiveHandle *AH)
 	}
 
 	/*
-	 * Build the revDeps[] arrays of incoming-dependency dumpIds.  This
-	 * had better agree with the loops above.
+	 * Build the revDeps[] arrays of incoming-dependency dumpIds.  This had
+	 * better agree with the loops above.
 	 */
 	for (te = AH->toc->next; te != AH->toc; te = te->next)
 	{
@@ -4054,10 +4132,7 @@ CloneArchive(ArchiveHandle *AH)
 		die_horribly(AH, modulename, "out of memory\n");
 	memcpy(clone, AH, sizeof(ArchiveHandle));
 
-	/* Handle format-independent fields */
-	clone->pgCopyBuf = createPQExpBuffer();
-	clone->sqlBuf = createPQExpBuffer();
-	clone->sqlparse.tagBuf = NULL;
+	/* Handle format-independent fields ... none at the moment */
 
 	/* The clone will have its own connection, so disregard connection state */
 	clone->connection = NULL;
@@ -4090,11 +4165,7 @@ DeCloneArchive(ArchiveHandle *AH)
 	/* Clear format-specific state */
 	(AH->DeClonePtr) (AH);
 
-	/* Clear state allocated by CloneArchive */
-	destroyPQExpBuffer(AH->pgCopyBuf);
-	destroyPQExpBuffer(AH->sqlBuf);
-	if (AH->sqlparse.tagBuf)
-		destroyPQExpBuffer(AH->sqlparse.tagBuf);
+	/* Clear state allocated by CloneArchive ... none at the moment */
 
 	/* Clear any connection-local state */
 	if (AH->currUser)

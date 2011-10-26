@@ -7,6 +7,8 @@
  *	contrib/pg_upgrade/relfilenode.c
  */
 
+#include "postgres.h"
+
 #include "pg_upgrade.h"
 
 #include "catalog/pg_class.h"
@@ -30,7 +32,7 @@ char		scandir_file_pattern[MAXPGPATH];
  */
 const char *
 transfer_all_new_dbs(DbInfoArr *old_db_arr,
-					 DbInfoArr *new_db_arr, char *old_pgdata, char *new_pgdata)
+				   DbInfoArr *new_db_arr, char *old_pgdata, char *new_pgdata)
 {
 	int			dbnum;
 	const char *msg = NULL;
@@ -39,7 +41,7 @@ transfer_all_new_dbs(DbInfoArr *old_db_arr,
 
 	if (old_db_arr->ndbs != new_db_arr->ndbs)
 		pg_log(PG_FATAL, "old and new clusters have a different number of databases\n");
-	
+
 	for (dbnum = 0; dbnum < old_db_arr->ndbs; dbnum++)
 	{
 		DbInfo	   *old_db = &old_db_arr->dbs[dbnum];
@@ -49,9 +51,9 @@ transfer_all_new_dbs(DbInfoArr *old_db_arr,
 		pageCnvCtx *pageConverter = NULL;
 
 		if (strcmp(old_db->db_name, new_db->db_name) != 0)
-			pg_log(PG_FATAL, "old and new databases have a different names: old \"%s\", new \"%s\"\n",
-				old_db->db_name, new_db->db_name);
-		
+			pg_log(PG_FATAL, "old and new databases have different names: old \"%s\", new \"%s\"\n",
+				   old_db->db_name, new_db->db_name);
+
 		n_maps = 0;
 		mappings = gen_db_file_maps(old_db, new_db, &n_maps, old_pgdata,
 									new_pgdata);
@@ -69,7 +71,9 @@ transfer_all_new_dbs(DbInfoArr *old_db_arr,
 		}
 	}
 
-	prep_status("");			/* in case nothing printed */
+	prep_status(" ");			/* in case nothing printed; pass a space so gcc
+								 * doesn't complain about empty format
+								 * string */
 	check_ok();
 
 	return msg;
@@ -91,9 +95,9 @@ get_pg_database_relfilenode(ClusterInfo *cluster)
 
 	res = executeQueryOrDie(conn,
 							"SELECT c.relname, c.relfilenode "
-							"FROM 	pg_catalog.pg_class c, "
+							"FROM	pg_catalog.pg_class c, "
 							"		pg_catalog.pg_namespace n "
-							"WHERE 	c.relnamespace = n.oid AND "
+							"WHERE	c.relnamespace = n.oid AND "
 							"		n.nspname = 'pg_catalog' AND "
 							"		c.relname = 'pg_database' "
 							"ORDER BY c.relname");
@@ -120,9 +124,15 @@ transfer_single_new_db(pageCnvCtx *pageConverter,
 	int			numFiles = 0;
 	int			mapnum;
 	int			fileno;
-
+	bool		vm_crashsafe_change = false;
+	
 	old_dir[0] = '\0';
 
+	/* Do not copy non-crashsafe vm files for binaries that assume crashsafety */
+	if (old_cluster.controldata.cat_ver < VISIBILITY_MAP_CRASHSAFE_CAT_VER &&
+		new_cluster.controldata.cat_ver >= VISIBILITY_MAP_CRASHSAFE_CAT_VER)
+		vm_crashsafe_change = true;
+	
 	for (mapnum = 0; mapnum < size; mapnum++)
 	{
 		char		old_file[MAXPGPATH];
@@ -168,8 +178,16 @@ transfer_single_new_db(pageCnvCtx *pageConverter,
 
 			for (fileno = 0; fileno < numFiles; fileno++)
 			{
+				char *vm_offset = strstr(namelist[fileno]->d_name, "_vm");
+				bool is_vm_file = false;
+
+				/* Is a visibility map file? (name ends with _vm) */
+				if (vm_offset && strlen(vm_offset) == strlen("_vm"))
+					is_vm_file = true;
+
 				if (strncmp(namelist[fileno]->d_name, scandir_file_pattern,
-					strlen(scandir_file_pattern)) == 0)
+							strlen(scandir_file_pattern)) == 0 &&
+					(!is_vm_file || !vm_crashsafe_change))
 				{
 					snprintf(old_file, sizeof(old_file), "%s/%s", maps[mapnum].old_dir,
 							 namelist[fileno]->d_name);
@@ -178,7 +196,7 @@ transfer_single_new_db(pageCnvCtx *pageConverter,
 
 					unlink(new_file);
 					transfer_relfile(pageConverter, old_file, new_file,
-							  maps[mapnum].nspname, maps[mapnum].relname);
+								 maps[mapnum].nspname, maps[mapnum].relname);
 				}
 			}
 		}
@@ -196,7 +214,7 @@ transfer_single_new_db(pageCnvCtx *pageConverter,
 		for (fileno = 0; fileno < numFiles; fileno++)
 		{
 			if (strncmp(namelist[fileno]->d_name, scandir_file_pattern,
-				strlen(scandir_file_pattern)) == 0)
+						strlen(scandir_file_pattern)) == 0)
 			{
 				snprintf(old_file, sizeof(old_file), "%s/%s", maps[mapnum].old_dir,
 						 namelist[fileno]->d_name);
@@ -205,7 +223,7 @@ transfer_single_new_db(pageCnvCtx *pageConverter,
 
 				unlink(new_file);
 				transfer_relfile(pageConverter, old_file, new_file,
-							  maps[mapnum].nspname, maps[mapnum].relname);
+								 maps[mapnum].nspname, maps[mapnum].relname);
 			}
 		}
 	}
@@ -227,29 +245,29 @@ transfer_single_new_db(pageCnvCtx *pageConverter,
  */
 static void
 transfer_relfile(pageCnvCtx *pageConverter, const char *old_file,
-		 const char *new_file, const char *nspname, const char *relname)
+			  const char *new_file, const char *nspname, const char *relname)
 {
 	const char *msg;
 
 	if ((user_opts.transfer_mode == TRANSFER_MODE_LINK) && (pageConverter != NULL))
-		pg_log(PG_FATAL, "this upgrade requires page-by-page conversion, "
-			   "you must use copy-mode instead of link-mode\n");
+		pg_log(PG_FATAL, "This upgrade requires page-by-page conversion, "
+			   "you must use copy mode instead of link mode.\n");
 
 	if (user_opts.transfer_mode == TRANSFER_MODE_COPY)
 	{
-		pg_log(PG_INFO, "copying %s to %s\n", old_file, new_file);
+		pg_log(PG_INFO, "copying \"%s\" to \"%s\"\n", old_file, new_file);
 
 		if ((msg = copyAndUpdateFile(pageConverter, old_file, new_file, true)) != NULL)
-			pg_log(PG_FATAL, "error while copying %s.%s (%s to %s): %s\n",
+			pg_log(PG_FATAL, "error while copying relation \"%s.%s\" (\"%s\" to \"%s\"): %s\n",
 				   nspname, relname, old_file, new_file, msg);
 	}
 	else
 	{
-		pg_log(PG_INFO, "linking %s to %s\n", old_file, new_file);
+		pg_log(PG_INFO, "linking \"%s\" to \"%s\"\n", old_file, new_file);
 
 		if ((msg = linkAndUpdateFile(pageConverter, old_file, new_file)) != NULL)
 			pg_log(PG_FATAL,
-			   "error while creating link from %s.%s (%s to %s): %s\n",
+				   "error while creating link for relation \"%s.%s\" (\"%s\" to \"%s\"): %s\n",
 				   nspname, relname, old_file, new_file, msg);
 	}
 	return;

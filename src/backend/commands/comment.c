@@ -22,24 +22,11 @@
 #include "catalog/pg_shdescription.h"
 #include "commands/comment.h"
 #include "commands/dbcommands.h"
-#include "libpq/be-fsstubs.h"
 #include "miscadmin.h"
-#include "parser/parse_func.h"
-#include "parser/parse_type.h"
-#include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/rel.h"
 #include "utils/tqual.h"
-
-/*
- * For most object types, the permissions-checking logic is simple enough
- * that it makes sense to just include it in CommentObject().  However, a few
- * object types require something more complex; for those, we define helper
- * functions.
- */
-static void CheckAttributeComment(Relation relation);
-static void CheckCastComment(List *qualname, List *arguments);
 
 
 /*
@@ -51,8 +38,8 @@ static void CheckCastComment(List *qualname, List *arguments);
 void
 CommentObject(CommentStmt *stmt)
 {
-	ObjectAddress	address;
-	Relation		relation;
+	ObjectAddress address;
+	Relation	relation;
 
 	/*
 	 * When loading a dump, we may see a COMMENT ON DATABASE for the old name
@@ -60,12 +47,13 @@ CommentObject(CommentStmt *stmt)
 	 * (which is really pg_restore's fault, but for now we will work around
 	 * the problem here).  Consensus is that the best fix is to treat wrong
 	 * database name as a WARNING not an ERROR; hence, the following special
-	 * case.  (If the length of stmt->objname is not 1, get_object_address will
-	 * throw an error below; that's OK.)
+	 * case.  (If the length of stmt->objname is not 1, get_object_address
+	 * will throw an error below; that's OK.)
 	 */
 	if (stmt->objtype == OBJECT_DATABASE && list_length(stmt->objname) == 1)
 	{
-		char   *database = strVal(linitial(stmt->objname));
+		char	   *database = strVal(linitial(stmt->objname));
+
 		if (!OidIsValid(get_database_oid(database, true)))
 		{
 			ereport(WARNING,
@@ -76,131 +64,42 @@ CommentObject(CommentStmt *stmt)
 	}
 
 	/*
-	 * Translate the parser representation which identifies this object into
-	 * an ObjectAddress. get_object_address() will throw an error if the
-	 * object does not exist, and will also acquire a lock on the target
-     * to guard against concurrent DROP operations.
+	 * Translate the parser representation that identifies this object into an
+	 * ObjectAddress.  get_object_address() will throw an error if the object
+	 * does not exist, and will also acquire a lock on the target to guard
+	 * against concurrent DROP operations.
 	 */
 	address = get_object_address(stmt->objtype, stmt->objname, stmt->objargs,
-								 &relation, ShareUpdateExclusiveLock);
+								 &relation, ShareUpdateExclusiveLock, false);
 
-	/* Privilege and integrity checks. */
+	/* Require ownership of the target object. */
+	check_object_ownership(GetUserId(), stmt->objtype, address,
+						   stmt->objname, stmt->objargs, relation);
+
+	/* Perform other integrity checks as needed. */
 	switch (stmt->objtype)
 	{
-		case OBJECT_INDEX:
-		case OBJECT_SEQUENCE:
-		case OBJECT_TABLE:
-		case OBJECT_VIEW:
-		case OBJECT_FOREIGN_TABLE:
-			if (!pg_class_ownercheck(RelationGetRelid(relation), GetUserId()))
-				aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_CLASS,
-							   RelationGetRelationName(relation));
-			break;
 		case OBJECT_COLUMN:
-			CheckAttributeComment(relation);
-			break;
-		case OBJECT_DATABASE:
-			if (!pg_database_ownercheck(address.objectId, GetUserId()))
-				aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_DATABASE,
-							   strVal(linitial(stmt->objname)));
-			break;
-		case OBJECT_TYPE:
-			if (!pg_type_ownercheck(address.objectId, GetUserId()))
-				aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_TYPE,
-							   format_type_be(address.objectId));
-			break;
-		case OBJECT_AGGREGATE:
-		case OBJECT_FUNCTION:
-			if (!pg_proc_ownercheck(address.objectId, GetUserId()))
-				aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_PROC,
-							   NameListToString(stmt->objname));
-			break;
-		case OBJECT_OPERATOR:
-			if (!pg_oper_ownercheck(address.objectId, GetUserId()))
-				aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_OPER,
-							   NameListToString(stmt->objname));
-			break;
-		case OBJECT_RULE:
-		case OBJECT_TRIGGER:
-		case OBJECT_CONSTRAINT:
-			if (!pg_class_ownercheck(RelationGetRelid(relation), GetUserId()))
-				aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_CLASS,
-							   RelationGetRelationName(relation));
-			break;
-		case OBJECT_SCHEMA:
-			if (!pg_namespace_ownercheck(address.objectId, GetUserId()))
-				aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_NAMESPACE,
-							   strVal(linitial(stmt->objname)));
-			break;
-		case OBJECT_CONVERSION:
-			if (!pg_conversion_ownercheck(address.objectId, GetUserId()))
-				aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_CONVERSION,
-							   NameListToString(stmt->objname));
-			break;
-		case OBJECT_LANGUAGE:
-			if (!superuser())
+
+			/*
+			 * Allow comments only on columns of tables, views, composite
+			 * types, and foreign tables (which are the only relkinds for
+			 * which pg_dump will dump per-column comments).  In particular we
+			 * wish to disallow comments on index columns, because the naming
+			 * of an index's columns may change across PG versions, so dumping
+			 * per-column comments could create reload failures.
+			 */
+			if (relation->rd_rel->relkind != RELKIND_RELATION &&
+				relation->rd_rel->relkind != RELKIND_VIEW &&
+				relation->rd_rel->relkind != RELKIND_COMPOSITE_TYPE &&
+				relation->rd_rel->relkind != RELKIND_FOREIGN_TABLE)
 				ereport(ERROR,
-						(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-					 errmsg("must be superuser to comment on procedural language")));
-			break;
-		case OBJECT_OPCLASS:
-			if (!pg_opclass_ownercheck(address.objectId, GetUserId()))
-				aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_OPCLASS,
-							   NameListToString(stmt->objname));
-			break;
-		case OBJECT_OPFAMILY:
-			if (!pg_opfamily_ownercheck(address.objectId, GetUserId()))
-				aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_OPFAMILY,
-							   NameListToString(stmt->objname));
-			break;
-		case OBJECT_LARGEOBJECT:
-			if (!lo_compat_privileges &&
-				!pg_largeobject_ownercheck(address.objectId, GetUserId()))
-				ereport(ERROR,
-						(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-						 errmsg("must be owner of large object %u",
-							address.objectId)));
-			break;
-		case OBJECT_CAST:
-			CheckCastComment(stmt->objname, stmt->objargs);
-			break;
-		case OBJECT_TABLESPACE:
-			if (!pg_tablespace_ownercheck(address.objectId, GetUserId()))
-				aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_TABLESPACE,
-							   strVal(linitial(stmt->objname)));
-			break;
-		case OBJECT_ROLE:
-			if (!has_privs_of_role(GetUserId(), address.objectId))
-				ereport(ERROR,
-						(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				  errmsg("must be member of role \"%s\" to comment upon it",
-						 strVal(linitial(stmt->objname)))));
-			break;
-		case OBJECT_TSPARSER:
-			if (!superuser())
-				ereport(ERROR,
-						(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-					  errmsg("must be superuser to comment on text search parser")));
-			break;
-		case OBJECT_TSDICTIONARY:
-			if (!pg_ts_dict_ownercheck(address.objectId, GetUserId()))
-				aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_TSDICTIONARY,
-							   NameListToString(stmt->objname));
-			break;
-		case OBJECT_TSTEMPLATE:
-			if (!superuser())
-				ereport(ERROR,
-						(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-					errmsg("must be superuser to comment on text search template")));
-			break;
-		case OBJECT_TSCONFIGURATION:
-			if (!pg_ts_config_ownercheck(address.objectId, GetUserId()))
-				aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_TSCONFIGURATION,
-							   NameListToString(stmt->objname));
+						(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+						 errmsg("\"%s\" is not a table, view, composite type, or foreign table",
+								RelationGetRelationName(relation))));
 			break;
 		default:
-			elog(ERROR, "unrecognized object type: %d",
-				 (int) stmt->objtype);
+			break;
 	}
 
 	/*
@@ -259,11 +158,10 @@ CreateComments(Oid oid, Oid classoid, int32 subid, char *comment)
 			nulls[i] = false;
 			replaces[i] = true;
 		}
-		i = 0;
-		values[i++] = ObjectIdGetDatum(oid);
-		values[i++] = ObjectIdGetDatum(classoid);
-		values[i++] = Int32GetDatum(subid);
-		values[i++] = CStringGetTextDatum(comment);
+		values[Anum_pg_description_objoid - 1] = ObjectIdGetDatum(oid);
+		values[Anum_pg_description_classoid - 1] = ObjectIdGetDatum(classoid);
+		values[Anum_pg_description_objsubid - 1] = Int32GetDatum(subid);
+		values[Anum_pg_description_description - 1] = CStringGetTextDatum(comment);
 	}
 
 	/* Use the index to search for a matching old tuple */
@@ -359,10 +257,9 @@ CreateSharedComments(Oid oid, Oid classoid, char *comment)
 			nulls[i] = false;
 			replaces[i] = true;
 		}
-		i = 0;
-		values[i++] = ObjectIdGetDatum(oid);
-		values[i++] = ObjectIdGetDatum(classoid);
-		values[i++] = CStringGetTextDatum(comment);
+		values[Anum_pg_shdescription_objoid - 1] = ObjectIdGetDatum(oid);
+		values[Anum_pg_shdescription_classoid - 1] = ObjectIdGetDatum(classoid);
+		values[Anum_pg_shdescription_description - 1] = CStringGetTextDatum(comment);
 	}
 
 	/* Use the index to search for a matching old tuple */
@@ -561,64 +458,4 @@ GetComment(Oid oid, Oid classoid, int32 subid)
 	heap_close(description, AccessShareLock);
 
 	return comment;
-}
-
-/*
- * Check whether the user is allowed to comment on an attribute of the
- * specified relation.
- */
-static void
-CheckAttributeComment(Relation relation)
-{
-	if (!pg_class_ownercheck(RelationGetRelid(relation), GetUserId()))
-		aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_CLASS,
-					   RelationGetRelationName(relation));
-
-	/*
-	 * Allow comments only on columns of tables, views, composite types, and
-	 * foreign tables (which are the only relkinds for which pg_dump will dump
-	 * per-column comments).  In particular we wish to disallow comments on
-	 * index columns, because the naming of an index's columns may change
-	 * across PG versions, so dumping per-column comments could create reload
-	 * failures.
-	 */
-	if (relation->rd_rel->relkind != RELKIND_RELATION &&
-		relation->rd_rel->relkind != RELKIND_VIEW &&
-		relation->rd_rel->relkind != RELKIND_COMPOSITE_TYPE &&
-		relation->rd_rel->relkind != RELKIND_FOREIGN_TABLE)
-		ereport(ERROR,
-				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("\"%s\" is not a table, view, composite type, or foreign table",
-						RelationGetRelationName(relation))));
-}
-
-/*
- * Check whether the user is allowed to comment on the specified cast.
- */
-static void
-CheckCastComment(List *qualname, List *arguments)
-{
-	TypeName   *sourcetype;
-	TypeName   *targettype;
-	Oid			sourcetypeid;
-	Oid			targettypeid;
-
-	Assert(list_length(qualname) == 1);
-	sourcetype = (TypeName *) linitial(qualname);
-	Assert(IsA(sourcetype, TypeName));
-	Assert(list_length(arguments) == 1);
-	targettype = (TypeName *) linitial(arguments);
-	Assert(IsA(targettype, TypeName));
-
-	sourcetypeid = typenameTypeId(NULL, sourcetype);
-	targettypeid = typenameTypeId(NULL, targettype);
-
-	/* Permission check */
-	if (!pg_type_ownercheck(sourcetypeid, GetUserId())
-		&& !pg_type_ownercheck(targettypeid, GetUserId()))
-		ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("must be owner of type %s or type %s",
-						format_type_be(sourcetypeid),
-						format_type_be(targettypeid))));
 }

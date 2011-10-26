@@ -7,18 +7,18 @@
  *	contrib/pg_upgrade/file.c
  */
 
+#include "postgres.h"
+
 #include "pg_upgrade.h"
 
 #include <fcntl.h>
 
 
-static int	copy_file(const char *fromfile, const char *tofile, bool force);
 
-#ifdef WIN32
+#ifndef WIN32
+static int	copy_file(const char *fromfile, const char *tofile, bool force);
+#else
 static int	win32_pghardlink(const char *src, const char *dst);
-#endif
-#ifdef NOT_USED
-static int	copy_dir(const char *from, const char *to, bool force);
 #endif
 
 #ifndef HAVE_SCANDIR
@@ -71,12 +71,12 @@ copyAndUpdateFile(pageCnvCtx *pageConverter,
 			const char *msg = NULL;
 
 			if ((src_fd = open(src, O_RDONLY, 0)) < 0)
-				return "can't open source file";
+				return "could not open source file";
 
 			if ((dstfd = open(dst, O_RDWR | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR)) < 0)
 			{
 				close(src_fd);
-				return "can't create destination file";
+				return "could not create destination file";
 			}
 
 			while ((bytesRead = read(src_fd, buf, BLCKSZ)) == BLCKSZ)
@@ -87,7 +87,7 @@ copyAndUpdateFile(pageCnvCtx *pageConverter,
 #endif
 				if (write(dstfd, buf, BLCKSZ) != BLCKSZ)
 				{
-					msg = "can't write new page to destination";
+					msg = "could not write new page to destination";
 					break;
 				}
 			}
@@ -120,7 +120,7 @@ linkAndUpdateFile(pageCnvCtx *pageConverter,
 				  const char *src, const char *dst)
 {
 	if (pageConverter != NULL)
-		return "Can't in-place update this cluster, page-by-page conversion is required";
+		return "Cannot in-place update this cluster, page-by-page conversion is required";
 
 	if (pg_link_file(src, dst) == -1)
 		return getErrorText(errno);
@@ -129,6 +129,7 @@ linkAndUpdateFile(pageCnvCtx *pageConverter,
 }
 
 
+#ifndef WIN32
 static int
 copy_file(const char *srcfile, const char *dstfile, bool force)
 {
@@ -223,6 +224,7 @@ copy_file(const char *srcfile, const char *dstfile, bool force)
 
 	return 1;
 }
+#endif
 
 
 /*
@@ -287,7 +289,7 @@ pg_scandir_internal(const char *dirname,
 	size_t		entrysize;
 
 	if ((dirdesc = opendir(dirname)) == NULL)
-		pg_log(PG_FATAL, "Could not open directory \"%s\": %m\n", dirname);
+		pg_log(PG_FATAL, "could not open directory \"%s\": %s\n", dirname, getErrorText(errno));
 
 	*namelist = NULL;
 
@@ -302,7 +304,10 @@ pg_scandir_internal(const char *dirname,
 						(size_t) ((name_num + 1) * sizeof(struct dirent *)));
 
 			if (*namelist == NULL)
+			{
+				closedir(dirdesc);
 				return -1;
+			}
 
 			entrysize = sizeof(struct dirent) - sizeof(direntry->d_name) +
 				strlen(direntry->d_name) + 1;
@@ -310,7 +315,10 @@ pg_scandir_internal(const char *dirname,
 			(*namelist)[name_num] = (struct dirent *) malloc(entrysize);
 
 			if ((*namelist)[name_num] == NULL)
+			{
+				closedir(dirdesc);
 				return -1;
+			}
 
 			memcpy((*namelist)[name_num], direntry, entrysize);
 
@@ -354,7 +362,7 @@ check_hard_link(void)
 	if (pg_link_file(existing_file, new_link_file) == -1)
 	{
 		pg_log(PG_FATAL,
-			   "Could not create hard link between old and new data directories:  %s\n"
+			   "Could not create hard link between old and new data directories: %s\n"
 			   "In link mode the old and new data directories must be on the same file system volume.\n",
 			   getErrorText(errno));
 	}
@@ -373,99 +381,6 @@ win32_pghardlink(const char *src, const char *dst)
 		return -1;
 	else
 		return 0;
-}
-#endif
-
-
-#ifdef NOT_USED
-/*
- * copy_dir()
- *
- *	Copies either a directory or a single file within a directory.	If the
- *	source argument names a directory, we recursively copy that directory,
- *	otherwise we copy a single file.
- */
-static int
-copy_dir(const char *src, const char *dst, bool force)
-{
-	DIR		   *srcdir;
-	struct dirent *de = NULL;
-	struct stat fst;
-
-	if (src == NULL || dst == NULL)
-		return -1;
-
-	/*
-	 * Try to open the source directory - if it turns out not to be a
-	 * directory, assume that it's a file and copy that instead.
-	 */
-	if ((srcdir = opendir(src)) == NULL)
-	{
-		if (errno == ENOTDIR)
-			return copy_file(src, dst, true);
-		return -1;
-	}
-
-	if (mkdir(dst, S_IRWXU) != 0)
-	{
-		/*
-		 * ignore directory already exist error
-		 */
-		if (errno != EEXIST)
-			return -1;
-	}
-
-	while ((de = readdir(srcdir)) != NULL)
-	{
-		char		src_file[MAXPGPATH];
-		char		dest_file[MAXPGPATH];
-
-		if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
-			continue;
-
-		memset(src_file, 0, sizeof(src_file));
-		memset(dest_file, 0, sizeof(dest_file));
-
-		snprintf(src_file, sizeof(src_file), "%s/%s", src, de->d_name);
-		snprintf(dest_file, sizeof(dest_file), "%s/%s", dst, de->d_name);
-
-		if (stat(src_file, &fst) < 0)
-		{
-			if (srcdir != NULL)
-			{
-				closedir(srcdir);
-				srcdir = NULL;
-			}
-
-			return -1;
-		}
-
-		if (S_ISDIR(fst.st_mode))
-		{
-			/* recurse to handle subdirectories */
-			if (force)
-				copy_dir(src_file, dest_file, true);
-		}
-		else if (S_ISREG(fst.st_mode))
-		{
-			if ((copy_file(src_file, dest_file, 1)) == -1)
-			{
-				if (srcdir != NULL)
-				{
-					closedir(srcdir);
-					srcdir = NULL;
-				}
-				return -1;
-			}
-		}
-	}
-
-	if (srcdir != NULL)
-	{
-		closedir(srcdir);
-		srcdir = NULL;
-	}
-	return 1;
 }
 
 #endif

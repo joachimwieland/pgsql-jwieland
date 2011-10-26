@@ -58,7 +58,7 @@
 #endif
 #include "postgres_ext.h"
 
-#if _MSC_VER >= 1400
+#if _MSC_VER >= 1400 || defined(WIN64)
 #define errcode __msvc_errcode
 #include <crtdefs.h>
 #undef errcode
@@ -773,7 +773,7 @@ typedef NameData *Name;
 extern int
 snprintf(char *str, size_t count, const char *fmt,...)
 /* This extension allows gcc to check the format string */
-__attribute__((format(printf, 3, 4)));
+__attribute__((format(PG_PRINTF_ATTRIBUTE, 3, 4)));
 #endif
 
 #if !HAVE_DECL_VSNPRINTF

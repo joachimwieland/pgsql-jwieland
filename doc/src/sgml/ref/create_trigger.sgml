@@ -22,11 +22,19 @@ PostgreSQL documentation
  <refsynopsisdiv>
 <synopsis>
 CREATE [ CONSTRAINT ] TRIGGER <replaceable class="PARAMETER">name</replaceable> { BEFORE | AFTER | INSTEAD OF } { <replaceable class="PARAMETER">event</replaceable> [ OR ... ] }
-    ON <replaceable class="PARAMETER">table</replaceable> [ FOR [ EACH ] { ROW | STATEMENT } ]
+    ON <replaceable class="PARAMETER">table</replaceable>
     [ FROM <replaceable class="parameter">referenced_table_name</replaceable> ]
     { NOT DEFERRABLE | [ DEFERRABLE ] { INITIALLY IMMEDIATE | INITIALLY DEFERRED } }
+    [ FOR [ EACH ] { ROW | STATEMENT } ]
     [ WHEN ( <replaceable class="parameter">condition</replaceable> ) ]
     EXECUTE PROCEDURE <replaceable class="PARAMETER">function_name</replaceable> ( <replaceable class="PARAMETER">arguments</replaceable> )
+
+<phrase>where <replaceable class="parameter">event</replaceable> can be one of:</phrase>
+
+    INSERT
+    UPDATE [ OF <replaceable class="parameter">column_name</replaceable> [, ... ] ]
+    DELETE
+    TRUNCATE
 </synopsis>
  </refsynopsisdiv>
 
@@ -211,24 +219,23 @@ CREATE [ CONSTRAINT ] TRIGGER <replaceable class="PARAMETER">name</replaceable> 
     <term><replaceable class="parameter">event</replaceable></term>
     <listitem>
      <para>
-      One of <command>INSERT</command>, <command>UPDATE</command>,
-      <command>DELETE</command>, or <command>TRUNCATE</command>;
+      One of <literal>INSERT</literal>, <literal>UPDATE</literal>,
+      <literal>DELETE</literal>, or <literal>TRUNCATE</literal>;
       this specifies the event that will fire the trigger. Multiple
       events can be specified using <literal>OR</literal>.
      </para>
 
      <para>
-      For <command>UPDATE</command> triggers, it is possible to
+      For <literal>UPDATE</literal> events, it is possible to
       specify a list of columns using this syntax:
 <synopsis>
 UPDATE OF <replaceable>column_name1</replaceable> [, <replaceable>column_name2</replaceable> ... ]
 </synopsis>
       The trigger will only fire if at least one of the listed columns
-      is mentioned as a target of the update.
+      is mentioned as a target of the <command>UPDATE</> command.
      </para>
 
-     <para>
-      <literal>UPDATE INSTEAD OF</> triggers do not support lists of columns.
+     <para><literal>INSTEAD OF UPDATE</> events do not support lists of columns.
      </para>
     </listitem>
    </varlistentry>
@@ -303,8 +310,7 @@ UPDATE OF <replaceable>column_name1</replaceable> [, <replaceable>column_name2</
       and <literal>DELETE</> triggers cannot refer to <literal>NEW</>.
      </para>
 
-     <para>
-      <literal>INSTEAD OF</> triggers do not support <literal>WHEN</>
+     <para><literal>INSTEAD OF</> triggers do not support <literal>WHEN</>
       conditions.
      </para>
 
@@ -364,8 +370,8 @@ UPDATE OF <replaceable>column_name1</replaceable> [, <replaceable>column_name2</
   </para>
 
   <para>
-   A column-specific trigger (<literal>FOR UPDATE OF
-   <replaceable>column_name</replaceable></literal>) will fire when any
+   A column-specific trigger (one defined using the <literal>UPDATE OF
+   <replaceable>column_name</replaceable></literal> syntax) will fire when any
    of its columns are listed as targets in the <command>UPDATE</>
    command's <literal>SET</> list.  It is possible for a column's value
    to change even when the trigger is not fired, because changes made to the
@@ -494,8 +500,7 @@ CREATE TRIGGER view_insert
     </listitem>
 
     <listitem>
-     <para>
-      <productname>PostgreSQL</productname> only allows the execution
+     <para><productname>PostgreSQL</productname> only allows the execution
       of a user-defined function for the triggered action.  The standard
       allows the execution of a number of other SQL commands, such as
       <command>CREATE TABLE</command>, as the triggered action.  This
@@ -518,8 +523,8 @@ CREATE TRIGGER view_insert
    deletes fire <emphasis>after</> the cascaded <literal>DELETE</> completes.
    The <productname>PostgreSQL</productname> behavior is for <literal>BEFORE
    DELETE</literal> to always fire before the delete action, even a cascading
-   one.  This is considered more consistent.  There is also unpredictable
-   behavior when <literal>BEFORE</literal> triggers modify rows or prevent
+   one.  This is considered more consistent.  There is also nonstandard
+   behavior if <literal>BEFORE</literal> triggers modify rows or prevent
    updates during an update that is caused by a referential action.  This can
    lead to constraint violations or stored data that does not honor the
    referential constraint.

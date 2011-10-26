@@ -33,6 +33,7 @@
 
 #include "postgres_fe.h"
 
+#include "getopt_long.h"
 #include "libpq-fe.h"
 #include "libpq/pqsignal.h"
 #include "portability/instr_time.h"
@@ -43,10 +44,6 @@
 #include <sys/time.h>
 #include <unistd.h>
 #endif   /* ! WIN32 */
-
-#ifdef HAVE_GETOPT_H
-#include <getopt.h>
-#endif
 
 #ifdef HAVE_SYS_SELECT_H
 #include <sys/select.h>
@@ -69,7 +66,7 @@
 typedef struct win32_pthread *pthread_t;
 typedef int pthread_attr_t;
 
-static int	pthread_create(pthread_t *thread, pthread_attr_t *attr, void *(*start_routine) (void *), void *arg);
+static int	pthread_create(pthread_t *thread, pthread_attr_t * attr, void *(*start_routine) (void *), void *arg);
 static int	pthread_join(pthread_t th, void **thread_return);
 #elif defined(ENABLE_THREAD_SAFETY)
 /* Use platform-dependent pthread capability */
@@ -87,7 +84,7 @@ static int	pthread_join(pthread_t th, void **thread_return);
 typedef struct fork_pthread *pthread_t;
 typedef int pthread_attr_t;
 
-static int	pthread_create(pthread_t *thread, pthread_attr_t *attr, void *(*start_routine) (void *), void *arg);
+static int	pthread_create(pthread_t *thread, pthread_attr_t * attr, void *(*start_routine) (void *), void *arg);
 static int	pthread_join(pthread_t th, void **thread_return);
 #endif
 
@@ -121,6 +118,17 @@ int			scale = 1;
  * space during inserts and leave 10 percent free.
  */
 int			fillfactor = 100;
+
+/*
+ * use unlogged tables?
+ */
+int			unlogged_tables = 0;
+
+/*
+ * tablespace selection
+ */
+char	   *tablespace = NULL;
+char	   *index_tablespace = NULL;
 
 /*
  * end of configurable parameters
@@ -190,6 +198,7 @@ typedef struct
 	instr_time	start_time;		/* thread start time */
 	instr_time *exec_elapsed;	/* time spent executing cmds (per Command) */
 	int		   *exec_count;		/* number of cmd executions (per Command) */
+	unsigned short random_state[3]; /* separate randomness for each thread */
 } TState;
 
 #define INVALID_THREAD		((pthread_t) 0)
@@ -334,6 +343,12 @@ usage(const char *progname)
 		   "  -i           invokes initialization mode\n"
 		   "  -F NUM       fill factor\n"
 		   "  -s NUM       scaling factor\n"
+		   "  --index-tablespace=TABLESPACE\n"
+		   "               create indexes in the specified tablespace\n"
+		   "  --tablespace=TABLESPACE\n"
+		   "               create tables in the specified tablespace\n"
+		   "  --unlogged-tables\n"
+		   "               create tables as unlogged tables\n"
 		   "\nBenchmarking options:\n"
 		"  -c NUM       number of concurrent database clients (default: 1)\n"
 		   "  -C           establish new connection for each transaction\n"
@@ -341,12 +356,12 @@ usage(const char *progname)
 		   "               define variable for use by custom script\n"
 		   "  -f FILENAME  read transaction script from FILENAME\n"
 		   "  -j NUM       number of threads (default: 1)\n"
-		   "  -r           report average latency per command\n"
 		   "  -l           write transaction times to log file\n"
 		   "  -M {simple|extended|prepared}\n"
 		   "               protocol for submitting queries to server (default: simple)\n"
 		   "  -n           do not run VACUUM before tests\n"
 		   "  -N           do not update tables \"pgbench_tellers\" and \"pgbench_branches\"\n"
+		   "  -r           report average latency per command\n"
 		   "  -s NUM       report this scale factor in output\n"
 		   "  -S           perform SELECT-only transactions\n"
 	 "  -t NUM       number of transactions each client runs (default: 10)\n"
@@ -366,13 +381,18 @@ usage(const char *progname)
 
 /* random number generator: uniform distribution from min to max inclusive */
 static int
-getrand(int min, int max)
+getrand(TState *thread, int min, int max)
 {
 	/*
 	 * Odd coding is so that min and max have approximately the same chance of
 	 * being selected as do numbers between them.
+	 *
+	 * pg_erand48() is thread-safe and concurrent, which is why we use it
+	 * rather than random(), which in glibc is non-reentrant, and therefore
+	 * protected by a mutex, and therefore a bottleneck on machines with many
+	 * CPUs.
 	 */
-	return min + (int) (((max - min + 1) * (double) random()) / (MAX_RANDOM_VALUE + 1.0));
+	return min + (int) ((max - min + 1) * pg_erand48(thread->random_state));
 }
 
 /* call PQexec() and exit() on failure */
@@ -817,7 +837,7 @@ top:
 
 			INSTR_TIME_SET_CURRENT(now);
 			INSTR_TIME_ACCUM_DIFF(thread->exec_elapsed[cnum],
-			                      now, st->stmt_begin);
+								  now, st->stmt_begin);
 			thread->exec_count[cnum]++;
 		}
 
@@ -850,8 +870,8 @@ top:
 		if (commands[st->state]->type == SQL_COMMAND)
 		{
 			/*
-			 * Read and discard the query result; note this is not included
-			 * in the statement latency numbers.
+			 * Read and discard the query result; note this is not included in
+			 * the statement latency numbers.
 			 */
 			res = PQgetResult(st->con);
 			switch (PQresultStatus(res))
@@ -887,7 +907,7 @@ top:
 		if (commands[st->state] == NULL)
 		{
 			st->state = 0;
-			st->use_file = getrand(0, num_files - 1);
+			st->use_file = getrand(thread, 0, num_files - 1);
 			commands = sql_files[st->use_file];
 		}
 	}
@@ -1046,17 +1066,31 @@ top:
 			else
 				max = atoi(argv[3]);
 
-			if (max < min || max > MAX_RANDOM_VALUE)
+			if (max < min)
 			{
-				fprintf(stderr, "%s: invalid maximum number %d\n", argv[0], max);
+				fprintf(stderr, "%s: maximum is less than minimum\n", argv[0]);
+				st->ecnt++;
+				return true;
+			}
+
+			/*
+			 * getrand() neeeds to be able to subtract max from min and add
+			 * one the result without overflowing.  Since we know max > min,
+			 * we can detect overflow just by checking for a negative result.
+			 * But we must check both that the subtraction doesn't overflow,
+			 * and that adding one to the result doesn't overflow either.
+			 */
+			if (max - min < 0 || (max - min) + 1 < 0)
+			{
+				fprintf(stderr, "%s: range too large\n", argv[0]);
 				st->ecnt++;
 				return true;
 			}
 
 #ifdef DEBUG
-			printf("min: %d max: %d random: %d\n", min, max, getrand(min, max));
+			printf("min: %d max: %d random: %d\n", min, max, getrand(thread, min, max));
 #endif
-			snprintf(res, sizeof(res), "%d", getrand(min, max));
+			snprintf(res, sizeof(res), "%d", getrand(thread, min, max));
 
 			if (!putVariable(st, argv[0], argv[1], res))
 			{
@@ -1233,15 +1267,32 @@ init(void)
 	 * versions.  Since pgbench has never pretended to be fully TPC-B
 	 * compliant anyway, we stick with the historical behavior.
 	 */
-	static char *DDLs[] = {
-		"drop table if exists pgbench_branches",
-		"create table pgbench_branches(bid int not null,bbalance int,filler char(88)) with (fillfactor=%d)",
-		"drop table if exists pgbench_tellers",
-		"create table pgbench_tellers(tid int not null,bid int,tbalance int,filler char(84)) with (fillfactor=%d)",
-		"drop table if exists pgbench_accounts",
-		"create table pgbench_accounts(aid int not null,bid int,abalance int,filler char(84)) with (fillfactor=%d)",
-		"drop table if exists pgbench_history",
-		"create table pgbench_history(tid int,bid int,aid int,delta int,mtime timestamp,filler char(22))"
+	struct ddlinfo {
+		char *table;
+		char *cols;
+		int declare_fillfactor;
+	};
+	struct ddlinfo DDLs[] = {
+		{
+			"pgbench_branches",
+			"bid int not null,bbalance int,filler char(88)",
+			1
+		},
+		{
+			"pgbench_tellers",
+			"tid int not null,bid int,tbalance int,filler char(84)",
+			1
+		},
+		{
+			"pgbench_accounts",
+			"aid int not null,bid int,abalance int,filler char(84)",
+			1
+		},
+		{
+			"pgbench_history",
+			"tid int,bid int,aid int,delta int,mtime timestamp,filler char(22)",
+			0
+		}
 	};
 	static char *DDLAFTERs[] = {
 		"alter table pgbench_branches add primary key (bid)",
@@ -1259,21 +1310,33 @@ init(void)
 
 	for (i = 0; i < lengthof(DDLs); i++)
 	{
-		/*
-		 * set fillfactor for branches, tellers and accounts tables
-		 */
-		if ((strstr(DDLs[i], "create table pgbench_branches") == DDLs[i]) ||
-			(strstr(DDLs[i], "create table pgbench_tellers") == DDLs[i]) ||
-			(strstr(DDLs[i], "create table pgbench_accounts") == DDLs[i]))
-		{
-			char		ddl_stmt[128];
+		char		opts[256];
+		char		buffer[256];
+		struct ddlinfo *ddl = &DDLs[i];
 
-			snprintf(ddl_stmt, 128, DDLs[i], fillfactor);
-			executeStatement(con, ddl_stmt);
-			continue;
+		/* Remove old table, if it exists. */
+		snprintf(buffer, 256, "drop table if exists %s", ddl->table);
+		executeStatement(con, buffer);
+
+		/* Construct new create table statement. */
+		opts[0] = '\0';
+		if (ddl->declare_fillfactor)
+			snprintf(opts+strlen(opts), 256-strlen(opts),
+				" with (fillfactor=%d)", fillfactor);
+		if (tablespace != NULL)
+		{
+			char *escape_tablespace;
+			escape_tablespace = PQescapeIdentifier(con, tablespace,
+												   strlen(tablespace));
+			snprintf(opts+strlen(opts), 256-strlen(opts),
+				" tablespace %s", escape_tablespace);
+			PQfreemem(escape_tablespace);
 		}
-		else
-			executeStatement(con, DDLs[i]);
+		snprintf(buffer, 256, "create%s table %s(%s)%s",
+				 unlogged_tables ? " unlogged" : "",
+				 ddl->table, ddl->cols, opts);
+
+		executeStatement(con, buffer);
 	}
 
 	executeStatement(con, "begin");
@@ -1340,7 +1403,23 @@ init(void)
 	 */
 	fprintf(stderr, "set primary key...\n");
 	for (i = 0; i < lengthof(DDLAFTERs); i++)
-		executeStatement(con, DDLAFTERs[i]);
+	{
+		char	buffer[256];
+
+		strncpy(buffer, DDLAFTERs[i], 256);
+
+		if (index_tablespace != NULL)
+		{
+			char *escape_tablespace;
+			escape_tablespace = PQescapeIdentifier(con, index_tablespace,
+												   strlen(index_tablespace));
+			snprintf(buffer+strlen(buffer), 256-strlen(buffer),
+				" using index tablespace %s", escape_tablespace);
+			PQfreemem(escape_tablespace);
+		}
+
+		executeStatement(con, buffer);
+	}
 
 	/* vacuum */
 	fprintf(stderr, "vacuum...");
@@ -1716,16 +1795,16 @@ printResults(int ttype, int normal_xacts, int nclients,
 
 		for (i = 0; i < num_files; i++)
 		{
-			Command	  **commands;
+			Command   **commands;
 
 			if (num_files > 1)
-				printf("statement latencies in milliseconds, file %d:\n", i+1);
+				printf("statement latencies in milliseconds, file %d:\n", i + 1);
 			else
 				printf("statement latencies in milliseconds:\n");
 
 			for (commands = sql_files[i]; *commands != NULL; commands++)
 			{
-				Command	   *command = *commands;
+				Command    *command = *commands;
 				int			cnum = command->command_num;
 				double		total_time;
 				instr_time	total_exec_elapsed;
@@ -1737,7 +1816,7 @@ printResults(int ttype, int normal_xacts, int nclients,
 				total_exec_count = 0;
 				for (t = 0; t < nthreads; t++)
 				{
-					TState *thread = &threads[t];
+					TState	   *thread = &threads[t];
 
 					INSTR_TIME_ADD(total_exec_elapsed,
 								   thread->exec_elapsed[cnum]);
@@ -1767,6 +1846,7 @@ main(int argc, char **argv)
 	int			do_vacuum_accounts = 0; /* do vacuum accounts before testing? */
 	int			ttype = 0;		/* transaction type. 0: TPC-B, 1: SELECT only,
 								 * 2: skip update of branches and tellers */
+	int			optindex;
 	char	   *filename = NULL;
 	bool		scale_given = false;
 
@@ -1779,6 +1859,13 @@ main(int argc, char **argv)
 	int			total_xacts;
 
 	int			i;
+
+	static struct option long_options[] = {
+			{"index-tablespace", required_argument, NULL, 3},
+			{"tablespace", required_argument, NULL, 2},
+			{"unlogged-tables", no_argument, &unlogged_tables, 1},
+			{NULL, 0, NULL, 0}
+	};
 
 #ifdef HAVE_GETRLIMIT
 	struct rlimit rlim;
@@ -1823,7 +1910,7 @@ main(int argc, char **argv)
 	state = (CState *) xmalloc(sizeof(CState));
 	memset(state, 0, sizeof(CState));
 
-	while ((c = getopt(argc, argv, "ih:nvp:dSNc:j:Crs:t:T:U:lf:D:F:M:")) != -1)
+	while ((c = getopt_long(argc, argv, "ih:nvp:dSNc:j:Crs:t:T:U:lf:D:F:M:", long_options, &optindex)) != -1)
 	{
 		switch (c)
 		{
@@ -1975,6 +2062,15 @@ main(int argc, char **argv)
 					exit(1);
 				}
 				break;
+			case 0:
+				/* This covers long options which take no argument. */
+				break;
+			case 2:							/* tablespace */
+				tablespace = optarg;
+				break;
+			case 3:							/* index-tablespace */
+				index_tablespace = optarg;
+				break;
 			default:
 				fprintf(stderr, _("Try \"%s --help\" for more information.\n"), progname);
 				exit(1);
@@ -2014,9 +2110,9 @@ main(int argc, char **argv)
 	 * is_latencies only works with multiple threads in thread-based
 	 * implementations, not fork-based ones, because it supposes that the
 	 * parent can see changes made to the per-thread execution stats by child
-	 * threads.  It seems useful enough to accept despite this limitation,
-	 * but perhaps we should FIXME someday (by passing the stats data back
-	 * up through the parent-to-child pipes).
+	 * threads.  It seems useful enough to accept despite this limitation, but
+	 * perhaps we should FIXME someday (by passing the stats data back up
+	 * through the parent-to-child pipes).
 	 */
 #ifndef ENABLE_THREAD_SAFETY
 	if (is_latencies && nthreads > 1)
@@ -2161,16 +2257,19 @@ main(int argc, char **argv)
 	threads = (TState *) xmalloc(sizeof(TState) * nthreads);
 	for (i = 0; i < nthreads; i++)
 	{
-		TState *thread = &threads[i];
+		TState	   *thread = &threads[i];
 
 		thread->tid = i;
 		thread->state = &state[nclients / nthreads * i];
 		thread->nstate = nclients / nthreads;
+		thread->random_state[0] = random();
+		thread->random_state[1] = random();
+		thread->random_state[2] = random();
 
 		if (is_latencies)
 		{
 			/* Reserve memory for the thread to store per-command latencies */
-			int		t;
+			int			t;
 
 			thread->exec_elapsed = (instr_time *)
 				xmalloc(sizeof(instr_time) * num_commands);
@@ -2200,7 +2299,7 @@ main(int argc, char **argv)
 	/* start threads */
 	for (i = 0; i < nthreads; i++)
 	{
-		TState *thread = &threads[i];
+		TState	   *thread = &threads[i];
 
 		INSTR_TIME_SET_CURRENT(thread->start_time);
 
@@ -2308,7 +2407,7 @@ threadRun(void *arg)
 		Command   **commands = sql_files[st->use_file];
 		int			prev_ecnt = st->ecnt;
 
-		st->use_file = getrand(0, num_files - 1);
+		st->use_file = getrand(thread, 0, num_files - 1);
 		if (!doCustom(thread, st, &result->conn_time, logfile))
 			remains--;			/* I've aborted */
 
@@ -2472,13 +2571,12 @@ typedef struct fork_pthread
 
 static int
 pthread_create(pthread_t *thread,
-			   pthread_attr_t *attr,
+			   pthread_attr_t * attr,
 			   void *(*start_routine) (void *),
 			   void *arg)
 {
 	fork_pthread *th;
 	void	   *ret;
-	instr_time	start_time;
 
 	th = (fork_pthread *) xmalloc(sizeof(fork_pthread));
 	if (pipe(th->pipes) < 0)
@@ -2506,17 +2604,6 @@ pthread_create(pthread_t *thread,
 	/* set alarm again because the child does not inherit timers */
 	if (duration > 0)
 		setalarm(duration);
-
-	/*
-	 * Set a different random seed in each child process.  Otherwise they all
-	 * inherit the parent's state and generate the same "random" sequence. (In
-	 * the threaded case, the different threads will obtain subsets of the
-	 * output of a single random() sequence, which should be okay for our
-	 * purposes.)
-	 */
-	INSTR_TIME_SET_CURRENT(start_time);
-	srandom(((unsigned int) INSTR_TIME_GET_MICROSEC(start_time)) +
-			((unsigned int) getpid()));
 
 	ret = start_routine(arg);
 	write(th->pipes[1], ret, sizeof(TResult));
@@ -2586,7 +2673,7 @@ typedef struct win32_pthread
 	void	   *(*routine) (void *);
 	void	   *arg;
 	void	   *result;
-}	win32_pthread;
+} win32_pthread;
 
 static unsigned __stdcall
 win32_pthread_run(void *arg)
@@ -2600,7 +2687,7 @@ win32_pthread_run(void *arg)
 
 static int
 pthread_create(pthread_t *thread,
-			   pthread_attr_t *attr,
+			   pthread_attr_t * attr,
 			   void *(*start_routine) (void *),
 			   void *arg)
 {

@@ -19,7 +19,7 @@
 #include "libpq-fe.h"
 #include "pqexpbuffer.h"
 
-extern int quote_all_identifiers;
+extern int	quote_all_identifiers;
 
 extern void init_parallel_dump_utils(void);
 extern const char *fmtId(const char *identifier);
@@ -48,5 +48,9 @@ extern bool processSQLNamePattern(PGconn *conn, PQExpBuffer buf,
 					  bool have_where, bool force_escape,
 					  const char *schemavar, const char *namevar,
 					  const char *altnamevar, const char *visibilityrule);
+extern void buildShSecLabelQuery(PGconn *conn, const char *catalog_name,
+					 uint32 objectId, PQExpBuffer sql);
+extern void emitShSecLabels(PGconn *conn, PGresult *res,
+				PQExpBuffer buffer, const char *target, const char *objname);
 
 #endif   /* DUMPUTILS_H */

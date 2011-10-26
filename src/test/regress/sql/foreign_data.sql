@@ -21,10 +21,11 @@ CREATE ROLE regress_test_indirect;
 CREATE ROLE unprivileged_role;
 
 CREATE FOREIGN DATA WRAPPER dummy;
+COMMENT ON FOREIGN DATA WRAPPER dummy IS 'useless';
 CREATE FOREIGN DATA WRAPPER postgresql VALIDATOR postgresql_fdw_validator;
 
 -- At this point we should have 2 built-in wrappers and no servers.
-SELECT fdwname, fdwvalidator::regproc, fdwoptions FROM pg_foreign_data_wrapper ORDER BY 1, 2, 3;
+SELECT fdwname, fdwhandler::regproc, fdwvalidator::regproc, fdwoptions FROM pg_foreign_data_wrapper ORDER BY 1, 2, 3;
 SELECT srvname, srvoptions FROM pg_foreign_server;
 SELECT * FROM pg_user_mapping;
 
@@ -99,6 +100,7 @@ DROP ROLE regress_test_role_super;
 
 CREATE FOREIGN DATA WRAPPER foo;
 CREATE SERVER s1 FOREIGN DATA WRAPPER foo;
+COMMENT ON SERVER s1 IS 'foreign server';
 CREATE USER MAPPING FOR current_user SERVER s1;
 \dew+
 \des+
@@ -114,7 +116,7 @@ DROP FOREIGN DATA WRAPPER foo CASCADE;
 
 -- exercise CREATE SERVER
 CREATE SERVER s1 FOREIGN DATA WRAPPER foo;                  -- ERROR
-CREATE FOREIGN DATA WRAPPER foo OPTIONS (test_wrapper 'true');
+CREATE FOREIGN DATA WRAPPER foo OPTIONS ("test wrapper" 'true');
 CREATE SERVER s1 FOREIGN DATA WRAPPER foo;
 CREATE SERVER s1 FOREIGN DATA WRAPPER foo;                  -- ERROR
 CREATE SERVER s2 FOREIGN DATA WRAPPER foo OPTIONS (host 'a', dbname 'b');
@@ -152,7 +154,7 @@ ALTER SERVER s0;                                            -- ERROR
 ALTER SERVER s0 OPTIONS (a '1');                            -- ERROR
 ALTER SERVER s1 VERSION '1.0' OPTIONS (servername 's1');
 ALTER SERVER s2 VERSION '1.1';
-ALTER SERVER s3 OPTIONS (tnsname 'orcl', port '1521');
+ALTER SERVER s3 OPTIONS ("tns name" 'orcl', port '1521');
 GRANT USAGE ON FOREIGN SERVER s1 TO regress_test_role;
 GRANT USAGE ON FOREIGN SERVER s6 TO regress_test_role2 WITH GRANT OPTION;
 \des+
@@ -208,7 +210,7 @@ CREATE USER MAPPING FOR regress_test_missing_role SERVER s1;  -- ERROR
 CREATE USER MAPPING FOR current_user SERVER s1;             -- ERROR
 CREATE USER MAPPING FOR current_user SERVER s4;
 CREATE USER MAPPING FOR user SERVER s4;                     -- ERROR duplicate
-CREATE USER MAPPING FOR public SERVER s4 OPTIONS (mapping 'is public');
+CREATE USER MAPPING FOR public SERVER s4 OPTIONS ("this mapping" 'is public');
 CREATE USER MAPPING FOR user SERVER s8 OPTIONS (username 'test', password 'secret');    -- ERROR
 CREATE USER MAPPING FOR user SERVER s8 OPTIONS (user 'test', password 'secret');
 ALTER SERVER s5 OWNER TO regress_test_role;
@@ -256,21 +258,23 @@ DROP SERVER s7;
 
 -- CREATE FOREIGN TABLE
 CREATE SCHEMA foreign_schema;
-CREATE SERVER sc FOREIGN DATA WRAPPER dummy;
+CREATE SERVER s0 FOREIGN DATA WRAPPER dummy;
 CREATE FOREIGN TABLE ft1 ();                                    -- ERROR
 CREATE FOREIGN TABLE ft1 () SERVER no_server;                   -- ERROR
 CREATE FOREIGN TABLE ft1 (c1 serial) SERVER sc;                 -- ERROR
-CREATE FOREIGN TABLE ft1 () SERVER sc WITH OIDS;                -- ERROR
+CREATE FOREIGN TABLE ft1 () SERVER s0 WITH OIDS;                -- ERROR
 CREATE FOREIGN TABLE ft1 (
-	c1 integer NOT NULL,
-	c2 text,
+	c1 integer OPTIONS ("param 1" 'val1') NOT NULL,
+	c2 text OPTIONS (param2 'val2', param3 'val3'),
 	c3 date
-) SERVER sc OPTIONS (delimiter ',', quote '"');
+) SERVER s0 OPTIONS (delimiter ',', quote '"', "be quoted" 'value');
 COMMENT ON FOREIGN TABLE ft1 IS 'ft1';
 COMMENT ON COLUMN ft1.c1 IS 'ft1.c1';
 \d+ ft1
 \det+
 CREATE INDEX id_ft1_c2 ON ft1 (c2);                             -- ERROR
+SELECT * FROM ft1;                                              -- ERROR
+EXPLAIN SELECT * FROM ft1;                                      -- ERROR
 
 -- ALTER FOREIGN TABLE
 COMMENT ON FOREIGN TABLE ft1 IS 'foreign table';
@@ -284,16 +288,25 @@ ALTER FOREIGN TABLE ft1 ADD COLUMN c6 integer;
 ALTER FOREIGN TABLE ft1 ADD COLUMN c7 integer NOT NULL;
 ALTER FOREIGN TABLE ft1 ADD COLUMN c8 integer;
 ALTER FOREIGN TABLE ft1 ADD COLUMN c9 integer;
-ALTER FOREIGN TABLE ft1 ADD COLUMN c10 integer;
+ALTER FOREIGN TABLE ft1 ADD COLUMN c10 integer OPTIONS (p1 'v1');
 
 ALTER FOREIGN TABLE ft1 ALTER COLUMN c4 SET DEFAULT 0;          -- ERROR
 ALTER FOREIGN TABLE ft1 ALTER COLUMN c5 DROP DEFAULT;           -- ERROR
 ALTER FOREIGN TABLE ft1 ALTER COLUMN c6 SET NOT NULL;
 ALTER FOREIGN TABLE ft1 ALTER COLUMN c7 DROP NOT NULL;
-ALTER FOREIGN TABLE ft1 ALTER COLUMN c8 TYPE char(10) using '0'; -- ERROR
+ALTER FOREIGN TABLE ft1 ALTER COLUMN c8 TYPE char(10) USING '0'; -- ERROR
 ALTER FOREIGN TABLE ft1 ALTER COLUMN c8 TYPE char(10);
 ALTER FOREIGN TABLE ft1 ALTER COLUMN c8 SET DATA TYPE text;
-ALTER FOREIGN TABLE ft1 ADD CONSTRAINT ft1_c9_check CHECK (c9 < 0);
+ALTER FOREIGN TABLE ft1 ALTER COLUMN xmin OPTIONS (ADD p1 'v1'); -- ERROR
+ALTER FOREIGN TABLE ft1 ALTER COLUMN c7 OPTIONS (ADD p1 'v1', ADD p2 'v2'),
+                        ALTER COLUMN c8 OPTIONS (ADD p1 'v1', ADD p2 'v2');
+ALTER FOREIGN TABLE ft1 ALTER COLUMN c8 OPTIONS (SET p2 'V2', DROP p1);
+\d+ ft1
+-- can't change the column type if it's used elsewhere
+CREATE TABLE use_ft1_column_type (x ft1);
+ALTER FOREIGN TABLE ft1 ALTER COLUMN c8 SET DATA TYPE integer;	-- ERROR
+DROP TABLE use_ft1_column_type;
+ALTER FOREIGN TABLE ft1 ADD CONSTRAINT ft1_c9_check CHECK (c9 < 0); -- ERROR
 ALTER FOREIGN TABLE ft1 DROP CONSTRAINT no_const;               -- ERROR
 ALTER FOREIGN TABLE ft1 DROP CONSTRAINT IF EXISTS no_const;
 ALTER FOREIGN TABLE ft1 DROP CONSTRAINT ft1_c1_check;
@@ -435,7 +448,11 @@ DROP SERVER s5 CASCADE;
 DROP SERVER t1 CASCADE;
 DROP SERVER t2;
 DROP USER MAPPING FOR regress_test_role SERVER s6;
+-- This test causes some order dependent cascade detail output,
+-- so switch to terse mode for it. 
+\set VERBOSITY terse
 DROP FOREIGN DATA WRAPPER foo CASCADE;
+\set VERBOSITY default
 DROP SERVER s8 CASCADE;
 DROP ROLE regress_test_indirect;
 DROP ROLE regress_test_role;
@@ -449,6 +466,6 @@ DROP FOREIGN DATA WRAPPER dummy CASCADE;
 DROP ROLE foreign_data_user;
 
 -- At this point we should have no wrappers, no servers, and no mappings.
-SELECT fdwname, fdwvalidator, fdwoptions FROM pg_foreign_data_wrapper;
+SELECT fdwname, fdwhandler, fdwvalidator, fdwoptions FROM pg_foreign_data_wrapper;
 SELECT srvname, srvoptions FROM pg_foreign_server;
 SELECT * FROM pg_user_mapping;

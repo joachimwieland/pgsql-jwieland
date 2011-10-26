@@ -1,6 +1,8 @@
 /*
  * contrib/btree_gist/btree_int2.c
  */
+#include "postgres.h"
+
 #include "btree_gist.h"
 #include "btree_utils_num.h"
 
@@ -17,6 +19,7 @@ PG_FUNCTION_INFO_V1(gbt_int2_compress);
 PG_FUNCTION_INFO_V1(gbt_int2_union);
 PG_FUNCTION_INFO_V1(gbt_int2_picksplit);
 PG_FUNCTION_INFO_V1(gbt_int2_consistent);
+PG_FUNCTION_INFO_V1(gbt_int2_distance);
 PG_FUNCTION_INFO_V1(gbt_int2_penalty);
 PG_FUNCTION_INFO_V1(gbt_int2_same);
 
@@ -24,40 +27,41 @@ Datum		gbt_int2_compress(PG_FUNCTION_ARGS);
 Datum		gbt_int2_union(PG_FUNCTION_ARGS);
 Datum		gbt_int2_picksplit(PG_FUNCTION_ARGS);
 Datum		gbt_int2_consistent(PG_FUNCTION_ARGS);
+Datum		gbt_int2_distance(PG_FUNCTION_ARGS);
 Datum		gbt_int2_penalty(PG_FUNCTION_ARGS);
 Datum		gbt_int2_same(PG_FUNCTION_ARGS);
 
 static bool
 gbt_int2gt(const void *a, const void *b)
 {
-	return (*((int16 *) a) > *((int16 *) b));
+	return (*((const int16 *) a) > *((const int16 *) b));
 }
 static bool
 gbt_int2ge(const void *a, const void *b)
 {
-	return (*((int16 *) a) >= *((int16 *) b));
+	return (*((const int16 *) a) >= *((const int16 *) b));
 }
 static bool
 gbt_int2eq(const void *a, const void *b)
 {
-	return (*((int16 *) a) == *((int16 *) b));
+	return (*((const int16 *) a) == *((const int16 *) b));
 }
 static bool
 gbt_int2le(const void *a, const void *b)
 {
-	return (*((int16 *) a) <= *((int16 *) b));
+	return (*((const int16 *) a) <= *((const int16 *) b));
 }
 static bool
 gbt_int2lt(const void *a, const void *b)
 {
-	return (*((int16 *) a) < *((int16 *) b));
+	return (*((const int16 *) a) < *((const int16 *) b));
 }
 
 static int
 gbt_int2key_cmp(const void *a, const void *b)
 {
-	int16KEY   *ia = (int16KEY *) (((Nsrt *) a)->t);
-	int16KEY   *ib = (int16KEY *) (((Nsrt *) b)->t);
+	int16KEY   *ia = (int16KEY *) (((const Nsrt *) a)->t);
+	int16KEY   *ib = (int16KEY *) (((const Nsrt *) b)->t);
 
 	if (ia->lower == ib->lower)
 	{
@@ -70,6 +74,12 @@ gbt_int2key_cmp(const void *a, const void *b)
 	return (ia->lower > ib->lower) ? 1 : -1;
 }
 
+static float8
+gbt_int2_dist(const void *a, const void *b)
+{
+	return GET_FLOAT_DISTANCE(int2, a, b);
+}
+
 
 static const gbtree_ninfo tinfo =
 {
@@ -80,12 +90,32 @@ static const gbtree_ninfo tinfo =
 	gbt_int2eq,
 	gbt_int2le,
 	gbt_int2lt,
-	gbt_int2key_cmp
+	gbt_int2key_cmp,
+	gbt_int2_dist
 };
 
 
+PG_FUNCTION_INFO_V1(int2_dist);
+Datum		int2_dist(PG_FUNCTION_ARGS);
+Datum
+int2_dist(PG_FUNCTION_ARGS)
+{
+	int2		a = PG_GETARG_INT16(0);
+	int2		b = PG_GETARG_INT16(1);
+	int2		r;
+	int2		ra;
 
+	r = a - b;
+	ra = Abs(r);
 
+	/* Overflow check. */
+	if (ra < 0 || (!SAMESIGN(a, b) && !SAMESIGN(r, a)))
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("smallint out of range")));
+
+	PG_RETURN_INT16(ra);
+}
 
 
 /**************************************************
@@ -123,6 +153,25 @@ gbt_int2_consistent(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(
 				   gbt_num_consistent(&key, (void *) &query, &strategy, GIST_LEAF(entry), &tinfo)
+		);
+}
+
+
+Datum
+gbt_int2_distance(PG_FUNCTION_ARGS)
+{
+	GISTENTRY  *entry = (GISTENTRY *) PG_GETARG_POINTER(0);
+	int16		query = PG_GETARG_INT16(1);
+
+	/* Oid		subtype = PG_GETARG_OID(3); */
+	int16KEY   *kkk = (int16KEY *) DatumGetPointer(entry->key);
+	GBT_NUMKEY_R key;
+
+	key.lower = (GBT_NUMKEY *) &kkk->lower;
+	key.upper = (GBT_NUMKEY *) &kkk->upper;
+
+	PG_RETURN_FLOAT8(
+			gbt_num_distance(&key, (void *) &query, GIST_LEAF(entry), &tinfo)
 		);
 }
 

@@ -27,14 +27,14 @@ typedef struct xl_dbase_create_rec_old
 	Oid			db_id;
 	char		src_path[1];	/* VARIABLE LENGTH STRING */
 	/* dst_path follows src_path */
-} xl_dbase_create_rec_old;
+}	xl_dbase_create_rec_old;
 
 typedef struct xl_dbase_drop_rec_old
 {
 	/* Records dropping of a single subdirectory incl. contents */
 	Oid			db_id;
 	char		dir_path[1];	/* VARIABLE LENGTH STRING */
-} xl_dbase_drop_rec_old;
+}	xl_dbase_drop_rec_old;
 
 typedef struct xl_dbase_create_rec
 {
@@ -64,5 +64,7 @@ extern char *get_database_name(Oid dbid);
 
 extern void dbase_redo(XLogRecPtr lsn, XLogRecord *rptr);
 extern void dbase_desc(StringInfo buf, uint8 xl_info, char *rec);
+
+extern void check_encoding_locale_matches(int encoding, const char *collate, const char *ctype);
 
 #endif   /* DBCOMMANDS_H */

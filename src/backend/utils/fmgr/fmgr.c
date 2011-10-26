@@ -34,7 +34,7 @@
  * Hooks for function calls
  */
 PGDLLIMPORT needs_fmgr_hook_type needs_fmgr_hook = NULL;
-PGDLLIMPORT fmgr_hook_type       fmgr_hook = NULL;
+PGDLLIMPORT fmgr_hook_type fmgr_hook = NULL;
 
 /*
  * Declaration for old-style function pointer type.  This is now used only
@@ -949,7 +949,7 @@ fmgr_security_definer(PG_FUNCTION_ARGS)
 
 	/* function manager hook */
 	if (fmgr_hook)
-		(*fmgr_hook)(FHET_START, &fcache->flinfo, &fcache->arg);
+		(*fmgr_hook) (FHET_START, &fcache->flinfo, &fcache->arg);
 
 	/*
 	 * We don't need to restore GUC or userid settings on error, because the
@@ -980,7 +980,7 @@ fmgr_security_definer(PG_FUNCTION_ARGS)
 	{
 		fcinfo->flinfo = save_flinfo;
 		if (fmgr_hook)
-			(*fmgr_hook)(FHET_ABORT, &fcache->flinfo, &fcache->arg);
+			(*fmgr_hook) (FHET_ABORT, &fcache->flinfo, &fcache->arg);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -992,7 +992,7 @@ fmgr_security_definer(PG_FUNCTION_ARGS)
 	if (OidIsValid(fcache->userid))
 		SetUserIdAndSecContext(save_userid, save_sec_context);
 	if (fmgr_hook)
-		(*fmgr_hook)(FHET_END, &fcache->flinfo, &fcache->arg);
+		(*fmgr_hook) (FHET_END, &fcache->flinfo, &fcache->arg);
 
 	return result;
 }
@@ -1010,12 +1010,12 @@ fmgr_security_definer(PG_FUNCTION_ARGS)
  * look at FmgrInfo, since there won't be any.
  */
 Datum
-DirectFunctionCall1(PGFunction func, Datum arg1)
+DirectFunctionCall1Coll(PGFunction func, Oid collation, Datum arg1)
 {
 	FunctionCallInfoData fcinfo;
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, NULL, 1, NULL, NULL);
+	InitFunctionCallInfoData(fcinfo, NULL, 1, collation, NULL, NULL);
 
 	fcinfo.arg[0] = arg1;
 	fcinfo.argnull[0] = false;
@@ -1030,12 +1030,12 @@ DirectFunctionCall1(PGFunction func, Datum arg1)
 }
 
 Datum
-DirectFunctionCall2(PGFunction func, Datum arg1, Datum arg2)
+DirectFunctionCall2Coll(PGFunction func, Oid collation, Datum arg1, Datum arg2)
 {
 	FunctionCallInfoData fcinfo;
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, NULL, 2, NULL, NULL);
+	InitFunctionCallInfoData(fcinfo, NULL, 2, collation, NULL, NULL);
 
 	fcinfo.arg[0] = arg1;
 	fcinfo.arg[1] = arg2;
@@ -1052,13 +1052,13 @@ DirectFunctionCall2(PGFunction func, Datum arg1, Datum arg2)
 }
 
 Datum
-DirectFunctionCall3(PGFunction func, Datum arg1, Datum arg2,
-					Datum arg3)
+DirectFunctionCall3Coll(PGFunction func, Oid collation, Datum arg1, Datum arg2,
+						Datum arg3)
 {
 	FunctionCallInfoData fcinfo;
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, NULL, 3, NULL, NULL);
+	InitFunctionCallInfoData(fcinfo, NULL, 3, collation, NULL, NULL);
 
 	fcinfo.arg[0] = arg1;
 	fcinfo.arg[1] = arg2;
@@ -1077,13 +1077,13 @@ DirectFunctionCall3(PGFunction func, Datum arg1, Datum arg2,
 }
 
 Datum
-DirectFunctionCall4(PGFunction func, Datum arg1, Datum arg2,
-					Datum arg3, Datum arg4)
+DirectFunctionCall4Coll(PGFunction func, Oid collation, Datum arg1, Datum arg2,
+						Datum arg3, Datum arg4)
 {
 	FunctionCallInfoData fcinfo;
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, NULL, 4, NULL, NULL);
+	InitFunctionCallInfoData(fcinfo, NULL, 4, collation, NULL, NULL);
 
 	fcinfo.arg[0] = arg1;
 	fcinfo.arg[1] = arg2;
@@ -1104,13 +1104,13 @@ DirectFunctionCall4(PGFunction func, Datum arg1, Datum arg2,
 }
 
 Datum
-DirectFunctionCall5(PGFunction func, Datum arg1, Datum arg2,
-					Datum arg3, Datum arg4, Datum arg5)
+DirectFunctionCall5Coll(PGFunction func, Oid collation, Datum arg1, Datum arg2,
+						Datum arg3, Datum arg4, Datum arg5)
 {
 	FunctionCallInfoData fcinfo;
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, NULL, 5, NULL, NULL);
+	InitFunctionCallInfoData(fcinfo, NULL, 5, collation, NULL, NULL);
 
 	fcinfo.arg[0] = arg1;
 	fcinfo.arg[1] = arg2;
@@ -1133,14 +1133,14 @@ DirectFunctionCall5(PGFunction func, Datum arg1, Datum arg2,
 }
 
 Datum
-DirectFunctionCall6(PGFunction func, Datum arg1, Datum arg2,
-					Datum arg3, Datum arg4, Datum arg5,
-					Datum arg6)
+DirectFunctionCall6Coll(PGFunction func, Oid collation, Datum arg1, Datum arg2,
+						Datum arg3, Datum arg4, Datum arg5,
+						Datum arg6)
 {
 	FunctionCallInfoData fcinfo;
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, NULL, 6, NULL, NULL);
+	InitFunctionCallInfoData(fcinfo, NULL, 6, collation, NULL, NULL);
 
 	fcinfo.arg[0] = arg1;
 	fcinfo.arg[1] = arg2;
@@ -1165,14 +1165,14 @@ DirectFunctionCall6(PGFunction func, Datum arg1, Datum arg2,
 }
 
 Datum
-DirectFunctionCall7(PGFunction func, Datum arg1, Datum arg2,
-					Datum arg3, Datum arg4, Datum arg5,
-					Datum arg6, Datum arg7)
+DirectFunctionCall7Coll(PGFunction func, Oid collation, Datum arg1, Datum arg2,
+						Datum arg3, Datum arg4, Datum arg5,
+						Datum arg6, Datum arg7)
 {
 	FunctionCallInfoData fcinfo;
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, NULL, 7, NULL, NULL);
+	InitFunctionCallInfoData(fcinfo, NULL, 7, collation, NULL, NULL);
 
 	fcinfo.arg[0] = arg1;
 	fcinfo.arg[1] = arg2;
@@ -1199,14 +1199,14 @@ DirectFunctionCall7(PGFunction func, Datum arg1, Datum arg2,
 }
 
 Datum
-DirectFunctionCall8(PGFunction func, Datum arg1, Datum arg2,
-					Datum arg3, Datum arg4, Datum arg5,
-					Datum arg6, Datum arg7, Datum arg8)
+DirectFunctionCall8Coll(PGFunction func, Oid collation, Datum arg1, Datum arg2,
+						Datum arg3, Datum arg4, Datum arg5,
+						Datum arg6, Datum arg7, Datum arg8)
 {
 	FunctionCallInfoData fcinfo;
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, NULL, 8, NULL, NULL);
+	InitFunctionCallInfoData(fcinfo, NULL, 8, collation, NULL, NULL);
 
 	fcinfo.arg[0] = arg1;
 	fcinfo.arg[1] = arg2;
@@ -1235,15 +1235,15 @@ DirectFunctionCall8(PGFunction func, Datum arg1, Datum arg2,
 }
 
 Datum
-DirectFunctionCall9(PGFunction func, Datum arg1, Datum arg2,
-					Datum arg3, Datum arg4, Datum arg5,
-					Datum arg6, Datum arg7, Datum arg8,
-					Datum arg9)
+DirectFunctionCall9Coll(PGFunction func, Oid collation, Datum arg1, Datum arg2,
+						Datum arg3, Datum arg4, Datum arg5,
+						Datum arg6, Datum arg7, Datum arg8,
+						Datum arg9)
 {
 	FunctionCallInfoData fcinfo;
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, NULL, 9, NULL, NULL);
+	InitFunctionCallInfoData(fcinfo, NULL, 9, collation, NULL, NULL);
 
 	fcinfo.arg[0] = arg1;
 	fcinfo.arg[1] = arg2;
@@ -1280,12 +1280,12 @@ DirectFunctionCall9(PGFunction func, Datum arg1, Datum arg2,
  * are allowed to be NULL.
  */
 Datum
-FunctionCall1(FmgrInfo *flinfo, Datum arg1)
+FunctionCall1Coll(FmgrInfo *flinfo, Oid collation, Datum arg1)
 {
 	FunctionCallInfoData fcinfo;
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, flinfo, 1, NULL, NULL);
+	InitFunctionCallInfoData(fcinfo, flinfo, 1, collation, NULL, NULL);
 
 	fcinfo.arg[0] = arg1;
 	fcinfo.argnull[0] = false;
@@ -1300,7 +1300,7 @@ FunctionCall1(FmgrInfo *flinfo, Datum arg1)
 }
 
 Datum
-FunctionCall2(FmgrInfo *flinfo, Datum arg1, Datum arg2)
+FunctionCall2Coll(FmgrInfo *flinfo, Oid collation, Datum arg1, Datum arg2)
 {
 	/*
 	 * XXX if you change this routine, see also the inlined version in
@@ -1309,7 +1309,7 @@ FunctionCall2(FmgrInfo *flinfo, Datum arg1, Datum arg2)
 	FunctionCallInfoData fcinfo;
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, flinfo, 2, NULL, NULL);
+	InitFunctionCallInfoData(fcinfo, flinfo, 2, collation, NULL, NULL);
 
 	fcinfo.arg[0] = arg1;
 	fcinfo.arg[1] = arg2;
@@ -1326,13 +1326,13 @@ FunctionCall2(FmgrInfo *flinfo, Datum arg1, Datum arg2)
 }
 
 Datum
-FunctionCall3(FmgrInfo *flinfo, Datum arg1, Datum arg2,
-			  Datum arg3)
+FunctionCall3Coll(FmgrInfo *flinfo, Oid collation, Datum arg1, Datum arg2,
+				  Datum arg3)
 {
 	FunctionCallInfoData fcinfo;
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, flinfo, 3, NULL, NULL);
+	InitFunctionCallInfoData(fcinfo, flinfo, 3, collation, NULL, NULL);
 
 	fcinfo.arg[0] = arg1;
 	fcinfo.arg[1] = arg2;
@@ -1351,13 +1351,13 @@ FunctionCall3(FmgrInfo *flinfo, Datum arg1, Datum arg2,
 }
 
 Datum
-FunctionCall4(FmgrInfo *flinfo, Datum arg1, Datum arg2,
-			  Datum arg3, Datum arg4)
+FunctionCall4Coll(FmgrInfo *flinfo, Oid collation, Datum arg1, Datum arg2,
+				  Datum arg3, Datum arg4)
 {
 	FunctionCallInfoData fcinfo;
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, flinfo, 4, NULL, NULL);
+	InitFunctionCallInfoData(fcinfo, flinfo, 4, collation, NULL, NULL);
 
 	fcinfo.arg[0] = arg1;
 	fcinfo.arg[1] = arg2;
@@ -1378,13 +1378,13 @@ FunctionCall4(FmgrInfo *flinfo, Datum arg1, Datum arg2,
 }
 
 Datum
-FunctionCall5(FmgrInfo *flinfo, Datum arg1, Datum arg2,
-			  Datum arg3, Datum arg4, Datum arg5)
+FunctionCall5Coll(FmgrInfo *flinfo, Oid collation, Datum arg1, Datum arg2,
+				  Datum arg3, Datum arg4, Datum arg5)
 {
 	FunctionCallInfoData fcinfo;
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, flinfo, 5, NULL, NULL);
+	InitFunctionCallInfoData(fcinfo, flinfo, 5, collation, NULL, NULL);
 
 	fcinfo.arg[0] = arg1;
 	fcinfo.arg[1] = arg2;
@@ -1407,14 +1407,14 @@ FunctionCall5(FmgrInfo *flinfo, Datum arg1, Datum arg2,
 }
 
 Datum
-FunctionCall6(FmgrInfo *flinfo, Datum arg1, Datum arg2,
-			  Datum arg3, Datum arg4, Datum arg5,
-			  Datum arg6)
+FunctionCall6Coll(FmgrInfo *flinfo, Oid collation, Datum arg1, Datum arg2,
+				  Datum arg3, Datum arg4, Datum arg5,
+				  Datum arg6)
 {
 	FunctionCallInfoData fcinfo;
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, flinfo, 6, NULL, NULL);
+	InitFunctionCallInfoData(fcinfo, flinfo, 6, collation, NULL, NULL);
 
 	fcinfo.arg[0] = arg1;
 	fcinfo.arg[1] = arg2;
@@ -1439,14 +1439,14 @@ FunctionCall6(FmgrInfo *flinfo, Datum arg1, Datum arg2,
 }
 
 Datum
-FunctionCall7(FmgrInfo *flinfo, Datum arg1, Datum arg2,
-			  Datum arg3, Datum arg4, Datum arg5,
-			  Datum arg6, Datum arg7)
+FunctionCall7Coll(FmgrInfo *flinfo, Oid collation, Datum arg1, Datum arg2,
+				  Datum arg3, Datum arg4, Datum arg5,
+				  Datum arg6, Datum arg7)
 {
 	FunctionCallInfoData fcinfo;
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, flinfo, 7, NULL, NULL);
+	InitFunctionCallInfoData(fcinfo, flinfo, 7, collation, NULL, NULL);
 
 	fcinfo.arg[0] = arg1;
 	fcinfo.arg[1] = arg2;
@@ -1473,14 +1473,14 @@ FunctionCall7(FmgrInfo *flinfo, Datum arg1, Datum arg2,
 }
 
 Datum
-FunctionCall8(FmgrInfo *flinfo, Datum arg1, Datum arg2,
-			  Datum arg3, Datum arg4, Datum arg5,
-			  Datum arg6, Datum arg7, Datum arg8)
+FunctionCall8Coll(FmgrInfo *flinfo, Oid collation, Datum arg1, Datum arg2,
+				  Datum arg3, Datum arg4, Datum arg5,
+				  Datum arg6, Datum arg7, Datum arg8)
 {
 	FunctionCallInfoData fcinfo;
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, flinfo, 8, NULL, NULL);
+	InitFunctionCallInfoData(fcinfo, flinfo, 8, collation, NULL, NULL);
 
 	fcinfo.arg[0] = arg1;
 	fcinfo.arg[1] = arg2;
@@ -1509,15 +1509,15 @@ FunctionCall8(FmgrInfo *flinfo, Datum arg1, Datum arg2,
 }
 
 Datum
-FunctionCall9(FmgrInfo *flinfo, Datum arg1, Datum arg2,
-			  Datum arg3, Datum arg4, Datum arg5,
-			  Datum arg6, Datum arg7, Datum arg8,
-			  Datum arg9)
+FunctionCall9Coll(FmgrInfo *flinfo, Oid collation, Datum arg1, Datum arg2,
+				  Datum arg3, Datum arg4, Datum arg5,
+				  Datum arg6, Datum arg7, Datum arg8,
+				  Datum arg9)
 {
 	FunctionCallInfoData fcinfo;
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, flinfo, 9, NULL, NULL);
+	InitFunctionCallInfoData(fcinfo, flinfo, 9, collation, NULL, NULL);
 
 	fcinfo.arg[0] = arg1;
 	fcinfo.arg[1] = arg2;
@@ -1556,7 +1556,7 @@ FunctionCall9(FmgrInfo *flinfo, Datum arg1, Datum arg2,
  * do the fmgr_info() once and then use FunctionCallN().
  */
 Datum
-OidFunctionCall1(Oid functionId, Datum arg1)
+OidFunctionCall0Coll(Oid functionId, Oid collation)
 {
 	FmgrInfo	flinfo;
 	FunctionCallInfoData fcinfo;
@@ -1564,7 +1564,27 @@ OidFunctionCall1(Oid functionId, Datum arg1)
 
 	fmgr_info(functionId, &flinfo);
 
-	InitFunctionCallInfoData(fcinfo, &flinfo, 1, NULL, NULL);
+	InitFunctionCallInfoData(fcinfo, &flinfo, 0, collation, NULL, NULL);
+
+	result = FunctionCallInvoke(&fcinfo);
+
+	/* Check for null result, since caller is clearly not expecting one */
+	if (fcinfo.isnull)
+		elog(ERROR, "function %u returned NULL", flinfo.fn_oid);
+
+	return result;
+}
+
+Datum
+OidFunctionCall1Coll(Oid functionId, Oid collation, Datum arg1)
+{
+	FmgrInfo	flinfo;
+	FunctionCallInfoData fcinfo;
+	Datum		result;
+
+	fmgr_info(functionId, &flinfo);
+
+	InitFunctionCallInfoData(fcinfo, &flinfo, 1, collation, NULL, NULL);
 
 	fcinfo.arg[0] = arg1;
 	fcinfo.argnull[0] = false;
@@ -1579,7 +1599,7 @@ OidFunctionCall1(Oid functionId, Datum arg1)
 }
 
 Datum
-OidFunctionCall2(Oid functionId, Datum arg1, Datum arg2)
+OidFunctionCall2Coll(Oid functionId, Oid collation, Datum arg1, Datum arg2)
 {
 	FmgrInfo	flinfo;
 	FunctionCallInfoData fcinfo;
@@ -1587,7 +1607,7 @@ OidFunctionCall2(Oid functionId, Datum arg1, Datum arg2)
 
 	fmgr_info(functionId, &flinfo);
 
-	InitFunctionCallInfoData(fcinfo, &flinfo, 2, NULL, NULL);
+	InitFunctionCallInfoData(fcinfo, &flinfo, 2, collation, NULL, NULL);
 
 	fcinfo.arg[0] = arg1;
 	fcinfo.arg[1] = arg2;
@@ -1604,8 +1624,8 @@ OidFunctionCall2(Oid functionId, Datum arg1, Datum arg2)
 }
 
 Datum
-OidFunctionCall3(Oid functionId, Datum arg1, Datum arg2,
-				 Datum arg3)
+OidFunctionCall3Coll(Oid functionId, Oid collation, Datum arg1, Datum arg2,
+					 Datum arg3)
 {
 	FmgrInfo	flinfo;
 	FunctionCallInfoData fcinfo;
@@ -1613,7 +1633,7 @@ OidFunctionCall3(Oid functionId, Datum arg1, Datum arg2,
 
 	fmgr_info(functionId, &flinfo);
 
-	InitFunctionCallInfoData(fcinfo, &flinfo, 3, NULL, NULL);
+	InitFunctionCallInfoData(fcinfo, &flinfo, 3, collation, NULL, NULL);
 
 	fcinfo.arg[0] = arg1;
 	fcinfo.arg[1] = arg2;
@@ -1632,8 +1652,8 @@ OidFunctionCall3(Oid functionId, Datum arg1, Datum arg2,
 }
 
 Datum
-OidFunctionCall4(Oid functionId, Datum arg1, Datum arg2,
-				 Datum arg3, Datum arg4)
+OidFunctionCall4Coll(Oid functionId, Oid collation, Datum arg1, Datum arg2,
+					 Datum arg3, Datum arg4)
 {
 	FmgrInfo	flinfo;
 	FunctionCallInfoData fcinfo;
@@ -1641,7 +1661,7 @@ OidFunctionCall4(Oid functionId, Datum arg1, Datum arg2,
 
 	fmgr_info(functionId, &flinfo);
 
-	InitFunctionCallInfoData(fcinfo, &flinfo, 4, NULL, NULL);
+	InitFunctionCallInfoData(fcinfo, &flinfo, 4, collation, NULL, NULL);
 
 	fcinfo.arg[0] = arg1;
 	fcinfo.arg[1] = arg2;
@@ -1662,8 +1682,8 @@ OidFunctionCall4(Oid functionId, Datum arg1, Datum arg2,
 }
 
 Datum
-OidFunctionCall5(Oid functionId, Datum arg1, Datum arg2,
-				 Datum arg3, Datum arg4, Datum arg5)
+OidFunctionCall5Coll(Oid functionId, Oid collation, Datum arg1, Datum arg2,
+					 Datum arg3, Datum arg4, Datum arg5)
 {
 	FmgrInfo	flinfo;
 	FunctionCallInfoData fcinfo;
@@ -1671,7 +1691,7 @@ OidFunctionCall5(Oid functionId, Datum arg1, Datum arg2,
 
 	fmgr_info(functionId, &flinfo);
 
-	InitFunctionCallInfoData(fcinfo, &flinfo, 5, NULL, NULL);
+	InitFunctionCallInfoData(fcinfo, &flinfo, 5, collation, NULL, NULL);
 
 	fcinfo.arg[0] = arg1;
 	fcinfo.arg[1] = arg2;
@@ -1694,9 +1714,9 @@ OidFunctionCall5(Oid functionId, Datum arg1, Datum arg2,
 }
 
 Datum
-OidFunctionCall6(Oid functionId, Datum arg1, Datum arg2,
-				 Datum arg3, Datum arg4, Datum arg5,
-				 Datum arg6)
+OidFunctionCall6Coll(Oid functionId, Oid collation, Datum arg1, Datum arg2,
+					 Datum arg3, Datum arg4, Datum arg5,
+					 Datum arg6)
 {
 	FmgrInfo	flinfo;
 	FunctionCallInfoData fcinfo;
@@ -1704,7 +1724,7 @@ OidFunctionCall6(Oid functionId, Datum arg1, Datum arg2,
 
 	fmgr_info(functionId, &flinfo);
 
-	InitFunctionCallInfoData(fcinfo, &flinfo, 6, NULL, NULL);
+	InitFunctionCallInfoData(fcinfo, &flinfo, 6, collation, NULL, NULL);
 
 	fcinfo.arg[0] = arg1;
 	fcinfo.arg[1] = arg2;
@@ -1729,9 +1749,9 @@ OidFunctionCall6(Oid functionId, Datum arg1, Datum arg2,
 }
 
 Datum
-OidFunctionCall7(Oid functionId, Datum arg1, Datum arg2,
-				 Datum arg3, Datum arg4, Datum arg5,
-				 Datum arg6, Datum arg7)
+OidFunctionCall7Coll(Oid functionId, Oid collation, Datum arg1, Datum arg2,
+					 Datum arg3, Datum arg4, Datum arg5,
+					 Datum arg6, Datum arg7)
 {
 	FmgrInfo	flinfo;
 	FunctionCallInfoData fcinfo;
@@ -1739,7 +1759,7 @@ OidFunctionCall7(Oid functionId, Datum arg1, Datum arg2,
 
 	fmgr_info(functionId, &flinfo);
 
-	InitFunctionCallInfoData(fcinfo, &flinfo, 7, NULL, NULL);
+	InitFunctionCallInfoData(fcinfo, &flinfo, 7, collation, NULL, NULL);
 
 	fcinfo.arg[0] = arg1;
 	fcinfo.arg[1] = arg2;
@@ -1766,9 +1786,9 @@ OidFunctionCall7(Oid functionId, Datum arg1, Datum arg2,
 }
 
 Datum
-OidFunctionCall8(Oid functionId, Datum arg1, Datum arg2,
-				 Datum arg3, Datum arg4, Datum arg5,
-				 Datum arg6, Datum arg7, Datum arg8)
+OidFunctionCall8Coll(Oid functionId, Oid collation, Datum arg1, Datum arg2,
+					 Datum arg3, Datum arg4, Datum arg5,
+					 Datum arg6, Datum arg7, Datum arg8)
 {
 	FmgrInfo	flinfo;
 	FunctionCallInfoData fcinfo;
@@ -1776,7 +1796,7 @@ OidFunctionCall8(Oid functionId, Datum arg1, Datum arg2,
 
 	fmgr_info(functionId, &flinfo);
 
-	InitFunctionCallInfoData(fcinfo, &flinfo, 8, NULL, NULL);
+	InitFunctionCallInfoData(fcinfo, &flinfo, 8, collation, NULL, NULL);
 
 	fcinfo.arg[0] = arg1;
 	fcinfo.arg[1] = arg2;
@@ -1805,10 +1825,10 @@ OidFunctionCall8(Oid functionId, Datum arg1, Datum arg2,
 }
 
 Datum
-OidFunctionCall9(Oid functionId, Datum arg1, Datum arg2,
-				 Datum arg3, Datum arg4, Datum arg5,
-				 Datum arg6, Datum arg7, Datum arg8,
-				 Datum arg9)
+OidFunctionCall9Coll(Oid functionId, Oid collation, Datum arg1, Datum arg2,
+					 Datum arg3, Datum arg4, Datum arg5,
+					 Datum arg6, Datum arg7, Datum arg8,
+					 Datum arg9)
 {
 	FmgrInfo	flinfo;
 	FunctionCallInfoData fcinfo;
@@ -1816,7 +1836,7 @@ OidFunctionCall9(Oid functionId, Datum arg1, Datum arg2,
 
 	fmgr_info(functionId, &flinfo);
 
-	InitFunctionCallInfoData(fcinfo, &flinfo, 9, NULL, NULL);
+	InitFunctionCallInfoData(fcinfo, &flinfo, 9, collation, NULL, NULL);
 
 	fcinfo.arg[0] = arg1;
 	fcinfo.arg[1] = arg2;
@@ -1877,7 +1897,7 @@ InputFunctionCall(FmgrInfo *flinfo, char *str, Oid typioparam, int32 typmod)
 
 	pushed = SPI_push_conditional();
 
-	InitFunctionCallInfoData(fcinfo, flinfo, 3, NULL, NULL);
+	InitFunctionCallInfoData(fcinfo, flinfo, 3, InvalidOid, NULL, NULL);
 
 	fcinfo.arg[0] = CStringGetDatum(str);
 	fcinfo.arg[1] = ObjectIdGetDatum(typioparam);
@@ -1952,7 +1972,7 @@ ReceiveFunctionCall(FmgrInfo *flinfo, StringInfo buf,
 
 	pushed = SPI_push_conditional();
 
-	InitFunctionCallInfoData(fcinfo, flinfo, 3, NULL, NULL);
+	InitFunctionCallInfoData(fcinfo, flinfo, 3, InvalidOid, NULL, NULL);
 
 	fcinfo.arg[0] = PointerGetDatum(buf);
 	fcinfo.arg[1] = ObjectIdGetDatum(typioparam);

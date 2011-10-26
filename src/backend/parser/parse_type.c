@@ -108,8 +108,14 @@ LookupTypeName(ParseState *pstate, const TypeName *typeName,
 				break;
 		}
 
-		/* look up the field */
-		relid = RangeVarGetRelid(rel, false);
+		/*
+		 * Look up the field.
+		 *
+		 * XXX: As no lock is taken here, this might fail in the presence
+		 * of concurrent DDL.  But taking a lock would carry a performance
+		 * penalty and would also require a permissions check.
+		 */
+		relid = RangeVarGetRelid(rel, NoLock, false, false);
 		attnum = get_attnum(relid, field);
 		if (attnum == InvalidAttrNumber)
 			ereport(ERROR,
@@ -430,6 +436,72 @@ TypeNameListToString(List *typenames)
 	return string.data;
 }
 
+/*
+ * LookupCollation
+ *
+ * Look up collation by name, return OID, with support for error location.
+ */
+Oid
+LookupCollation(ParseState *pstate, List *collnames, int location)
+{
+	Oid			colloid;
+	ParseCallbackState pcbstate;
+
+	if (pstate)
+		setup_parser_errposition_callback(&pcbstate, pstate, location);
+
+	colloid = get_collation_oid(collnames, false);
+
+	if (pstate)
+		cancel_parser_errposition_callback(&pcbstate);
+
+	return colloid;
+}
+
+/*
+ * GetColumnDefCollation
+ *
+ * Get the collation to be used for a column being defined, given the
+ * ColumnDef node and the previously-determined column type OID.
+ *
+ * pstate is only used for error location purposes, and can be NULL.
+ */
+Oid
+GetColumnDefCollation(ParseState *pstate, ColumnDef *coldef, Oid typeOid)
+{
+	Oid			result;
+	Oid			typcollation = get_typcollation(typeOid);
+	int			location = -1;
+
+	if (coldef->collClause)
+	{
+		/* We have a raw COLLATE clause, so look up the collation */
+		location = coldef->collClause->location;
+		result = LookupCollation(pstate, coldef->collClause->collname,
+								 location);
+	}
+	else if (OidIsValid(coldef->collOid))
+	{
+		/* Precooked collation spec, use that */
+		result = coldef->collOid;
+	}
+	else
+	{
+		/* Use the type's default collation if any */
+		result = typcollation;
+	}
+
+	/* Complain if COLLATE is applied to an uncollatable type */
+	if (OidIsValid(result) && !OidIsValid(typcollation))
+		ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("collations are not supported by type %s",
+						format_type_be(typeOid)),
+				 parser_errposition(pstate, location)));
+
+	return result;
+}
+
 /* return a Type structure, given a type id */
 /* NB: caller must ReleaseSysCache the type tuple when done with it */
 Type
@@ -462,7 +534,7 @@ typeLen(Type t)
 	return typ->typlen;
 }
 
-/* given type (as type struct), return the value of its 'byval' attribute.*/
+/* given type (as type struct), return its 'byval' attribute */
 bool
 typeByVal(Type t)
 {
@@ -472,7 +544,7 @@ typeByVal(Type t)
 	return typ->typbyval;
 }
 
-/* given type (as type struct), return the name of type */
+/* given type (as type struct), return the type's name */
 char *
 typeTypeName(Type t)
 {
@@ -483,14 +555,24 @@ typeTypeName(Type t)
 	return pstrdup(NameStr(typ->typname));
 }
 
+/* given type (as type struct), return its 'typrelid' attribute */
 Oid
 typeTypeRelid(Type typ)
 {
 	Form_pg_type typtup;
 
 	typtup = (Form_pg_type) GETSTRUCT(typ);
-
 	return typtup->typrelid;
+}
+
+/* given type (as type struct), return its 'typcollation' attribute */
+Oid
+typeTypeCollation(Type typ)
+{
+	Form_pg_type typtup;
+
+	typtup = (Form_pg_type) GETSTRUCT(typ);
+	return typtup->typcollation;
 }
 
 /*

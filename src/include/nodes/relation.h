@@ -15,7 +15,6 @@
 #define RELATION_H
 
 #include "access/sdir.h"
-#include "nodes/bitmapset.h"
 #include "nodes/params.h"
 #include "nodes/parsenodes.h"
 #include "storage/block.h"
@@ -46,6 +45,20 @@ typedef struct QualCost
 	Cost		per_tuple;		/* per-evaluation cost */
 } QualCost;
 
+/*
+ * Costing aggregate function execution requires these statistics about
+ * the aggregates to be executed by a given Agg node.  Note that transCost
+ * includes the execution costs of the aggregates' input expressions.
+ */
+typedef struct AggClauseCosts
+{
+	int			numAggs;		/* total number of aggregate functions */
+	int			numOrderedAggs; /* number that use DISTINCT or ORDER BY */
+	QualCost	transCost;		/* total per-input-row execution costs */
+	Cost		finalCost;		/* total costs of agg final functions */
+	Size		transitionSpace;	/* space for pass-by-ref transition data */
+} AggClauseCosts;
+
 
 /*----------
  * PlannerGlobal
@@ -66,9 +79,7 @@ typedef struct PlannerGlobal
 
 	List	   *subplans;		/* Plans for SubPlan nodes */
 
-	List	   *subrtables;		/* Rangetables for SubPlan nodes */
-
-	List	   *subrowmarks;	/* PlanRowMarks for SubPlan nodes */
+	List	   *subroots;		/* PlannerInfos for SubPlan nodes */
 
 	Bitmapset  *rewindPlanIDs;	/* indices of subplans that require REWIND */
 
@@ -76,11 +87,15 @@ typedef struct PlannerGlobal
 
 	List	   *finalrowmarks;	/* "flat" list of PlanRowMarks */
 
+	List	   *resultRelations;	/* "flat" list of integer RT indexes */
+
 	List	   *relationOids;	/* OIDs of relations the plan depends on */
 
 	List	   *invalItems;		/* other dependencies, as PlanInvalItems */
 
 	Index		lastPHId;		/* highest PlaceHolderVar ID assigned */
+
+	Index		lastRowMarkId;	/* highest PlanRowMark ID assigned */
 
 	bool		transientPlan;	/* redo plan when TransactionXmin changes? */
 } PlannerGlobal;
@@ -152,8 +167,6 @@ typedef struct PlannerInfo
 	List	  **join_rel_level; /* lists of join-relation RelOptInfos */
 	int			join_cur_level; /* index of list being extended */
 
-	List	   *resultRelations;	/* integer list of RT indexes, or NIL */
-
 	List	   *init_plans;		/* init SubPlans for query */
 
 	List	   *cte_plan_ids;	/* per-CTE-item list of subplan IDs */
@@ -213,8 +226,8 @@ typedef struct PlannerInfo
 	struct Plan *non_recursive_plan;	/* plan for non-recursive term */
 
 	/* These fields are workspace for createplan.c */
-	Relids		curOuterRels;			/* outer rels above current node */
-	List	   *curOuterParams;			/* not-yet-assigned NestLoopParams */
+	Relids		curOuterRels;	/* outer rels above current node */
+	List	   *curOuterParams; /* not-yet-assigned NestLoopParams */
 
 	/* optional private data for join_search_hook, e.g., GEQO */
 	void	   *join_search_private;
@@ -306,11 +319,11 @@ typedef struct PlannerInfo
  *					(always NIL if it's not a table)
  *		pages - number of disk pages in relation (zero if not a table)
  *		tuples - number of tuples in relation (not considering restrictions)
+ *		allvisfrac - fraction of disk pages that are marked all-visible
  *		subplan - plan for subquery (NULL if it's not a subquery)
- *		subrtable - rangetable for subquery (NIL if it's not a subquery)
- *		subrowmark - rowmarks for subquery (NIL if it's not a subquery)
+ *		subroot - PlannerInfo for subquery (NULL if it's not a subquery)
  *
- *		Note: for a subquery, tuples and subplan are not set immediately
+ *		Note: for a subquery, tuples, subplan, subroot are not set immediately
  *		upon creation of the RelOptInfo object; they are filled in when
  *		set_base_rel_pathlist processes the object.
  *
@@ -390,11 +403,11 @@ typedef struct RelOptInfo
 	Relids	   *attr_needed;	/* array indexed [min_attr .. max_attr] */
 	int32	   *attr_widths;	/* array indexed [min_attr .. max_attr] */
 	List	   *indexlist;		/* list of IndexOptInfo */
-	BlockNumber pages;
+	BlockNumber pages;			/* size estimates derived from pg_class */
 	double		tuples;
+	double		allvisfrac;
 	struct Plan *subplan;		/* if subquery */
-	List	   *subrtable;		/* if subquery */
-	List	   *subrowmark;		/* if subquery */
+	PlannerInfo *subroot;		/* if subquery */
 
 	/* used by various scans and joins: */
 	List	   *baserestrictinfo;		/* RestrictInfo structures (if base
@@ -421,7 +434,9 @@ typedef struct RelOptInfo
  * IndexOptInfo
  *		Per-index information for planning/optimization
  *
- *		opfamily[], indexkeys[], and opcintype[] each have ncolumns entries.
+ *		indexkeys[], indexcollations[], opfamily[], and opcintype[]
+ *		each have ncolumns entries.
+ *
  *		sortopfamily[], reverse_sort[], and nulls_first[] likewise have
  *		ncolumns entries, if the index is ordered; but if it is unordered,
  *		those pointers are NULL.
@@ -436,6 +451,10 @@ typedef struct RelOptInfo
  *		The indexprs and indpred expressions have been run through
  *		prepqual.c and eval_const_expressions() for ease of matching to
  *		WHERE clauses. indpred is in implicit-AND form.
+ *
+ *		indextlist is a TargetEntry list representing the index columns.
+ *		It provides an equivalent base-relation Var for each simple column,
+ *		and links to the matching indexprs element for each expression column.
  */
 typedef struct IndexOptInfo
 {
@@ -451,8 +470,9 @@ typedef struct IndexOptInfo
 
 	/* index descriptor information */
 	int			ncolumns;		/* number of columns in index */
-	Oid		   *opfamily;		/* OIDs of operator families for columns */
 	int		   *indexkeys;		/* column numbers of index's keys, or 0 */
+	Oid		   *indexcollations;	/* OIDs of collations of index columns */
+	Oid		   *opfamily;		/* OIDs of operator families for columns */
 	Oid		   *opcintype;		/* OIDs of opclass declared input data types */
 	Oid		   *sortopfamily;	/* OIDs of btree opfamilies, if orderable */
 	bool	   *reverse_sort;	/* is sort order descending? */
@@ -464,10 +484,16 @@ typedef struct IndexOptInfo
 	List	   *indexprs;		/* expressions for non-simple index columns */
 	List	   *indpred;		/* predicate if a partial index, else NIL */
 
+	List	   *indextlist;		/* targetlist representing index columns */
+
 	bool		predOK;			/* true if predicate matches query */
 	bool		unique;			/* true if a unique index */
-	bool		amcanorderbyop;	/* does AM support order by operator result? */
+	bool		immediate;		/* is uniqueness enforced immediately? */
+	bool		hypothetical;	/* true if index doesn't really exist */
+	bool		amcanorderbyop; /* does AM support order by operator result? */
+	bool		amcanreturn;	/* can AM return IndexTuples? */
 	bool		amoptionalkey;	/* can query omit key for the first column? */
+	bool		amsearcharray;	/* can AM handle ScalarArrayOpExpr quals? */
 	bool		amsearchnulls;	/* can AM search for NULL/NOT NULL entries? */
 	bool		amhasgettuple;	/* does AM have amgettuple interface? */
 	bool		amhasgetbitmap; /* does AM have amgetbitmap interface? */
@@ -484,10 +510,13 @@ typedef struct IndexOptInfo
  * require merging two existing EquivalenceClasses.  At the end of the qual
  * distribution process, we have sets of values that are known all transitively
  * equal to each other, where "equal" is according to the rules of the btree
- * operator family(s) shown in ec_opfamilies.  (We restrict an EC to contain
- * only equalities whose operators belong to the same set of opfamilies.  This
- * could probably be relaxed, but for now it's not worth the trouble, since
- * nearly all equality operators belong to only one btree opclass anyway.)
+ * operator family(s) shown in ec_opfamilies, as well as the collation shown
+ * by ec_collation.  (We restrict an EC to contain only equalities whose
+ * operators belong to the same set of opfamilies.	This could probably be
+ * relaxed, but for now it's not worth the trouble, since nearly all equality
+ * operators belong to only one btree opclass anyway.  Similarly, we suppose
+ * that all or none of the input datatypes are collatable, so that a single
+ * collation value is sufficient.)
  *
  * We also use EquivalenceClasses as the base structure for PathKeys, letting
  * us represent knowledge about different sort orderings being equivalent.
@@ -516,6 +545,7 @@ typedef struct EquivalenceClass
 	NodeTag		type;
 
 	List	   *ec_opfamilies;	/* btree operator family OIDs */
+	Oid			ec_collation;	/* collation, if datatypes are collatable */
 	List	   *ec_members;		/* list of EquivalenceMembers */
 	List	   *ec_sources;		/* list of generating RestrictInfos */
 	List	   *ec_derives;		/* list of derived RestrictInfos */
@@ -570,9 +600,10 @@ typedef struct EquivalenceMember
  * represents the primary sort key, the second the first secondary sort key,
  * etc.  The value being sorted is represented by linking to an
  * EquivalenceClass containing that value and including pk_opfamily among its
- * ec_opfamilies.  This is a convenient method because it makes it trivial
- * to detect equivalent and closely-related orderings.	(See optimizer/README
- * for more information.)
+ * ec_opfamilies.  The EquivalenceClass tells which collation to use, too.
+ * This is a convenient method because it makes it trivial to detect
+ * equivalent and closely-related orderings. (See optimizer/README for more
+ * information.)
  *
  * Note: pk_strategy is either BTLessStrategyNumber (for ASC) or
  * BTGreaterStrategyNumber (for DESC).	We assume that all ordering-capable
@@ -619,6 +650,9 @@ typedef struct Path
 /*----------
  * IndexPath represents an index scan over a single index.
  *
+ * This struct is used for both regular indexscans and index-only scans;
+ * path.pathtype is T_IndexScan or T_IndexOnlyScan to show which is meant.
+ *
  * 'indexinfo' is the index to be scanned.
  *
  * 'indexclauses' is a list of index qualification clauses, with implicit
@@ -655,7 +689,7 @@ typedef struct Path
  * 'indextotalcost' and 'indexselectivity' are saved in the IndexPath so that
  * we need not recompute them when considering using the same index in a
  * bitmap index/heap scan (see BitmapHeapPath).  The costs of the IndexPath
- * itself represent the costs of an IndexScan plan type.
+ * itself represent the costs of an IndexScan or IndexOnlyScan plan type.
  *
  * 'rows' is the estimated result tuple count for the indexscan.  This
  * is the same as path.parent->rows for a simple indexscan, but it is
@@ -688,11 +722,12 @@ typedef struct IndexPath
  * The individual indexscans are represented by IndexPath nodes, and any
  * logic on top of them is represented by a tree of BitmapAndPath and
  * BitmapOrPath nodes.	Notice that we can use the same IndexPath node both
- * to represent a regular IndexScan plan, and as the child of a BitmapHeapPath
- * that represents scanning the same index using a BitmapIndexScan.  The
- * startup_cost and total_cost figures of an IndexPath always represent the
- * costs to use it as a regular IndexScan.	The costs of a BitmapIndexScan
- * can be computed using the IndexPath's indextotalcost and indexselectivity.
+ * to represent a regular (or index-only) index scan plan, and as the child
+ * of a BitmapHeapPath that represents scanning the same index using a
+ * BitmapIndexScan.  The startup_cost and total_cost figures of an IndexPath
+ * always represent the costs to use it as a regular (or index-only)
+ * IndexScan.  The costs of a BitmapIndexScan can be computed using the
+ * IndexPath's indextotalcost and indexselectivity.
  *
  * BitmapHeapPaths can be nestloop inner indexscans.  The isjoininner and
  * rows fields serve the same purpose as for plain IndexPaths.
@@ -743,6 +778,16 @@ typedef struct TidPath
 	Path		path;
 	List	   *tidquals;		/* qual(s) involving CTID = something */
 } TidPath;
+
+/*
+ * ForeignPath represents a scan of a foreign table
+ */
+typedef struct ForeignPath
+{
+	Path		path;
+	/* use struct pointer to avoid including fdwapi.h here */
+	struct FdwPlan *fdwplan;
+} ForeignPath;
 
 /*
  * AppendPath represents an Append plan, ie, successive execution of
@@ -1102,6 +1147,7 @@ typedef struct MergeScanSelCache
 {
 	/* Ordering details (cache lookup key) */
 	Oid			opfamily;		/* btree opfamily defining the ordering */
+	Oid			collation;		/* collation for the ordering */
 	int			strategy;		/* sort direction (ASC or DESC) */
 	bool		nulls_first;	/* do NULLs come before normal values? */
 	/* Results */
@@ -1367,9 +1413,6 @@ typedef struct PlaceHolderInfo
 /*
  * For each potentially index-optimizable MIN/MAX aggregate function,
  * root->minmax_aggs stores a MinMaxAggInfo describing it.
- *
- * Note: a MIN/MAX agg doesn't really care about the nulls_first property,
- * so the pathkey's nulls_first flag should be ignored.
  */
 typedef struct MinMaxAggInfo
 {
@@ -1378,7 +1421,10 @@ typedef struct MinMaxAggInfo
 	Oid			aggfnoid;		/* pg_proc Oid of the aggregate */
 	Oid			aggsortop;		/* Oid of its sort operator */
 	Expr	   *target;			/* expression we are aggregating on */
-	List	   *pathkeys;		/* pathkeys representing needed sort order */
+	PlannerInfo *subroot;		/* modified "root" for planning the subquery */
+	Path	   *path;			/* access path for subquery */
+	Cost		pathcost;		/* estimated cost to fetch first row */
+	Param	   *param;			/* param for subplan's output */
 } MinMaxAggInfo;
 
 /*
@@ -1414,7 +1460,7 @@ typedef struct MinMaxAggInfo
  * to do so for Param slots.  Duplicate detection is actually *necessary*
  * in the case of NestLoop parameters since it serves to match up the usage
  * of a Param (in the inner scan) with the assignment of the value (in the
- * NestLoop node).  This might result in the same PARAM_EXEC slot being used
+ * NestLoop node).	This might result in the same PARAM_EXEC slot being used
  * by multiple NestLoop nodes or SubPlan nodes, but no harm is done since
  * the same value would be assigned anyway.
  */

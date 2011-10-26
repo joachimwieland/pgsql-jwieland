@@ -16,6 +16,7 @@
 #include "catalog/pg_type.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#include "nodes/plannodes.h"
 #include "optimizer/clauses.h"
 #include "parser/parse_coerce.h"
 #include "parser/parse_relation.h"
@@ -375,6 +376,7 @@ OffsetVarNodes_walker(Node *node, OffsetVarNodes_context *context)
 		/* fall through to examine children */
 	}
 	/* Shouldn't need to handle other planner auxiliary nodes here */
+	Assert(!IsA(node, PlanRowMark));
 	Assert(!IsA(node, SpecialJoinInfo));
 	Assert(!IsA(node, PlaceHolderInfo));
 	Assert(!IsA(node, MinMaxAggInfo));
@@ -528,6 +530,19 @@ ChangeVarNodes_walker(Node *node, ChangeVarNodes_context *context)
 										   context->new_index);
 		}
 		/* fall through to examine children */
+	}
+	if (IsA(node, PlanRowMark))
+	{
+		PlanRowMark *rowmark = (PlanRowMark *) node;
+
+		if (context->sublevels_up == 0)
+		{
+			if (rowmark->rti == context->rt_index)
+				rowmark->rti = context->new_index;
+			if (rowmark->prti == context->rt_index)
+				rowmark->prti = context->new_index;
+		}
+		return false;
 	}
 	if (IsA(node, AppendRelInfo))
 	{
@@ -810,6 +825,7 @@ rangeTableEntry_used_walker(Node *node,
 	}
 	/* Shouldn't need to handle planner auxiliary nodes here */
 	Assert(!IsA(node, PlaceHolderVar));
+	Assert(!IsA(node, PlanRowMark));
 	Assert(!IsA(node, SpecialJoinInfo));
 	Assert(!IsA(node, AppendRelInfo));
 	Assert(!IsA(node, PlaceHolderInfo));
@@ -1281,7 +1297,8 @@ ResolveNew_callback(Var *var,
 			/* Otherwise replace unmatched var with a null */
 			/* need coerce_to_domain in case of NOT NULL domain constraint */
 			return coerce_to_domain((Node *) makeNullConst(var->vartype,
-														   var->vartypmod),
+														   var->vartypmod,
+														   var->varcollid),
 									InvalidOid, -1,
 									var->vartype,
 									COERCE_IMPLICIT_CAST,

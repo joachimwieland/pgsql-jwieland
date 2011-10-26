@@ -35,7 +35,7 @@ typedef struct SHM_QUEUE
 extern void InitShmemAccess(void *seghdr);
 extern void InitShmemAllocation(void);
 extern void *ShmemAlloc(Size size);
-extern bool ShmemAddrIsValid(void *addr);
+extern bool ShmemAddrIsValid(const void *addr);
 extern void InitShmemIndex(void);
 extern HTAB *ShmemInitHash(const char *name, long init_size, long max_size,
 			  HASHCTL *infoP, int hash_flags);
@@ -50,7 +50,7 @@ extern void RequestAddinShmemSpace(Size size);
  /* max size of data structure string name */
 #define SHMEM_INDEX_KEYSIZE		 (48)
  /* estimated size of the shmem index table (not a hard limit) */
-#define SHMEM_INDEX_SIZE		 (32)
+#define SHMEM_INDEX_SIZE		 (64)
 
 /* this is a hash bucket in the shmem index table */
 typedef struct
@@ -67,8 +67,12 @@ extern void SHMQueueInit(SHM_QUEUE *queue);
 extern void SHMQueueElemInit(SHM_QUEUE *queue);
 extern void SHMQueueDelete(SHM_QUEUE *queue);
 extern void SHMQueueInsertBefore(SHM_QUEUE *queue, SHM_QUEUE *elem);
-extern Pointer SHMQueueNext(SHM_QUEUE *queue, SHM_QUEUE *curElem,
+extern void SHMQueueInsertAfter(SHM_QUEUE *queue, SHM_QUEUE *elem);
+extern Pointer SHMQueueNext(const SHM_QUEUE *queue, const SHM_QUEUE *curElem,
 			 Size linkOffset);
-extern bool SHMQueueEmpty(SHM_QUEUE *queue);
+extern Pointer SHMQueuePrev(const SHM_QUEUE *queue, const SHM_QUEUE *curElem,
+			 Size linkOffset);
+extern bool SHMQueueEmpty(const SHM_QUEUE *queue);
+extern bool SHMQueueIsDetached(const SHM_QUEUE *queue);
 
 #endif   /* SHMEM_H */

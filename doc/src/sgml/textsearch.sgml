@@ -867,7 +867,7 @@ ts_rank(<optional> <replaceable class="PARAMETER">weights</replaceable> <type>fl
 
       <listitem>
        <para>
-        Standard ranking function.<!-- TODO document this better -->
+        Ranks vectors based on the frequency of their matching lexems.
        </para>
       </listitem>
      </varlistentry>
@@ -1092,7 +1092,7 @@ ts_headline(<optional> <replaceable class="PARAMETER">config</replaceable> <type
        if they contain spaces or commas.
       </para>
      </listitem>
-     <listitem >
+     <listitem>
       <para>
        <literal>MaxWords</>, <literal>MinWords</literal>: these numbers
        determine the longest and shortest headlines to output.
@@ -1799,7 +1799,7 @@ LIMIT 10;
 
   <para>
    The built-in parser is named <literal>pg_catalog.default</>.
-   It recognizes 23 token types:
+   It recognizes 23 token types, shown in <xref linkend="textsearch-default-parser">.
   </para>
 
   <table id="textsearch-default-parser">

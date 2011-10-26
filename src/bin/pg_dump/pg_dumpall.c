@@ -52,6 +52,9 @@ static void dumpTimestamp(char *msg);
 static void doShellQuoting(PQExpBuffer buf, const char *str);
 
 static int	runPgDump(const char *dbname);
+static void buildShSecLabels(PGconn *conn, const char *catalog_name,
+							 uint32 objectId, PQExpBuffer buffer,
+							 const char *target, const char *objname);
 static PGconn *connectDatabase(const char *dbname, const char *pghost, const char *pgport,
 	  const char *pguser, enum trivalue prompt_password, bool fail_on_error);
 static PGresult *executeQuery(PGconn *conn, const char *query);
@@ -69,7 +72,7 @@ static int	disable_triggers = 0;
 static int	inserts = 0;
 static int	no_tablespaces = 0;
 static int	use_setsessauth = 0;
-static int	no_security_label = 0;
+static int	no_security_labels = 0;
 static int	no_unlogged_table_data = 0;
 static int	server_version;
 
@@ -91,7 +94,6 @@ main(int argc, char *argv[])
 	bool		output_clean = false;
 	bool		roles_only = false;
 	bool		tablespaces_only = false;
-	bool		schema_only = false;
 	PGconn	   *conn;
 	int			encoding;
 	const char *std_strings;
@@ -135,7 +137,7 @@ main(int argc, char *argv[])
 		{"quote-all-identifiers", no_argument, &quote_all_identifiers, 1},
 		{"role", required_argument, NULL, 3},
 		{"use-set-session-authorization", no_argument, &use_setsessauth, 1},
-		{"no-security-label", no_argument, &no_security_label, 1},
+		{"no-security-labels", no_argument, &no_security_labels, 1},
 		{"no-unlogged-table-data", no_argument, &no_unlogged_table_data, 1},
 
 		{NULL, 0, NULL, 0}
@@ -185,7 +187,7 @@ main(int argc, char *argv[])
 
 	pgdumpopts = createPQExpBuffer();
 
-	while ((c = getopt_long(argc, argv, "acf:gh:il:oOp:rsS:tU:vwWxX:", long_options, &optindex)) != -1)
+	while ((c = getopt_long(argc, argv, "acf:gh:il:oOp:rsS:tU:vwWx", long_options, &optindex)) != -1)
 	{
 		switch (c)
 		{
@@ -241,7 +243,6 @@ main(int argc, char *argv[])
 				break;
 
 			case 's':
-				schema_only = true;
 				appendPQExpBuffer(pgdumpopts, " -s");
 				break;
 
@@ -278,30 +279,6 @@ main(int argc, char *argv[])
 			case 'x':
 				skip_acls = true;
 				appendPQExpBuffer(pgdumpopts, " -x");
-				break;
-
-			case 'X':
-				/* -X is a deprecated alternative to long options */
-				if (strcmp(optarg, "disable-dollar-quoting") == 0)
-					disable_dollar_quoting = 1;
-				else if (strcmp(optarg, "disable-triggers") == 0)
-					disable_triggers = 1;
-				else if (strcmp(optarg, "no-tablespaces") == 0)
-					no_tablespaces = 1;
-				else if (strcmp(optarg, "use-set-session-authorization") == 0)
-					use_setsessauth = 1;
-				else if (strcmp(optarg, "no-security-label") == 0)
-					no_security_label = 1;
-				else if (strcmp(optarg, "no-unlogged-table-data") == 0)
-					no_unlogged_table_data = 1;
-				else
-				{
-					fprintf(stderr,
-							_("%s: invalid -X option -- %s\n"),
-							progname, optarg);
-					fprintf(stderr, _("Try \"%s --help\" for more information.\n"), progname);
-					exit(1);
-				}
 				break;
 
 			case 0:
@@ -379,8 +356,8 @@ main(int argc, char *argv[])
 		appendPQExpBuffer(pgdumpopts, " --quote-all-identifiers");
 	if (use_setsessauth)
 		appendPQExpBuffer(pgdumpopts, " --use-set-session-authorization");
-	if (no_security_label)
-		appendPQExpBuffer(pgdumpopts, " --no-security-label");
+	if (no_security_labels)
+		appendPQExpBuffer(pgdumpopts, " --no-security-labels");
 	if (no_unlogged_table_data)
 		appendPQExpBuffer(pgdumpopts, " --no-unlogged-table-data");
 
@@ -572,15 +549,14 @@ help(void)
 	printf(_("  -t, --tablespaces-only      dump only tablespaces, no databases or roles\n"));
 	printf(_("  -x, --no-privileges         do not dump privileges (grant/revoke)\n"));
 	printf(_("  --binary-upgrade            for use by upgrade utilities only\n"));
-	printf(_("  --inserts                   dump data as INSERT commands, rather than COPY\n"));
 	printf(_("  --column-inserts            dump data as INSERT commands with column names\n"));
 	printf(_("  --disable-dollar-quoting    disable dollar quoting, use SQL standard quoting\n"));
 	printf(_("  --disable-triggers          disable triggers during data-only restore\n"));
+	printf(_("  --inserts                   dump data as INSERT commands, rather than COPY\n"));
+	printf(_("  --no-security-labels        do not dump security label assignments\n"));
 	printf(_("  --no-tablespaces            do not dump tablespace assignments\n"));
-	printf(_("  --quote-all-identifiers     quote all identifiers, even if not keywords\n"));
-	printf(_("  --role=ROLENAME             do SET ROLE before dump\n"));
-	printf(_("  --no-security-label         do not dump security label assignments\n"));
-	printf(_("  --no-unlogged-table-data	do not dump unlogged table data\n"));
+	printf(_("  --no-unlogged-table-data    do not dump unlogged table data\n"));
+	printf(_("  --quote-all-identifiers     quote all identifiers, even if not key words\n"));
 	printf(_("  --use-set-session-authorization\n"
 			 "                              use SET SESSION AUTHORIZATION commands instead of\n"
 	"                              ALTER OWNER commands to set ownership\n"));
@@ -592,6 +568,7 @@ help(void)
 	printf(_("  -U, --username=NAME      connect as specified database user\n"));
 	printf(_("  -w, --no-password        never prompt for password\n"));
 	printf(_("  -W, --password           force password prompt (should happen automatically)\n"));
+	printf(_("  --role=ROLENAME          do SET ROLE before dump\n"));
 
 	printf(_("\nIf -f/--file is not used, then the SQL script will be written to the standard\n"
 			 "output.\n\n"));
@@ -656,7 +633,6 @@ dumpRoles(PGconn *conn)
 				i_rolinherit,
 				i_rolcreaterole,
 				i_rolcreatedb,
-				i_rolcatupdate,
 				i_rolcanlogin,
 				i_rolconnlimit,
 				i_rolpassword,
@@ -669,7 +645,7 @@ dumpRoles(PGconn *conn)
 	if (server_version >= 90100)
 		printfPQExpBuffer(buf,
 						  "SELECT oid, rolname, rolsuper, rolinherit, "
-						  "rolcreaterole, rolcreatedb, rolcatupdate, "
+						  "rolcreaterole, rolcreatedb, "
 						  "rolcanlogin, rolconnlimit, rolpassword, "
 						  "rolvaliduntil, rolreplication, "
 			  "pg_catalog.shobj_description(oid, 'pg_authid') as rolcomment "
@@ -678,7 +654,7 @@ dumpRoles(PGconn *conn)
 	else if (server_version >= 80200)
 		printfPQExpBuffer(buf,
 						  "SELECT oid, rolname, rolsuper, rolinherit, "
-						  "rolcreaterole, rolcreatedb, rolcatupdate, "
+						  "rolcreaterole, rolcreatedb, "
 						  "rolcanlogin, rolconnlimit, rolpassword, "
 						  "rolvaliduntil, false as rolreplication, "
 			  "pg_catalog.shobj_description(oid, 'pg_authid') as rolcomment "
@@ -687,7 +663,7 @@ dumpRoles(PGconn *conn)
 	else if (server_version >= 80100)
 		printfPQExpBuffer(buf,
 						  "SELECT oid, rolname, rolsuper, rolinherit, "
-						  "rolcreaterole, rolcreatedb, rolcatupdate, "
+						  "rolcreaterole, rolcreatedb, "
 						  "rolcanlogin, rolconnlimit, rolpassword, "
 						  "rolvaliduntil, false as rolreplication, "
 						  "null as rolcomment "
@@ -700,7 +676,6 @@ dumpRoles(PGconn *conn)
 						  "true as rolinherit, "
 						  "usesuper as rolcreaterole, "
 						  "usecreatedb as rolcreatedb, "
-						  "usecatupd as rolcatupdate, "
 						  "true as rolcanlogin, "
 						  "-1 as rolconnlimit, "
 						  "passwd as rolpassword, "
@@ -714,7 +689,6 @@ dumpRoles(PGconn *conn)
 						  "true as rolinherit, "
 						  "false as rolcreaterole, "
 						  "false as rolcreatedb, "
-						  "false as rolcatupdate, "
 						  "false as rolcanlogin, "
 						  "-1 as rolconnlimit, "
 						  "null::text as rolpassword, "
@@ -734,7 +708,6 @@ dumpRoles(PGconn *conn)
 	i_rolinherit = PQfnumber(res, "rolinherit");
 	i_rolcreaterole = PQfnumber(res, "rolcreaterole");
 	i_rolcreatedb = PQfnumber(res, "rolcreatedb");
-	i_rolcatupdate = PQfnumber(res, "rolcatupdate");
 	i_rolcanlogin = PQfnumber(res, "rolcanlogin");
 	i_rolconnlimit = PQfnumber(res, "rolconnlimit");
 	i_rolpassword = PQfnumber(res, "rolpassword");
@@ -748,18 +721,18 @@ dumpRoles(PGconn *conn)
 	for (i = 0; i < PQntuples(res); i++)
 	{
 		const char *rolename;
+		Oid			auth_oid;
 
+		auth_oid = atooid(PQgetvalue(res, i, i_oid));
 		rolename = PQgetvalue(res, i, i_rolname);
 
 		resetPQExpBuffer(buf);
 
 		if (binary_upgrade)
 		{
-			Oid			auth_oid = atooid(PQgetvalue(res, i, i_oid));
-
 			appendPQExpBuffer(buf, "\n-- For binary upgrade, must preserve pg_authid.oid\n");
 			appendPQExpBuffer(buf,
-			 "SELECT binary_upgrade.set_next_pg_authid_oid('%u'::pg_catalog.oid);\n\n",
+							  "SELECT binary_upgrade.set_next_pg_authid_oid('%u'::pg_catalog.oid);\n\n",
 							  auth_oid);
 		}
 
@@ -826,11 +799,21 @@ dumpRoles(PGconn *conn)
 			appendPQExpBuffer(buf, ";\n");
 		}
 
-		fprintf(OPF, "%s", buf->data);
+		if (!no_security_labels && server_version >= 90200)
+			buildShSecLabels(conn, "pg_authid", auth_oid,
+							 buf, "ROLE", rolename);
 
-		if (server_version >= 70300)
-			dumpUserConfig(conn, rolename);
+		fprintf(OPF, "%s", buf->data);
 	}
+
+	/*
+	 * Dump configuration settings for roles after all roles have been dumped.
+	 * We do it this way because config settings for roles could mention the
+	 * names of other roles.
+	 */
+	if (server_version >= 70300)
+		for (i = 0; i < PQntuples(res); i++)
+			dumpUserConfig(conn, PQgetvalue(res, i, i_rolname));
 
 	PQclear(res);
 
@@ -1011,7 +994,7 @@ dumpTablespaces(PGconn *conn)
 	 * pg_xxx)
 	 */
 	if (server_version >= 90000)
-		res = executeQuery(conn, "SELECT spcname, "
+		res = executeQuery(conn, "SELECT oid, spcname, "
 						 "pg_catalog.pg_get_userbyid(spcowner) AS spcowner, "
 						   "spclocation, spcacl, "
 						   "array_to_string(spcoptions, ', '),"
@@ -1020,7 +1003,7 @@ dumpTablespaces(PGconn *conn)
 						   "WHERE spcname !~ '^pg_' "
 						   "ORDER BY 1");
 	else if (server_version >= 80200)
-		res = executeQuery(conn, "SELECT spcname, "
+		res = executeQuery(conn, "SELECT oid, spcname, "
 						 "pg_catalog.pg_get_userbyid(spcowner) AS spcowner, "
 						   "spclocation, spcacl, null, "
 						"pg_catalog.shobj_description(oid, 'pg_tablespace') "
@@ -1028,7 +1011,7 @@ dumpTablespaces(PGconn *conn)
 						   "WHERE spcname !~ '^pg_' "
 						   "ORDER BY 1");
 	else
-		res = executeQuery(conn, "SELECT spcname, "
+		res = executeQuery(conn, "SELECT oid, spcname, "
 						 "pg_catalog.pg_get_userbyid(spcowner) AS spcowner, "
 						   "spclocation, spcacl, "
 						   "null, null "
@@ -1042,12 +1025,13 @@ dumpTablespaces(PGconn *conn)
 	for (i = 0; i < PQntuples(res); i++)
 	{
 		PQExpBuffer buf = createPQExpBuffer();
-		char	   *spcname = PQgetvalue(res, i, 0);
-		char	   *spcowner = PQgetvalue(res, i, 1);
-		char	   *spclocation = PQgetvalue(res, i, 2);
-		char	   *spcacl = PQgetvalue(res, i, 3);
-		char	   *spcoptions = PQgetvalue(res, i, 4);
-		char	   *spccomment = PQgetvalue(res, i, 5);
+		uint32		spcoid = atooid(PQgetvalue(res, i, 0));
+		char	   *spcname = PQgetvalue(res, i, 1);
+		char	   *spcowner = PQgetvalue(res, i, 2);
+		char	   *spclocation = PQgetvalue(res, i, 3);
+		char	   *spcacl = PQgetvalue(res, i, 4);
+		char	   *spcoptions = PQgetvalue(res, i, 5);
+		char	   *spccomment = PQgetvalue(res, i, 6);
 		char	   *fspcname;
 
 		/* needed for buildACLCommands() */
@@ -1080,6 +1064,10 @@ dumpTablespaces(PGconn *conn)
 			appendStringLiteralConn(buf, spccomment, conn);
 			appendPQExpBuffer(buf, ";\n");
 		}
+
+		if (!no_security_labels && server_version >= 90200)
+			buildShSecLabels(conn, "pg_tablespace", spcoid,
+							 buf, "TABLESPACE", fspcname);
 
 		fprintf(OPF, "%s", buf->data);
 
@@ -1645,6 +1633,28 @@ runPgDump(const char *dbname)
 	return ret;
 }
 
+/*
+ * buildShSecLabels
+ *
+ * Build SECURITY LABEL command(s) for an shared object
+ *
+ * The caller has to provide object type and identifier to select security
+ * labels from pg_seclabels system view.
+ */
+static void
+buildShSecLabels(PGconn *conn, const char *catalog_name, uint32 objectId,
+				 PQExpBuffer buffer, const char *target, const char *objname)
+{
+	PQExpBuffer	sql = createPQExpBuffer();
+	PGresult   *res;
+
+	buildShSecLabelQuery(conn, catalog_name, objectId, sql);
+	res = executeQuery(conn, sql->data);
+	emitShSecLabels(conn, res, buffer, target, objname);
+
+	PQclear(res);
+	destroyPQExpBuffer(sql);
+}
 
 /*
  * Make a database connection with the given parameters.  An

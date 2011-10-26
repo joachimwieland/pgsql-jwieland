@@ -53,7 +53,7 @@
 #define RTOverAboveStrategyNumber		12
 #define RTOldContainsStrategyNumber		13		/* for old spelling of @> */
 #define RTOldContainedByStrategyNumber	14		/* for old spelling of <@ */
-#define RTKNNSearchStrategyNumber 		15
+#define RTKNNSearchStrategyNumber		15
 
 /*
  * Page opaque data in a GiST index page.
@@ -144,7 +144,7 @@ typedef struct GISTENTRY
 typedef struct
 {
 	int32		n;				/* number of elements */
-	GISTENTRY	vector[1];		/* variable-length array */
+	GISTENTRY	vector[FLEXIBLE_ARRAY_MEMBER];
 } GistEntryVector;
 
 #define GEVHDRSZ	(offsetof(GistEntryVector, vector))

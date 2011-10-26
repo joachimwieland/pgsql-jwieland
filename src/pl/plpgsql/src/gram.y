@@ -21,6 +21,7 @@
 #include "parser/parse_type.h"
 #include "parser/scanner.h"
 #include "parser/scansup.h"
+#include "utils/builtins.h"
 
 
 /* Location tracking support --- simpler than bison's default */
@@ -122,6 +123,7 @@ static	List			*read_raise_options(void);
 		PLcword					cword;
 		PLwdatum				wdatum;
 		bool					boolean;
+		Oid						oid;
 		struct
 		{
 			char *name;
@@ -167,6 +169,7 @@ static	List			*read_raise_options(void);
 %type <boolean>	decl_const decl_notnull exit_type
 %type <expr>	decl_defval decl_cursor_query
 %type <dtype>	decl_datatype
+%type <oid>		decl_collate
 %type <datum>	decl_cursor_args
 %type <list>	decl_cursor_arglist
 %type <nsitem>	decl_aliasitem
@@ -175,7 +178,7 @@ static	List			*read_raise_options(void);
 %type <expr>	expr_until_then expr_until_loop opt_expr_until_when
 %type <expr>	opt_exitcond
 
-%type <ival>	assign_var
+%type <ival>	assign_var foreach_slice
 %type <var>		cursor_variable
 %type <datum>	decl_cursor_arg
 %type <forvariable>	for_variable
@@ -190,7 +193,7 @@ static	List			*read_raise_options(void);
 %type <stmt>	stmt_return stmt_raise stmt_execsql
 %type <stmt>	stmt_dynexecute stmt_for stmt_perform stmt_getdiag
 %type <stmt>	stmt_open stmt_fetch stmt_move stmt_close stmt_null
-%type <stmt>	stmt_case
+%type <stmt>	stmt_case stmt_foreach_a
 
 %type <list>	proc_exceptions
 %type <exception_block> exception_sect
@@ -200,6 +203,7 @@ static	List			*read_raise_options(void);
 %type <casewhen>	case_when
 %type <list>	case_when_list opt_case_else
 
+%type <boolean>	getdiag_area_opt
 %type <list>	getdiag_list
 %type <diagitem> getdiag_list_item
 %type <ival>	getdiag_item getdiag_target
@@ -239,13 +243,16 @@ static	List			*read_raise_options(void);
 %token <keyword>	K_ABSOLUTE
 %token <keyword>	K_ALIAS
 %token <keyword>	K_ALL
+%token <keyword>	K_ARRAY
 %token <keyword>	K_BACKWARD
 %token <keyword>	K_BEGIN
 %token <keyword>	K_BY
 %token <keyword>	K_CASE
 %token <keyword>	K_CLOSE
+%token <keyword>	K_COLLATE
 %token <keyword>	K_CONSTANT
 %token <keyword>	K_CONTINUE
+%token <keyword>	K_CURRENT
 %token <keyword>	K_CURSOR
 %token <keyword>	K_DEBUG
 %token <keyword>	K_DECLARE
@@ -264,6 +271,7 @@ static	List			*read_raise_options(void);
 %token <keyword>	K_FETCH
 %token <keyword>	K_FIRST
 %token <keyword>	K_FOR
+%token <keyword>	K_FOREACH
 %token <keyword>	K_FORWARD
 %token <keyword>	K_FROM
 %token <keyword>	K_GET
@@ -278,6 +286,7 @@ static	List			*read_raise_options(void);
 %token <keyword>	K_LOG
 %token <keyword>	K_LOOP
 %token <keyword>	K_MESSAGE
+%token <keyword>	K_MESSAGE_TEXT
 %token <keyword>	K_MOVE
 %token <keyword>	K_NEXT
 %token <keyword>	K_NO
@@ -288,17 +297,23 @@ static	List			*read_raise_options(void);
 %token <keyword>	K_OPTION
 %token <keyword>	K_OR
 %token <keyword>	K_PERFORM
+%token <keyword>	K_PG_EXCEPTION_CONTEXT
+%token <keyword>	K_PG_EXCEPTION_DETAIL
+%token <keyword>	K_PG_EXCEPTION_HINT
 %token <keyword>	K_PRIOR
 %token <keyword>	K_QUERY
 %token <keyword>	K_RAISE
 %token <keyword>	K_RELATIVE
 %token <keyword>	K_RESULT_OID
 %token <keyword>	K_RETURN
+%token <keyword>	K_RETURNED_SQLSTATE
 %token <keyword>	K_REVERSE
 %token <keyword>	K_ROWTYPE
 %token <keyword>	K_ROW_COUNT
 %token <keyword>	K_SCROLL
+%token <keyword>	K_SLICE
 %token <keyword>	K_SQLSTATE
+%token <keyword>	K_STACKED
 %token <keyword>	K_STRICT
 %token <keyword>	K_THEN
 %token <keyword>	K_TO
@@ -425,9 +440,26 @@ decl_stmt		: decl_statement
 					}
 				;
 
-decl_statement	: decl_varname decl_const decl_datatype decl_notnull decl_defval
+decl_statement	: decl_varname decl_const decl_datatype decl_collate decl_notnull decl_defval
 					{
 						PLpgSQL_variable	*var;
+
+						/*
+						 * If a collation is supplied, insert it into the
+						 * datatype.  We assume decl_datatype always returns
+						 * a freshly built struct not shared with other
+						 * variables.
+						 */
+						if (OidIsValid($4))
+						{
+							if (!OidIsValid($3->collation))
+								ereport(ERROR,
+										(errcode(ERRCODE_DATATYPE_MISMATCH),
+										 errmsg("collations are not supported by type %s",
+												format_type_be($3->typoid)),
+										 parser_errposition(@4)));
+							$3->collation = $4;
+						}
 
 						var = plpgsql_build_variable($1.name, $1.lineno,
 													 $3, true);
@@ -441,10 +473,10 @@ decl_statement	: decl_varname decl_const decl_datatype decl_notnull decl_defval
 										 errmsg("row or record variable cannot be CONSTANT"),
 										 parser_errposition(@2)));
 						}
-						if ($4)
+						if ($5)
 						{
 							if (var->dtype == PLPGSQL_DTYPE_VAR)
-								((PLpgSQL_var *) var)->notnull = $4;
+								((PLpgSQL_var *) var)->notnull = $5;
 							else
 								ereport(ERROR,
 										(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -452,10 +484,10 @@ decl_statement	: decl_varname decl_const decl_datatype decl_notnull decl_defval
 										 parser_errposition(@4)));
 
 						}
-						if ($5 != NULL)
+						if ($6 != NULL)
 						{
 							if (var->dtype == PLPGSQL_DTYPE_VAR)
-								((PLpgSQL_var *) var)->default_val = $5;
+								((PLpgSQL_var *) var)->default_val = $6;
 							else
 								ereport(ERROR,
 										(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -484,7 +516,8 @@ decl_statement	: decl_varname decl_const decl_datatype decl_notnull decl_defval
 						new = (PLpgSQL_var *)
 							plpgsql_build_variable($1.name, $1.lineno,
 												   plpgsql_build_datatype(REFCURSOROID,
-																		  -1),
+																		  -1,
+																		  InvalidOid),
 												   true);
 
 						curname_def = palloc0(sizeof(PLpgSQL_expr));
@@ -681,6 +714,19 @@ decl_datatype	:
 					}
 				;
 
+decl_collate	:
+					{ $$ = InvalidOid; }
+				| K_COLLATE T_WORD
+					{
+						$$ = get_collation_oid(list_make1(makeString($2.ident)),
+											   false);
+					}
+				| K_COLLATE T_CWORD
+					{
+						$$ = get_collation_oid($2.idents, false);
+					}
+				;
+
 decl_notnull	:
 					{ $$ = false; }
 				| K_NOT K_NULL
@@ -739,6 +785,8 @@ proc_stmt		: pl_block ';'
 						{ $$ = $1; }
 				| stmt_for
 						{ $$ = $1; }
+				| stmt_foreach_a
+						{ $$ = $1; }
 				| stmt_exit
 						{ $$ = $1; }
 				| stmt_return
@@ -792,16 +840,71 @@ stmt_assign		: assign_var assign_operator expr_until_semi
 					}
 				;
 
-stmt_getdiag	: K_GET K_DIAGNOSTICS getdiag_list ';'
+stmt_getdiag	: K_GET getdiag_area_opt K_DIAGNOSTICS getdiag_list ';'
 					{
 						PLpgSQL_stmt_getdiag	 *new;
+						ListCell		*lc;
 
 						new = palloc0(sizeof(PLpgSQL_stmt_getdiag));
 						new->cmd_type = PLPGSQL_STMT_GETDIAG;
 						new->lineno   = plpgsql_location_to_lineno(@1);
-						new->diag_items  = $3;
+						new->is_stacked = $2;
+						new->diag_items = $4;
+
+						/*
+						 * Check information items are valid for area option.
+						 */
+						foreach(lc, new->diag_items)
+						{
+							PLpgSQL_diag_item *ditem = (PLpgSQL_diag_item *) lfirst(lc);
+
+							switch (ditem->kind)
+							{
+								/* these fields are disallowed in stacked case */
+								case PLPGSQL_GETDIAG_ROW_COUNT:
+								case PLPGSQL_GETDIAG_RESULT_OID:
+									if (new->is_stacked)
+										ereport(ERROR,
+												(errcode(ERRCODE_SYNTAX_ERROR),
+												 errmsg("diagnostics item %s is not allowed in GET STACKED DIAGNOSTICS",
+														plpgsql_getdiag_kindname(ditem->kind)),
+												 parser_errposition(@1)));
+									break;
+								/* these fields are disallowed in current case */
+								case PLPGSQL_GETDIAG_ERROR_CONTEXT:
+								case PLPGSQL_GETDIAG_ERROR_DETAIL:
+								case PLPGSQL_GETDIAG_ERROR_HINT:
+								case PLPGSQL_GETDIAG_RETURNED_SQLSTATE:
+								case PLPGSQL_GETDIAG_MESSAGE_TEXT:
+									if (!new->is_stacked)
+										ereport(ERROR,
+												(errcode(ERRCODE_SYNTAX_ERROR),
+												 errmsg("diagnostics item %s is not allowed in GET CURRENT DIAGNOSTICS",
+														plpgsql_getdiag_kindname(ditem->kind)),
+												 parser_errposition(@1)));
+									break;
+								default:
+									elog(ERROR, "unrecognized diagnostic item kind: %d",
+										 ditem->kind);
+									break;
+							}
+						}
 
 						$$ = (PLpgSQL_stmt *)new;
+					}
+				;
+
+getdiag_area_opt :
+					{
+						$$ = false;
+					}
+				| K_CURRENT
+					{
+						$$ = false;
+					}
+				| K_STACKED
+					{
+						$$ = true;
 					}
 				;
 
@@ -837,6 +940,21 @@ getdiag_item :
 						else if (tok_is_keyword(tok, &yylval,
 												K_RESULT_OID, "result_oid"))
 							$$ = PLPGSQL_GETDIAG_RESULT_OID;
+						else if (tok_is_keyword(tok, &yylval,
+												K_PG_EXCEPTION_DETAIL, "pg_exception_detail"))
+							$$ = PLPGSQL_GETDIAG_ERROR_DETAIL;
+						else if (tok_is_keyword(tok, &yylval,
+												K_PG_EXCEPTION_HINT, "pg_exception_hint"))
+							$$ = PLPGSQL_GETDIAG_ERROR_HINT;
+						else if (tok_is_keyword(tok, &yylval,
+												K_PG_EXCEPTION_CONTEXT, "pg_exception_context"))
+							$$ = PLPGSQL_GETDIAG_ERROR_CONTEXT;
+						else if (tok_is_keyword(tok, &yylval,
+												K_MESSAGE_TEXT, "message_text"))
+							$$ = PLPGSQL_GETDIAG_MESSAGE_TEXT;
+						else if (tok_is_keyword(tok, &yylval,
+												K_RETURNED_SQLSTATE, "returned_sqlstate"))
+							$$ = PLPGSQL_GETDIAG_RETURNED_SQLSTATE;
 						else
 							yyerror("unrecognized GET DIAGNOSTICS item");
 					}
@@ -880,6 +998,8 @@ assign_var		: T_DATUM
 						new->dtype		= PLPGSQL_DTYPE_ARRAYELEM;
 						new->subscript	= $3;
 						new->arrayparentno = $1;
+						/* initialize cached type data to "not valid" */
+						new->parenttypoid = InvalidOid;
 
 						plpgsql_adddatum((PLpgSQL_datum *) new);
 
@@ -1243,7 +1363,8 @@ for_control		: for_variable K_IN
 									plpgsql_build_variable($1.name,
 														   $1.lineno,
 														   plpgsql_build_datatype(INT4OID,
-																				  -1),
+																				  -1,
+																				  InvalidOid),
 														   true);
 
 								new = palloc0(sizeof(PLpgSQL_stmt_fori));
@@ -1383,6 +1504,58 @@ for_variable	: T_DATUM
 					{
 						/* just to give a better message than "syntax error" */
 						cword_is_not_variable(&($1), @1);
+					}
+				;
+
+stmt_foreach_a	: opt_block_label K_FOREACH for_variable foreach_slice K_IN K_ARRAY expr_until_loop loop_body
+					{
+						PLpgSQL_stmt_foreach_a *new;
+
+						new = palloc0(sizeof(PLpgSQL_stmt_foreach_a));
+						new->cmd_type = PLPGSQL_STMT_FOREACH_A;
+						new->lineno = plpgsql_location_to_lineno(@2);
+						new->label = $1;
+						new->slice = $4;
+						new->expr = $7;
+						new->body = $8.stmts;
+
+						if ($3.rec)
+						{
+							new->varno = $3.rec->dno;
+							check_assignable((PLpgSQL_datum *) $3.rec, @3);
+						}
+						else if ($3.row)
+						{
+							new->varno = $3.row->dno;
+							check_assignable((PLpgSQL_datum *) $3.row, @3);
+						}
+						else if ($3.scalar)
+						{
+							new->varno = $3.scalar->dno;
+							check_assignable($3.scalar, @3);
+						}
+						else
+						{
+							ereport(ERROR,
+									(errcode(ERRCODE_SYNTAX_ERROR),
+									 errmsg("loop variable of FOREACH must be a known variable or list of variables"),
+											 parser_errposition(@3)));
+						}
+
+						check_labels($1, $8.end_label, $8.end_label_location);
+						plpgsql_ns_pop();
+
+						$$ = (PLpgSQL_stmt *) new;
+					}
+				;
+
+foreach_slice	:
+					{
+						$$ = 0;
+					}
+				| K_SLICE ICONST
+					{
+						$$ = $2;
 					}
 				;
 
@@ -1875,13 +2048,17 @@ exception_sect	:
 						PLpgSQL_variable *var;
 
 						var = plpgsql_build_variable("sqlstate", lineno,
-													 plpgsql_build_datatype(TEXTOID, -1),
+													 plpgsql_build_datatype(TEXTOID,
+																			-1,
+																			plpgsql_curr_compile->fn_input_collation),
 													 true);
 						((PLpgSQL_var *) var)->isconst = true;
 						new->sqlstate_varno = var->dno;
 
 						var = plpgsql_build_variable("sqlerrm", lineno,
-													 plpgsql_build_datatype(TEXTOID, -1),
+													 plpgsql_build_datatype(TEXTOID,
+																			-1,
+																			plpgsql_curr_compile->fn_input_collation),
 													 true);
 						((PLpgSQL_var *) var)->isconst = true;
 						new->sqlerrm_varno = var->dno;
@@ -2035,8 +2212,10 @@ any_identifier	: T_WORD
 unreserved_keyword	:
 				K_ABSOLUTE
 				| K_ALIAS
+				| K_ARRAY
 				| K_BACKWARD
 				| K_CONSTANT
+				| K_CURRENT
 				| K_CURSOR
 				| K_DEBUG
 				| K_DETAIL
@@ -2051,19 +2230,26 @@ unreserved_keyword	:
 				| K_LAST
 				| K_LOG
 				| K_MESSAGE
+				| K_MESSAGE_TEXT
 				| K_NEXT
 				| K_NO
 				| K_NOTICE
 				| K_OPTION
+				| K_PG_EXCEPTION_CONTEXT
+				| K_PG_EXCEPTION_DETAIL
+				| K_PG_EXCEPTION_HINT
 				| K_PRIOR
 				| K_QUERY
 				| K_RELATIVE
 				| K_RESULT_OID
+				| K_RETURNED_SQLSTATE
 				| K_REVERSE
 				| K_ROW_COUNT
 				| K_ROWTYPE
 				| K_SCROLL
+				| K_SLICE
 				| K_SQLSTATE
+				| K_STACKED
 				| K_TYPE
 				| K_USE_COLUMN
 				| K_USE_VARIABLE
@@ -2367,7 +2553,8 @@ read_datatype(int tok)
 				yyerror("incomplete data type declaration");
 		}
 		/* Possible followers for datatype in a declaration */
-		if (tok == K_NOT || tok == '=' || tok == COLON_EQUALS || tok == K_DEFAULT)
+		if (tok == K_COLLATE || tok == K_NOT ||
+			tok == '=' || tok == COLON_EQUALS || tok == K_DEFAULT)
 			break;
 		/* Possible followers for datatype in a cursor_arg list */
 		if ((tok == ',' || tok == ')') && parenlevel == 0)
@@ -3168,7 +3355,8 @@ parse_datatype(const char *string, int location)
 	error_context_stack = syntax_errcontext.previous;
 
 	/* Okay, build a PLpgSQL_type data structure for it */
-	return plpgsql_build_datatype(type_id, typmod);
+	return plpgsql_build_datatype(type_id, typmod,
+								  plpgsql_curr_compile->fn_input_collation);
 }
 
 /*
@@ -3341,7 +3529,9 @@ make_case(int location, PLpgSQL_expr *t_expr,
 		 */
 		t_var = (PLpgSQL_var *)
 			plpgsql_build_variable(varname, new->lineno,
-								   plpgsql_build_datatype(INT4OID, -1),
+								   plpgsql_build_datatype(INT4OID,
+														  -1,
+														  InvalidOid),
 								   true);
 		new->t_varno = t_var->dno;
 

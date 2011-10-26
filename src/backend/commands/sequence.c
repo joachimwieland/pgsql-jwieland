@@ -14,9 +14,7 @@
  */
 #include "postgres.h"
 
-#include "access/heapam.h"
 #include "access/transam.h"
-#include "access/xact.h"
 #include "access/xlogutils.h"
 #include "catalog/dependency.h"
 #include "catalog/namespace.h"
@@ -27,7 +25,6 @@
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
-#include "storage/bufmgr.h"
 #include "storage/lmgr.h"
 #include "storage/proc.h"
 #include "storage/smgr.h"
@@ -119,6 +116,12 @@ DefineSequence(CreateSeqStmt *seq)
 	int			i;
 	NameData	name;
 
+	/* Unlogged sequences are not implemented -- not clear if useful. */
+	if (seq->sequence->relpersistence == RELPERSISTENCE_UNLOGGED)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("unlogged sequences are not supported")));
+
 	/* Check and set all option values */
 	init_params(seq->options, true, &new, &owned_by);
 
@@ -133,9 +136,12 @@ DefineSequence(CreateSeqStmt *seq)
 		coldef->inhcount = 0;
 		coldef->is_local = true;
 		coldef->is_not_null = true;
+		coldef->is_from_type = false;
 		coldef->storage = 0;
 		coldef->raw_default = NULL;
 		coldef->cooked_default = NULL;
+		coldef->collClause = NULL;
+		coldef->collOid = InvalidOid;
 		coldef->constraints = NIL;
 
 		null[i - 1] = false;
@@ -278,7 +284,7 @@ ResetSequence(Oid seq_relid)
 	seq->log_cnt = 1;
 
 	/*
-	 * Create a new storage file for the sequence.  We want to keep the
+	 * Create a new storage file for the sequence.	We want to keep the
 	 * sequence's relfrozenxid at 0, since it won't contain any unfrozen XIDs.
 	 */
 	RelationSetNewRelfilenode(seq_rel, InvalidTransactionId);
@@ -418,8 +424,8 @@ AlterSequence(AlterSeqStmt *stmt)
 	FormData_pg_sequence new;
 	List	   *owned_by;
 
-	/* open and AccessShareLock sequence */
-	relid = RangeVarGetRelid(stmt->sequence, false);
+	/* Open and lock sequence. */
+	relid = RangeVarGetRelid(stmt->sequence, AccessShareLock, false, false);
 	init_sequence(relid, &elm, &seqrel);
 
 	/* allow ALTER to sequence owner only */
@@ -498,7 +504,16 @@ nextval(PG_FUNCTION_ARGS)
 	Oid			relid;
 
 	sequence = makeRangeVarFromNameList(textToQualifiedNameList(seqin));
-	relid = RangeVarGetRelid(sequence, false);
+
+	/*
+	 * XXX: This is not safe in the presence of concurrent DDL, but
+	 * acquiring a lock here is more expensive than letting nextval_internal
+	 * do it, since the latter maintains a cache that keeps us from hitting
+	 * the lock manager more than once per transaction.  It's not clear
+	 * whether the performance penalty is material in practice, but for now,
+	 * we do it this way.
+	 */
+	relid = RangeVarGetRelid(sequence, NoLock, false, false);
 
 	PG_RETURN_INT64(nextval_internal(relid));
 }
@@ -1028,7 +1043,7 @@ init_sequence(Oid relid, SeqTable *p_elm, Relation *p_rel)
 
 	/*
 	 * If the sequence has been transactionally replaced since we last saw it,
-	 * discard any cached-but-unissued values.  We do not touch the currval()
+	 * discard any cached-but-unissued values.	We do not touch the currval()
 	 * state, however.
 	 */
 	if (seqrel->rd_rel->relfilenode != elm->filenode)
@@ -1066,6 +1081,22 @@ read_info(SeqTable elm, Relation rel, Buffer *buf)
 	lp = PageGetItemId(page, FirstOffsetNumber);
 	Assert(ItemIdIsNormal(lp));
 	tuple.t_data = (HeapTupleHeader) PageGetItem(page, lp);
+
+	/*
+	 * Previous releases of Postgres neglected to prevent SELECT FOR UPDATE on
+	 * a sequence, which would leave a non-frozen XID in the sequence tuple's
+	 * xmax, which eventually leads to clog access failures or worse. If we
+	 * see this has happened, clean up after it.  We treat this like a hint
+	 * bit update, ie, don't bother to WAL-log it, since we can certainly do
+	 * this again if the update gets lost.
+	 */
+	if (HeapTupleHeaderGetXmax(tuple.t_data) != InvalidTransactionId)
+	{
+		HeapTupleHeaderSetXmax(tuple.t_data, InvalidTransactionId);
+		tuple.t_data->t_infomask &= ~HEAP_XMAX_COMMITTED;
+		tuple.t_data->t_infomask |= HEAP_XMAX_INVALID;
+		SetBufferCommitInfoNeedsSave(*buf);
+	}
 
 	seq = (Form_pg_sequence) GETSTRUCT(&tuple);
 
@@ -1446,11 +1477,16 @@ pg_sequence_parameters(PG_FUNCTION_ARGS)
 						RelationGetRelationName(seqrel))));
 
 	tupdesc = CreateTemplateTupleDesc(5, false);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 1, "start_value", INT8OID, -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 2, "minimum_value", INT8OID, -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 3, "maximum_value", INT8OID, -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 4, "increment", INT8OID, -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 5, "cycle_option", BOOLOID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 1, "start_value",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 2, "minimum_value",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 3, "maximum_value",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 4, "increment",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 5, "cycle_option",
+					   BOOLOID, -1, 0);
 
 	BlessTupleDesc(tupdesc);
 

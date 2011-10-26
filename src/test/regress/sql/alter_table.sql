@@ -221,11 +221,55 @@ DELETE FROM tmp3 where a=5;
 
 -- Try (and succeed)
 ALTER TABLE tmp3 add constraint tmpconstr foreign key (a) references tmp2 match full;
+ALTER TABLE tmp3 drop constraint tmpconstr;
+
+INSERT INTO tmp3 values (5,50);
+
+-- Try NOT VALID and then VALIDATE CONSTRAINT, but fails. Delete failure then re-validate
+ALTER TABLE tmp3 add constraint tmpconstr foreign key (a) references tmp2 match full NOT VALID;
+ALTER TABLE tmp3 validate constraint tmpconstr;
+
+-- Delete failing row
+DELETE FROM tmp3 where a=5;
+
+-- Try (and succeed) and repeat to show it works on already valid constraint
+ALTER TABLE tmp3 validate constraint tmpconstr;
+ALTER TABLE tmp3 validate constraint tmpconstr;
+
+-- Try a non-verified CHECK constraint
+ALTER TABLE tmp3 ADD CONSTRAINT b_greater_than_ten CHECK (b > 10); -- fail
+ALTER TABLE tmp3 ADD CONSTRAINT b_greater_than_ten CHECK (b > 10) NOT VALID; -- succeeds
+ALTER TABLE tmp3 VALIDATE CONSTRAINT b_greater_than_ten; -- fails
+DELETE FROM tmp3 WHERE NOT b > 10;
+ALTER TABLE tmp3 VALIDATE CONSTRAINT b_greater_than_ten; -- succeeds
+ALTER TABLE tmp3 VALIDATE CONSTRAINT b_greater_than_ten; -- succeeds
+
+-- Test inherited NOT VALID CHECK constraints
+select * from tmp3;
+CREATE TABLE tmp6 () INHERITS (tmp3);
+CREATE TABLE tmp7 () INHERITS (tmp3);
+
+INSERT INTO tmp6 VALUES (6, 30), (7, 16);
+ALTER TABLE tmp3 ADD CONSTRAINT b_le_20 CHECK (b <= 20) NOT VALID;
+ALTER TABLE tmp3 VALIDATE CONSTRAINT b_le_20;	-- fails
+DELETE FROM tmp6 WHERE b > 20;
+ALTER TABLE tmp3 VALIDATE CONSTRAINT b_le_20;	-- succeeds
+
+-- An already validated constraint must not be revalidated
+CREATE FUNCTION boo(int) RETURNS int IMMUTABLE STRICT LANGUAGE plpgsql AS $$ BEGIN RAISE NOTICE 'boo: %', $1; RETURN $1; END; $$;
+INSERT INTO tmp7 VALUES (8, 18);
+ALTER TABLE tmp7 ADD CONSTRAINT identity CHECK (b = boo(b));
+ALTER TABLE tmp3 ADD CONSTRAINT IDENTITY check (b = boo(b)) NOT VALID;
+ALTER TABLE tmp3 VALIDATE CONSTRAINT identity;
 
 -- Try (and fail) to create constraint from tmp5(a) to tmp4(a) - unique constraint on
 -- tmp4 is a,b
 
 ALTER TABLE tmp5 add constraint tmpconstr foreign key(a) references tmp4(a) match full;
+
+DROP TABLE tmp7;
+
+DROP TABLE tmp6;
 
 DROP TABLE tmp5;
 
@@ -234,6 +278,23 @@ DROP TABLE tmp4;
 DROP TABLE tmp3;
 
 DROP TABLE tmp2;
+
+-- NOT VALID with plan invalidation -- ensure we don't use a constraint for
+-- exclusion until validated
+set constraint_exclusion TO 'partition';
+create table nv_parent (d date); 
+create table nv_child_2010 () inherits (nv_parent);
+create table nv_child_2011 () inherits (nv_parent);
+alter table nv_child_2010 add check (d between '2010-01-01'::date and '2010-12-31'::date) not valid;
+alter table nv_child_2011 add check (d between '2011-01-01'::date and '2011-12-31'::date) not valid;
+explain (costs off) select * from nv_parent where d between '2011-08-01' and '2011-08-31';
+create table nv_child_2009 (check (d between '2009-01-01'::date and '2009-12-31'::date)) inherits (nv_parent);
+explain (costs off) select * from nv_parent where d between '2011-08-01'::date and '2011-08-31'::date;
+explain (costs off) select * from nv_parent where d between '2009-08-01'::date and '2009-08-31'::date;
+-- after validation, the constraint should be used
+alter table nv_child_2011 VALIDATE CONSTRAINT nv_child_2011_d_check;
+explain (costs off) select * from nv_parent where d between '2009-08-01'::date and '2009-08-31'::date;
+
 
 -- Foreign key adding test with mixed types
 
@@ -929,6 +990,18 @@ order by relname, attnum;
 
 drop table p1, p2 cascade;
 
+-- test attinhcount tracking with merged columns
+
+create table depth0();
+create table depth1(c text) inherits (depth0);
+create table depth2() inherits (depth1);
+alter table depth0 add c text;
+
+select attrelid::regclass, attname, attinhcount, attislocal
+from pg_attribute
+where attnum > 0 and attrelid::regclass in ('depth0', 'depth1', 'depth2')
+order by attrelid::regclass::text, attnum;
+
 --
 -- Test the ALTER TABLE SET WITH/WITHOUT OIDS command
 --
@@ -1097,6 +1170,27 @@ create table tab1 (a int, b text);
 create table tab2 (x int, y tab1);
 alter table tab1 alter column b type varchar; -- fails
 
+-- disallow recursive containment of row types
+create temp table recur1 (f1 int);
+alter table recur1 add column f2 recur1; -- fails
+alter table recur1 add column f2 recur1[]; -- fails
+create domain array_of_recur1 as recur1[];
+alter table recur1 add column f2 array_of_recur1; -- fails
+create temp table recur2 (f1 int, f2 recur1);
+alter table recur1 add column f2 recur2; -- fails
+alter table recur1 add column f2 int;
+alter table recur1 alter column f2 type recur2; -- fails
+
+-- SET STORAGE may need to add a TOAST table
+create table test_storage (a text);
+alter table test_storage alter a set storage plain;
+alter table test_storage add b int default 0; -- rewrite table to remove its TOAST table
+alter table test_storage alter a set storage extended; -- re-add TOAST table
+
+select reltoastrelid <> 0 as has_toast_table
+from pg_class
+where oid = 'test_storage'::regclass;
+
 --
 -- lock levels
 --
@@ -1127,7 +1221,6 @@ group by c.relname;
 
 create table alterlock (f1 int primary key, f2 text);
 
--- share update exclusive
 begin; alter table alterlock alter column f2 set statistics 150;
 select * from my_locks order by 1;
 rollback;
@@ -1164,7 +1257,6 @@ begin; alter table alterlock alter column f2 set storage extended;
 select * from my_locks order by 1;
 rollback;
 
--- share row exclusive
 begin; alter table alterlock alter column f2 set default 'x';
 select * from my_locks order by 1;
 rollback;
@@ -1298,6 +1390,7 @@ ALTER TYPE test_type1 ALTER ATTRIBUTE b TYPE varchar; -- fails
 
 CREATE TYPE test_type2 AS (a int, b text);
 CREATE TABLE test_tbl2 OF test_type2;
+CREATE TABLE test_tbl2_subclass () INHERITS (test_tbl2);
 \d test_type2
 \d test_tbl2
 
@@ -1320,6 +1413,54 @@ ALTER TYPE test_type2 RENAME ATTRIBUTE a TO aa; -- fails
 ALTER TYPE test_type2 RENAME ATTRIBUTE a TO aa CASCADE;
 \d test_type2
 \d test_tbl2
+\d test_tbl2_subclass
+
+DROP TABLE test_tbl2_subclass;
+
+-- This test isn't that interesting on its own, but the purpose is to leave
+-- behind a table to test pg_upgrade with. The table has a composite type
+-- column in it, and the composite type has a dropped attribute.
+CREATE TYPE test_type3 AS (a int);
+CREATE TABLE test_tbl3 (c) AS SELECT '(1)'::test_type3;
+ALTER TYPE test_type3 DROP ATTRIBUTE a, ADD ATTRIBUTE b int;
 
 CREATE TYPE test_type_empty AS ();
 DROP TYPE test_type_empty;
+
+--
+-- typed tables: OF / NOT OF
+--
+
+CREATE TYPE tt_t0 AS (z inet, x int, y numeric(8,2));
+ALTER TYPE tt_t0 DROP ATTRIBUTE z;
+CREATE TABLE tt0 (x int NOT NULL, y numeric(8,2));	-- OK
+CREATE TABLE tt1 (x int, y bigint);					-- wrong base type
+CREATE TABLE tt2 (x int, y numeric(9,2));			-- wrong typmod
+CREATE TABLE tt3 (y numeric(8,2), x int);			-- wrong column order
+CREATE TABLE tt4 (x int);							-- too few columns
+CREATE TABLE tt5 (x int, y numeric(8,2), z int);	-- too few columns
+CREATE TABLE tt6 () INHERITS (tt0);					-- can't have a parent
+CREATE TABLE tt7 (x int, q text, y numeric(8,2)) WITH OIDS;
+ALTER TABLE tt7 DROP q;								-- OK
+
+ALTER TABLE tt0 OF tt_t0;
+ALTER TABLE tt1 OF tt_t0;
+ALTER TABLE tt2 OF tt_t0;
+ALTER TABLE tt3 OF tt_t0;
+ALTER TABLE tt4 OF tt_t0;
+ALTER TABLE tt5 OF tt_t0;
+ALTER TABLE tt6 OF tt_t0;
+ALTER TABLE tt7 OF tt_t0;
+
+CREATE TYPE tt_t1 AS (x int, y numeric(8,2));
+ALTER TABLE tt7 OF tt_t1;			-- reassign an already-typed table
+ALTER TABLE tt7 NOT OF;
+\d tt7
+
+-- make sure we can drop a constraint on the parent but it remains on the child
+CREATE TABLE test_drop_constr_parent (c text CHECK (c IS NOT NULL));
+CREATE TABLE test_drop_constr_child () INHERITS (test_drop_constr_parent);
+ALTER TABLE ONLY test_drop_constr_parent DROP CONSTRAINT "test_drop_constr_parent_c_check";
+-- should fail
+INSERT INTO test_drop_constr_child (c) VALUES (NULL);
+DROP TABLE test_drop_constr_parent CASCADE;

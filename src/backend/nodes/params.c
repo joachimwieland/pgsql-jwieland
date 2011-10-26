@@ -16,7 +16,6 @@
 #include "postgres.h"
 
 #include "nodes/params.h"
-#include "parser/parse_param.h"
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
 
@@ -43,7 +42,7 @@ copyParamList(ParamListInfo from)
 
 	/* sizeof(ParamListInfoData) includes the first array element */
 	size = sizeof(ParamListInfoData) +
-		(from->numParams - 1) *sizeof(ParamExternData);
+		(from->numParams - 1) * sizeof(ParamExternData);
 
 	retval = (ParamListInfo) palloc(size);
 	retval->paramFetch = NULL;

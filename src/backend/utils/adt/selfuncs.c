@@ -94,6 +94,7 @@
 #include "access/gin.h"
 #include "access/sysattr.h"
 #include "catalog/index.h"
+#include "catalog/pg_collation.h"
 #include "catalog/pg_opfamily.h"
 #include "catalog/pg_statistic.h"
 #include "catalog/pg_type.h"
@@ -119,9 +120,11 @@
 #include "utils/lsyscache.h"
 #include "utils/nabstime.h"
 #include "utils/pg_locale.h"
+#include "utils/rel.h"
 #include "utils/selfuncs.h"
 #include "utils/spccache.h"
 #include "utils/syscache.h"
+#include "utils/timestamp.h"
 #include "utils/tqual.h"
 
 
@@ -142,7 +145,8 @@ static double ineq_histogram_selectivity(PlannerInfo *root,
 static double eqjoinsel_inner(Oid operator,
 				VariableStatData *vardata1, VariableStatData *vardata2);
 static double eqjoinsel_semi(Oid operator,
-			   VariableStatData *vardata1, VariableStatData *vardata2);
+			   VariableStatData *vardata1, VariableStatData *vardata2,
+			   RelOptInfo *inner_rel);
 static bool convert_to_scalar(Datum value, Oid valuetypid, double *scaledvalue,
 				  Datum lobound, Datum hibound, Oid boundstypid,
 				  double *scaledlobound, double *scaledhibound);
@@ -165,12 +169,15 @@ static double convert_one_bytea_to_scalar(unsigned char *value, int valuelen,
 							int rangelo, int rangehi);
 static char *convert_string_datum(Datum value, Oid typid);
 static double convert_timevalue_to_scalar(Datum value, Oid typid);
+static void examine_simple_variable(PlannerInfo *root, Var *var,
+						VariableStatData *vardata);
 static bool get_variable_range(PlannerInfo *root, VariableStatData *vardata,
 				   Oid sortop, Datum *min, Datum *max);
 static bool get_actual_variable_range(PlannerInfo *root,
 						  VariableStatData *vardata,
 						  Oid sortop,
 						  Datum *min, Datum *max);
+static RelOptInfo *find_join_input_rel(PlannerInfo *root, Relids relids);
 static Selectivity prefix_selectivity(PlannerInfo *root,
 				   VariableStatData *vardata,
 				   Oid vartype, Oid opfamily, Const *prefixcon);
@@ -238,6 +245,7 @@ var_eq_const(VariableStatData *vardata, Oid operator,
 			 bool varonleft)
 {
 	double		selec;
+	bool		isdefault;
 
 	/*
 	 * If the constant is NULL, assume operator is strict and return zero, ie,
@@ -289,13 +297,15 @@ var_eq_const(VariableStatData *vardata, Oid operator,
 			{
 				/* be careful to apply operator right way 'round */
 				if (varonleft)
-					match = DatumGetBool(FunctionCall2(&eqproc,
-													   values[i],
-													   constval));
+					match = DatumGetBool(FunctionCall2Coll(&eqproc,
+													   DEFAULT_COLLATION_OID,
+														   values[i],
+														   constval));
 				else
-					match = DatumGetBool(FunctionCall2(&eqproc,
-													   constval,
-													   values[i]));
+					match = DatumGetBool(FunctionCall2Coll(&eqproc,
+													   DEFAULT_COLLATION_OID,
+														   constval,
+														   values[i]));
 				if (match)
 					break;
 			}
@@ -336,7 +346,7 @@ var_eq_const(VariableStatData *vardata, Oid operator,
 			 * all the not-common values share this remaining fraction
 			 * equally, so we divide by the number of other distinct values.
 			 */
-			otherdistinct = get_variable_numdistinct(vardata) - nnumbers;
+			otherdistinct = get_variable_numdistinct(vardata, &isdefault) - nnumbers;
 			if (otherdistinct > 1)
 				selec /= otherdistinct;
 
@@ -358,7 +368,7 @@ var_eq_const(VariableStatData *vardata, Oid operator,
 		 * of distinct values and assuming they are equally common. (The guess
 		 * is unlikely to be very good, but we do know a few special cases.)
 		 */
-		selec = 1.0 / get_variable_numdistinct(vardata);
+		selec = 1.0 / get_variable_numdistinct(vardata, &isdefault);
 	}
 
 	/* result should be in range, but make sure... */
@@ -376,6 +386,7 @@ var_eq_non_const(VariableStatData *vardata, Oid operator,
 				 bool varonleft)
 {
 	double		selec;
+	bool		isdefault;
 
 	/*
 	 * If we matched the var to a unique index, assume there is exactly one
@@ -406,7 +417,7 @@ var_eq_non_const(VariableStatData *vardata, Oid operator,
 		 * idea?)
 		 */
 		selec = 1.0 - stats->stanullfrac;
-		ndistinct = get_variable_numdistinct(vardata);
+		ndistinct = get_variable_numdistinct(vardata, &isdefault);
 		if (ndistinct > 1)
 			selec /= ndistinct;
 
@@ -433,7 +444,7 @@ var_eq_non_const(VariableStatData *vardata, Oid operator,
 		 * of distinct values and assuming they are equally common. (The guess
 		 * is unlikely to be very good, but we do know a few special cases.)
 		 */
-		selec = 1.0 / get_variable_numdistinct(vardata);
+		selec = 1.0 / get_variable_numdistinct(vardata, &isdefault);
 	}
 
 	/* result should be in range, but make sure... */
@@ -595,12 +606,14 @@ mcv_selectivity(VariableStatData *vardata, FmgrInfo *opproc,
 		for (i = 0; i < nvalues; i++)
 		{
 			if (varonleft ?
-				DatumGetBool(FunctionCall2(opproc,
-										   values[i],
-										   constval)) :
-				DatumGetBool(FunctionCall2(opproc,
-										   constval,
-										   values[i])))
+				DatumGetBool(FunctionCall2Coll(opproc,
+											   DEFAULT_COLLATION_OID,
+											   values[i],
+											   constval)) :
+				DatumGetBool(FunctionCall2Coll(opproc,
+											   DEFAULT_COLLATION_OID,
+											   constval,
+											   values[i])))
 				mcv_selec += numbers[i];
 			sumcommon += numbers[i];
 		}
@@ -675,12 +688,14 @@ histogram_selectivity(VariableStatData *vardata, FmgrInfo *opproc,
 			for (i = n_skip; i < nvalues - n_skip; i++)
 			{
 				if (varonleft ?
-					DatumGetBool(FunctionCall2(opproc,
-											   values[i],
-											   constval)) :
-					DatumGetBool(FunctionCall2(opproc,
-											   constval,
-											   values[i])))
+					DatumGetBool(FunctionCall2Coll(opproc,
+												   DEFAULT_COLLATION_OID,
+												   values[i],
+												   constval)) :
+					DatumGetBool(FunctionCall2Coll(opproc,
+												   DEFAULT_COLLATION_OID,
+												   constval,
+												   values[i])))
 					nmatch++;
 			}
 			result = ((double) nmatch) / ((double) (nvalues - 2 * n_skip));
@@ -799,9 +814,10 @@ ineq_histogram_selectivity(PlannerInfo *root,
 														 NULL,
 														 &values[probe]);
 
-				ltcmp = DatumGetBool(FunctionCall2(opproc,
-												   values[probe],
-												   constval));
+				ltcmp = DatumGetBool(FunctionCall2Coll(opproc,
+													   DEFAULT_COLLATION_OID,
+													   values[probe],
+													   constval));
 				if (isgt)
 					ltcmp = !ltcmp;
 				if (ltcmp)
@@ -1078,7 +1094,6 @@ patternsel(PG_FUNCTION_ARGS, Pattern_Type ptype, bool negate)
 	List	   *args = (List *) PG_GETARG_POINTER(2);
 	int			varRelid = PG_GETARG_INT32(3);
 	VariableStatData vardata;
-	Node	   *variable;
 	Node	   *other;
 	bool		varonleft;
 	Datum		constval;
@@ -1120,7 +1135,6 @@ patternsel(PG_FUNCTION_ARGS, Pattern_Type ptype, bool negate)
 		ReleaseVariableStats(vardata);
 		return result;
 	}
-	variable = (Node *) linitial(args);
 
 	/*
 	 * If the constant is NULL, assume operator is strict and return zero, ie,
@@ -1178,9 +1192,14 @@ patternsel(PG_FUNCTION_ARGS, Pattern_Type ptype, bool negate)
 			return result;
 	}
 
-	/* divide pattern into fixed prefix and remainder */
+	/*
+	 * Divide pattern into fixed prefix and remainder.	XXX we have to assume
+	 * default collation here, because we don't have access to the actual
+	 * input collation for the operator.  FIXME ...
+	 */
 	patt = (Const *) other;
-	pstatus = pattern_fixed_prefix(patt, ptype, &prefix, &rest);
+	pstatus = pattern_fixed_prefix(patt, ptype, DEFAULT_COLLATION_OID,
+								   &prefix, &rest);
 
 	/*
 	 * If necessary, coerce the prefix constant to the right type. (The "rest"
@@ -1682,6 +1701,7 @@ scalararraysel(PlannerInfo *root,
 	Node	   *leftop;
 	Node	   *rightop;
 	Oid			nominal_element_type;
+	Oid			nominal_element_collation;
 	RegProcedure oprsel;
 	FmgrInfo	oprselproc;
 	Selectivity s1;
@@ -1707,6 +1727,8 @@ scalararraysel(PlannerInfo *root,
 	nominal_element_type = get_base_element_type(exprType(rightop));
 	if (!OidIsValid(nominal_element_type))
 		return (Selectivity) 0.5;		/* probably shouldn't happen */
+	/* get nominal collation, too, for generating constants */
+	nominal_element_collation = exprCollation(rightop);
 
 	/* look through any binary-compatible relabeling of rightop */
 	rightop = strip_array_coercion(rightop);
@@ -1754,6 +1776,7 @@ scalararraysel(PlannerInfo *root,
 			args = list_make2(leftop,
 							  makeConst(nominal_element_type,
 										-1,
+										nominal_element_collation,
 										elmlen,
 										elem_values[i],
 										elem_nulls[i],
@@ -1834,6 +1857,7 @@ scalararraysel(PlannerInfo *root,
 		dummyexpr = makeNode(CaseTestExpr);
 		dummyexpr->typeId = nominal_element_type;
 		dummyexpr->typeMod = -1;
+		dummyexpr->collation = clause->inputcollid;
 		args = list_make2(leftop, dummyexpr);
 		if (is_join_clause)
 			s2 = DatumGetFloat8(FunctionCall5(&oprselproc,
@@ -1991,6 +2015,7 @@ eqjoinsel(PG_FUNCTION_ARGS)
 	VariableStatData vardata1;
 	VariableStatData vardata2;
 	bool		join_is_reversed;
+	RelOptInfo *inner_rel;
 
 	get_join_variables(root, args, sjinfo,
 					   &vardata1, &vardata2, &join_is_reversed);
@@ -2004,11 +2029,21 @@ eqjoinsel(PG_FUNCTION_ARGS)
 			break;
 		case JOIN_SEMI:
 		case JOIN_ANTI:
+			/*
+			 * Look up the join's inner relation.  min_righthand is sufficient
+			 * information because neither SEMI nor ANTI joins permit any
+			 * reassociation into or out of their RHS, so the righthand will
+			 * always be exactly that set of rels.
+			 */
+			inner_rel = find_join_input_rel(root, sjinfo->min_righthand);
+
 			if (!join_is_reversed)
-				selec = eqjoinsel_semi(operator, &vardata1, &vardata2);
+				selec = eqjoinsel_semi(operator, &vardata1, &vardata2,
+									   inner_rel);
 			else
 				selec = eqjoinsel_semi(get_commutator(operator),
-									   &vardata2, &vardata1);
+									   &vardata2, &vardata1,
+									   inner_rel);
 			break;
 		default:
 			/* other values not expected here */
@@ -2039,6 +2074,8 @@ eqjoinsel_inner(Oid operator,
 	double		selec;
 	double		nd1;
 	double		nd2;
+	bool		isdefault1;
+	bool		isdefault2;
 	Form_pg_statistic stats1 = NULL;
 	Form_pg_statistic stats2 = NULL;
 	bool		have_mcvs1 = false;
@@ -2052,8 +2089,8 @@ eqjoinsel_inner(Oid operator,
 	float4	   *numbers2 = NULL;
 	int			nnumbers2 = 0;
 
-	nd1 = get_variable_numdistinct(vardata1);
-	nd2 = get_variable_numdistinct(vardata2);
+	nd1 = get_variable_numdistinct(vardata1, &isdefault1);
+	nd2 = get_variable_numdistinct(vardata2, &isdefault2);
 
 	if (HeapTupleIsValid(vardata1->statsTuple))
 	{
@@ -2132,9 +2169,10 @@ eqjoinsel_inner(Oid operator,
 			{
 				if (hasmatch2[j])
 					continue;
-				if (DatumGetBool(FunctionCall2(&eqproc,
-											   values1[i],
-											   values2[j])))
+				if (DatumGetBool(FunctionCall2Coll(&eqproc,
+												   DEFAULT_COLLATION_OID,
+												   values1[i],
+												   values2[j])))
 				{
 					hasmatch1[i] = hasmatch2[j] = true;
 					matchprodfreq += numbers1[i] * numbers2[j];
@@ -2228,21 +2266,9 @@ eqjoinsel_inner(Oid operator,
 		 * XXX Can we be smarter if we have an MCV list for just one side? It
 		 * seems that if we assume equal distribution for the other side, we
 		 * end up with the same answer anyway.
-		 *
-		 * An additional hack we use here is to clamp the nd1 and nd2 values
-		 * to not more than what we are estimating the input relation sizes to
-		 * be, providing a crude correction for the selectivity of restriction
-		 * clauses on those relations.	(We don't do that in the other path
-		 * since there we are comparing the nd values to stats for the whole
-		 * relations.)
 		 */
 		double		nullfrac1 = stats1 ? stats1->stanullfrac : 0.0;
 		double		nullfrac2 = stats2 ? stats2->stanullfrac : 0.0;
-
-		if (vardata1->rel)
-			nd1 = Min(nd1, vardata1->rel->rows);
-		if (vardata2->rel)
-			nd2 = Min(nd2, vardata2->rel->rows);
 
 		selec = (1.0 - nullfrac1) * (1.0 - nullfrac2);
 		if (nd1 > nd2)
@@ -2269,13 +2295,15 @@ eqjoinsel_inner(Oid operator,
  */
 static double
 eqjoinsel_semi(Oid operator,
-			   VariableStatData *vardata1, VariableStatData *vardata2)
+			   VariableStatData *vardata1, VariableStatData *vardata2,
+			   RelOptInfo *inner_rel)
 {
 	double		selec;
 	double		nd1;
 	double		nd2;
+	bool		isdefault1;
+	bool		isdefault2;
 	Form_pg_statistic stats1 = NULL;
-	Form_pg_statistic stats2 = NULL;
 	bool		have_mcvs1 = false;
 	Datum	   *values1 = NULL;
 	int			nvalues1 = 0;
@@ -2287,8 +2315,27 @@ eqjoinsel_semi(Oid operator,
 	float4	   *numbers2 = NULL;
 	int			nnumbers2 = 0;
 
-	nd1 = get_variable_numdistinct(vardata1);
-	nd2 = get_variable_numdistinct(vardata2);
+	nd1 = get_variable_numdistinct(vardata1, &isdefault1);
+	nd2 = get_variable_numdistinct(vardata2, &isdefault2);
+
+	/*
+	 * We clamp nd2 to be not more than what we estimate the inner relation's
+	 * size to be.  This is intuitively somewhat reasonable since obviously
+	 * there can't be more than that many distinct values coming from the
+	 * inner rel.  The reason for the asymmetry (ie, that we don't clamp nd1
+	 * likewise) is that this is the only pathway by which restriction clauses
+	 * applied to the inner rel will affect the join result size estimate,
+	 * since set_joinrel_size_estimates will multiply SEMI/ANTI selectivity by
+	 * only the outer rel's size.  If we clamped nd1 we'd be double-counting
+	 * the selectivity of outer-rel restrictions.
+	 *
+	 * We can apply this clamping both with respect to the base relation from
+	 * which the join variable comes (if there is just one), and to the
+	 * immediate inner input relation of the current join.
+	 */
+	if (vardata2->rel)
+		nd2 = Min(nd2, vardata2->rel->rows);
+	nd2 = Min(nd2, inner_rel->rows);
 
 	if (HeapTupleIsValid(vardata1->statsTuple))
 	{
@@ -2305,7 +2352,6 @@ eqjoinsel_semi(Oid operator,
 
 	if (HeapTupleIsValid(vardata2->statsTuple))
 	{
-		stats2 = (Form_pg_statistic) GETSTRUCT(vardata2->statsTuple);
 		have_mcvs2 = get_attstatsslot(vardata2->statsTuple,
 									  vardata2->atttype,
 									  vardata2->atttypmod,
@@ -2330,13 +2376,25 @@ eqjoinsel_semi(Oid operator,
 		bool	   *hasmatch1;
 		bool	   *hasmatch2;
 		double		nullfrac1 = stats1->stanullfrac;
-		double		matchfreq1;
+		double		matchfreq1,
+					uncertainfrac,
+					uncertain;
 		int			i,
-					nmatches;
+					nmatches,
+					clamped_nvalues2;
+
+		/*
+		 * The clamping above could have resulted in nd2 being less than
+		 * nvalues2; in which case, we assume that precisely the nd2 most
+		 * common values in the relation will appear in the join input, and so
+		 * compare to only the first nd2 members of the MCV list.  Of course
+		 * this is frequently wrong, but it's the best bet we can make.
+		 */
+		clamped_nvalues2 = Min(nvalues2, nd2);
 
 		fmgr_info(get_opcode(operator), &eqproc);
 		hasmatch1 = (bool *) palloc0(nvalues1 * sizeof(bool));
-		hasmatch2 = (bool *) palloc0(nvalues2 * sizeof(bool));
+		hasmatch2 = (bool *) palloc0(clamped_nvalues2 * sizeof(bool));
 
 		/*
 		 * Note we assume that each MCV will match at most one member of the
@@ -2349,13 +2407,14 @@ eqjoinsel_semi(Oid operator,
 		{
 			int			j;
 
-			for (j = 0; j < nvalues2; j++)
+			for (j = 0; j < clamped_nvalues2; j++)
 			{
 				if (hasmatch2[j])
 					continue;
-				if (DatumGetBool(FunctionCall2(&eqproc,
-											   values1[i],
-											   values2[j])))
+				if (DatumGetBool(FunctionCall2Coll(&eqproc,
+												   DEFAULT_COLLATION_OID,
+												   values1[i],
+												   values2[j])))
 				{
 					hasmatch1[i] = hasmatch2[j] = true;
 					nmatches++;
@@ -2383,18 +2442,26 @@ eqjoinsel_semi(Oid operator,
 		 * the uncertain rows that a fraction nd2/nd1 have join partners. We
 		 * can discount the known-matched MCVs from the distinct-values counts
 		 * before doing the division.
+		 *
+		 * Crude as the above is, it's completely useless if we don't have
+		 * reliable ndistinct values for both sides.  Hence, if either nd1 or
+		 * nd2 is default, punt and assume half of the uncertain rows have
+		 * join partners.
 		 */
-		nd1 -= nmatches;
-		nd2 -= nmatches;
-		if (nd1 <= nd2 || nd2 <= 0)
-			selec = Max(matchfreq1, 1.0 - nullfrac1);
-		else
+		if (!isdefault1 && !isdefault2)
 		{
-			double		uncertain = 1.0 - matchfreq1 - nullfrac1;
-
-			CLAMP_PROBABILITY(uncertain);
-			selec = matchfreq1 + (nd2 / nd1) * uncertain;
+			nd1 -= nmatches;
+			nd2 -= nmatches;
+			if (nd1 <= nd2 || nd2 < 0)
+				uncertainfrac = 1.0;
+			else
+				uncertainfrac = nd2 / nd1;
 		}
+		else
+			uncertainfrac = 0.5;
+		uncertain = 1.0 - matchfreq1 - nullfrac1;
+		CLAMP_PROBABILITY(uncertain);
+		selec = matchfreq1 + uncertainfrac * uncertain;
 	}
 	else
 	{
@@ -2404,15 +2471,15 @@ eqjoinsel_semi(Oid operator,
 		 */
 		double		nullfrac1 = stats1 ? stats1->stanullfrac : 0.0;
 
-		if (vardata1->rel)
-			nd1 = Min(nd1, vardata1->rel->rows);
-		if (vardata2->rel)
-			nd2 = Min(nd2, vardata2->rel->rows);
-
-		if (nd1 <= nd2 || nd2 <= 0)
-			selec = 1.0 - nullfrac1;
+		if (!isdefault1 && !isdefault2)
+		{
+			if (nd1 <= nd2 || nd2 < 0)
+				selec = 1.0 - nullfrac1;
+			else
+				selec = (nd2 / nd1) * (1.0 - nullfrac1);
+		}
 		else
-			selec = (nd2 / nd1) * (1.0 - nullfrac1);
+			selec = 0.5 * (1.0 - nullfrac1);
 	}
 
 	if (have_mcvs1)
@@ -2895,9 +2962,10 @@ add_unique_group_var(PlannerInfo *root, List *varinfos,
 {
 	GroupVarInfo *varinfo;
 	double		ndistinct;
+	bool		isdefault;
 	ListCell   *lc;
 
-	ndistinct = get_variable_numdistinct(vardata);
+	ndistinct = get_variable_numdistinct(vardata, &isdefault);
 
 	/* cannot use foreach here because of possible list_delete */
 	lc = list_head(varinfos);
@@ -3058,7 +3126,9 @@ estimate_num_groups(PlannerInfo *root, List *groupExprs, double input_rows)
 		 * PlaceHolderVar doesn't change the number of groups, which boils
 		 * down to ignoring the possible addition of nulls to the result set).
 		 */
-		varshere = pull_var_clause(groupexpr, PVC_RECURSE_PLACEHOLDERS);
+		varshere = pull_var_clause(groupexpr,
+								   PVC_RECURSE_AGGREGATES,
+								   PVC_RECURSE_PLACEHOLDERS);
 
 		/*
 		 * If we find any variable-free GROUP BY item, then either it is a
@@ -3230,14 +3300,23 @@ estimate_hash_bucketsize(PlannerInfo *root, Node *hashkey, double nbuckets)
 				stanullfrac,
 				mcvfreq,
 				avgfreq;
+	bool		isdefault;
 	float4	   *numbers;
 	int			nnumbers;
 
 	examine_variable(root, hashkey, 0, &vardata);
 
-	/* Get number of distinct values and fraction that are null */
-	ndistinct = get_variable_numdistinct(&vardata);
+	/* Get number of distinct values */
+	ndistinct = get_variable_numdistinct(&vardata, &isdefault);
 
+	/* If ndistinct isn't real, punt and return 0.1, per comments above */
+	if (isdefault)
+	{
+		ReleaseVariableStats(vardata);
+		return (Selectivity) 0.1;
+	}
+
+	/* Get fraction that are null */
 	if (HeapTupleIsValid(vardata.statsTuple))
 	{
 		Form_pg_statistic stats;
@@ -3246,19 +3325,7 @@ estimate_hash_bucketsize(PlannerInfo *root, Node *hashkey, double nbuckets)
 		stanullfrac = stats->stanullfrac;
 	}
 	else
-	{
-		/*
-		 * Believe a default ndistinct only if it came from stats. Otherwise
-		 * punt and return 0.1, per comments above.
-		 */
-		if (ndistinct == DEFAULT_NUM_DISTINCT)
-		{
-			ReleaseVariableStats(vardata);
-			return (Selectivity) 0.1;
-		}
-
 		stanullfrac = 0.0;
-	}
 
 	/* Compute avg freq of all distinct data values in raw relation */
 	avgfreq = (1.0 - stanullfrac) / ndistinct;
@@ -3700,7 +3767,7 @@ convert_string_datum(Datum value, Oid typid)
 			return NULL;
 	}
 
-	if (!lc_collate_is_c())
+	if (!lc_collate_is_c(DEFAULT_COLLATION_OID))
 	{
 		char	   *xfrmstr;
 		size_t		xfrmlen;
@@ -4062,7 +4129,9 @@ get_join_variables(PlannerInfo *root, List *args, SpecialJoinInfo *sjinfo,
  *		commonly the same as the exposed type of the variable argument,
  *		but can be different in binary-compatible-type cases.
  *	isunique: TRUE if we were able to match the var to a unique index,
- *		implying its values are unique for this query.
+ *		implying its values are unique for this query.  (Caution: this
+ *		should be trusted for statistical purposes only, since we do not
+ *		check indimmediate.)
  *
  * Caller is responsible for doing ReleaseVariableStats() before exiting.
  */
@@ -4093,46 +4162,16 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 		(varRelid == 0 || varRelid == ((Var *) basenode)->varno))
 	{
 		Var		   *var = (Var *) basenode;
-		RangeTblEntry *rte;
 
+		/* Set up result fields other than the stats tuple */
 		vardata->var = basenode;	/* return Var without relabeling */
 		vardata->rel = find_base_rel(root, var->varno);
 		vardata->atttype = var->vartype;
 		vardata->atttypmod = var->vartypmod;
 		vardata->isunique = has_unique_index(vardata->rel, var->varattno);
 
-		rte = root->simple_rte_array[var->varno];
-
-		if (get_relation_stats_hook &&
-			(*get_relation_stats_hook) (root, rte, var->varattno, vardata))
-		{
-			/*
-			 * The hook took control of acquiring a stats tuple.  If it did
-			 * supply a tuple, it'd better have supplied a freefunc.
-			 */
-			if (HeapTupleIsValid(vardata->statsTuple) &&
-				!vardata->freefunc)
-				elog(ERROR, "no function provided to release variable stats with");
-		}
-		else if (rte->rtekind == RTE_RELATION)
-		{
-			vardata->statsTuple = SearchSysCache3(STATRELATTINH,
-												ObjectIdGetDatum(rte->relid),
-												Int16GetDatum(var->varattno),
-												  BoolGetDatum(rte->inh));
-			vardata->freefunc = ReleaseSysCache;
-		}
-		else
-		{
-			/*
-			 * XXX This means the Var comes from a JOIN or sub-SELECT. Later
-			 * add code to dig down into the join etc and see if we can trace
-			 * the variable to something with stats.  (But beware of
-			 * sub-SELECTs with DISTINCT/GROUP BY/etc.	Perhaps there are no
-			 * cases where this would really be useful, because we'd have
-			 * flattened the subselect if it is??)
-			 */
-		}
+		/* Try to locate some stats */
+		examine_simple_variable(root, var, vardata);
 
 		return;
 	}
@@ -4275,19 +4314,137 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 }
 
 /*
+ * examine_simple_variable
+ *		Handle a simple Var for examine_variable
+ *
+ * This is split out as a subroutine so that we can recurse to deal with
+ * Vars referencing subqueries.
+ *
+ * We already filled in all the fields of *vardata except for the stats tuple.
+ */
+static void
+examine_simple_variable(PlannerInfo *root, Var *var,
+						VariableStatData *vardata)
+{
+	RangeTblEntry *rte = root->simple_rte_array[var->varno];
+
+	Assert(IsA(rte, RangeTblEntry));
+
+	if (get_relation_stats_hook &&
+		(*get_relation_stats_hook) (root, rte, var->varattno, vardata))
+	{
+		/*
+		 * The hook took control of acquiring a stats tuple.  If it did supply
+		 * a tuple, it'd better have supplied a freefunc.
+		 */
+		if (HeapTupleIsValid(vardata->statsTuple) &&
+			!vardata->freefunc)
+			elog(ERROR, "no function provided to release variable stats with");
+	}
+	else if (rte->rtekind == RTE_RELATION)
+	{
+		/*
+		 * Plain table or parent of an inheritance appendrel, so look up the
+		 * column in pg_statistic
+		 */
+		vardata->statsTuple = SearchSysCache3(STATRELATTINH,
+											  ObjectIdGetDatum(rte->relid),
+											  Int16GetDatum(var->varattno),
+											  BoolGetDatum(rte->inh));
+		vardata->freefunc = ReleaseSysCache;
+	}
+	else if (rte->rtekind == RTE_SUBQUERY && !rte->inh)
+	{
+		/*
+		 * Plain subquery (not one that was converted to an appendrel).
+		 *
+		 * Punt if subquery uses set operations, GROUP BY, or DISTINCT --- any
+		 * of these will mash underlying columns' stats beyond recognition.
+		 * (Set ops are particularly nasty; if we forged ahead, we would
+		 * return stats relevant to only the leftmost subselect...)
+		 */
+		Query	   *subquery = rte->subquery;
+		RelOptInfo *rel;
+		TargetEntry *ste;
+
+		if (subquery->setOperations ||
+			subquery->groupClause ||
+			subquery->distinctClause)
+			return;
+
+		/*
+		 * OK, fetch RelOptInfo for subquery.  Note that we don't change the
+		 * rel returned in vardata, since caller expects it to be a rel of the
+		 * caller's query level.  Because we might already be recursing, we
+		 * can't use that rel pointer either, but have to look up the Var's
+		 * rel afresh.
+		 */
+		rel = find_base_rel(root, var->varno);
+
+		/* Subquery should have been planned already */
+		Assert(rel->subroot && IsA(rel->subroot, PlannerInfo));
+
+		/*
+		 * Switch our attention to the subquery as mangled by the planner.
+		 * It was okay to look at the pre-planning version for the tests
+		 * above, but now we need a Var that will refer to the subroot's
+		 * live RelOptInfos.  For instance, if any subquery pullup happened
+		 * during planning, Vars in the targetlist might have gotten replaced,
+		 * and we need to see the replacement expressions.
+		 */
+		subquery = rel->subroot->parse;
+		Assert(IsA(subquery, Query));
+
+		/* Get the subquery output expression referenced by the upper Var */
+		ste = get_tle_by_resno(subquery->targetList, var->varattno);
+		if (ste == NULL || ste->resjunk)
+			elog(ERROR, "subquery %s does not have attribute %d",
+				 rte->eref->aliasname, var->varattno);
+		var = (Var *) ste->expr;
+
+		/* Can only handle a simple Var of subquery's query level */
+		if (var && IsA(var, Var) &&
+			var->varlevelsup == 0)
+		{
+			/*
+			 * OK, recurse into the subquery.  Note that the original setting
+			 * of vardata->isunique (which will surely be false) is left
+			 * unchanged in this situation.  That's what we want, since even
+			 * if the underlying column is unique, the subquery may have
+			 * joined to other tables in a way that creates duplicates.
+			 */
+			examine_simple_variable(rel->subroot, var, vardata);
+		}
+	}
+	else
+	{
+		/*
+		 * Otherwise, the Var comes from a FUNCTION, VALUES, or CTE RTE.  (We
+		 * won't see RTE_JOIN here because join alias Vars have already been
+		 * flattened.)  There's not much we can do with function outputs, but
+		 * maybe someday try to be smarter about VALUES and/or CTEs.
+		 */
+	}
+}
+
+/*
  * get_variable_numdistinct
  *	  Estimate the number of distinct values of a variable.
  *
  * vardata: results of examine_variable
+ * *isdefault: set to TRUE if the result is a default rather than based on
+ * anything meaningful.
  *
  * NB: be careful to produce an integral result, since callers may compare
  * the result to exact integer counts.
  */
 double
-get_variable_numdistinct(VariableStatData *vardata)
+get_variable_numdistinct(VariableStatData *vardata, bool *isdefault)
 {
 	double		stadistinct;
 	double		ntuples;
+
+	*isdefault = false;
 
 	/*
 	 * Determine the stadistinct value to use.	There are cases where we can
@@ -4361,10 +4518,16 @@ get_variable_numdistinct(VariableStatData *vardata)
 	 * Otherwise we need to get the relation size; punt if not available.
 	 */
 	if (vardata->rel == NULL)
+	{
+		*isdefault = true;
 		return DEFAULT_NUM_DISTINCT;
+	}
 	ntuples = vardata->rel->tuples;
 	if (ntuples <= 0.0)
+	{
+		*isdefault = true;
 		return DEFAULT_NUM_DISTINCT;
+	}
 
 	/*
 	 * If we had a relative estimate, use that.
@@ -4374,11 +4537,13 @@ get_variable_numdistinct(VariableStatData *vardata)
 
 	/*
 	 * With no data, estimate ndistinct = ntuples if the table is small, else
-	 * use default.
+	 * use default.  We use DEFAULT_NUM_DISTINCT as the cutoff for "small"
+	 * so that the behavior isn't discontinuous.
 	 */
 	if (ntuples < DEFAULT_NUM_DISTINCT)
 		return ntuples;
 
+	*isdefault = true;
 	return DEFAULT_NUM_DISTINCT;
 }
 
@@ -4398,7 +4563,6 @@ get_variable_range(PlannerInfo *root, VariableStatData *vardata, Oid sortop,
 	Datum		tmin = 0;
 	Datum		tmax = 0;
 	bool		have_data = false;
-	Form_pg_statistic stats;
 	int16		typLen;
 	bool		typByVal;
 	Datum	   *values;
@@ -4422,7 +4586,6 @@ get_variable_range(PlannerInfo *root, VariableStatData *vardata, Oid sortop,
 		/* no stats available, so default result */
 		return false;
 	}
-	stats = (Form_pg_statistic) GETSTRUCT(vardata->statsTuple);
 
 	get_typlenbyval(vardata->atttype, &typLen, &typByVal);
 
@@ -4486,12 +4649,16 @@ get_variable_range(PlannerInfo *root, VariableStatData *vardata, Oid sortop,
 				tmin_is_mcv = tmax_is_mcv = have_data = true;
 				continue;
 			}
-			if (DatumGetBool(FunctionCall2(&opproc, values[i], tmin)))
+			if (DatumGetBool(FunctionCall2Coll(&opproc,
+											   DEFAULT_COLLATION_OID,
+											   values[i], tmin)))
 			{
 				tmin = values[i];
 				tmin_is_mcv = true;
 			}
-			if (DatumGetBool(FunctionCall2(&opproc, tmax, values[i])))
+			if (DatumGetBool(FunctionCall2Coll(&opproc,
+											   DEFAULT_COLLATION_OID,
+											   tmax, values[i])))
 			{
 				tmax = values[i];
 				tmax_is_mcv = true;
@@ -4556,10 +4723,10 @@ get_actual_variable_range(PlannerInfo *root, VariableStatData *vardata,
 			continue;
 
 		/*
-		 * The index list might include fictitious indexes inserted by a
+		 * The index list might include hypothetical indexes inserted by a
 		 * get_relation_info hook --- don't try to access them.
 		 */
-		if (!OidIsValid(index->indexoid))
+		if (index->hypothetical)
 			continue;
 
 		/*
@@ -4636,6 +4803,7 @@ get_actual_variable_range(PlannerInfo *root, VariableStatData *vardata,
 								   1,	/* index col to scan */
 								   InvalidStrategy,		/* no strategy */
 								   InvalidOid,	/* no strategy subtype */
+								   InvalidOid,	/* no collation */
 								   InvalidOid,	/* no reg proc for this */
 								   (Datum) 0);	/* constant */
 
@@ -4722,6 +4890,37 @@ get_actual_variable_range(PlannerInfo *root, VariableStatData *vardata,
 	return have_data;
 }
 
+/*
+ * find_join_input_rel
+ *		Look up the input relation for a join.
+ *
+ * We assume that the input relation's RelOptInfo must have been constructed
+ * already.
+ */
+static RelOptInfo *
+find_join_input_rel(PlannerInfo *root, Relids relids)
+{
+	RelOptInfo *rel = NULL;
+
+	switch (bms_membership(relids))
+	{
+		case BMS_EMPTY_SET:
+			/* should not happen */
+			break;
+		case BMS_SINGLETON:
+			rel = find_base_rel(root, bms_singleton_member(relids));
+			break;
+		case BMS_MULTIPLE:
+			rel = find_join_rel(root, relids);
+			break;
+	}
+
+	if (rel == NULL)
+		elog(ERROR, "could not find RelOptInfo for given relids");
+
+	return rel;
+}
+
 
 /*-------------------------------------------------------------------------
  *
@@ -4742,6 +4941,29 @@ get_actual_variable_range(PlannerInfo *root, VariableStatData *vardata,
  */
 
 /*
+ * Check whether char is a letter (and, hence, subject to case-folding)
+ *
+ * In multibyte character sets, we can't use isalpha, and it does not seem
+ * worth trying to convert to wchar_t to use iswalpha.	Instead, just assume
+ * any multibyte char is potentially case-varying.
+ */
+static int
+pattern_char_isalpha(char c, bool is_multibyte,
+					 pg_locale_t locale, bool locale_is_c)
+{
+	if (locale_is_c)
+		return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+	else if (is_multibyte && IS_HIGHBIT_SET(c))
+		return true;
+#ifdef HAVE_LOCALE_T
+	else if (locale)
+		return isalpha_l((unsigned char) c, locale);
+#endif
+	else
+		return isalpha((unsigned char) c);
+}
+
+/*
  * Extract the fixed prefix, if any, for a pattern.
  *
  * *prefix is set to a palloc'd prefix string (in the form of a Const node),
@@ -4755,7 +4977,7 @@ get_actual_variable_range(PlannerInfo *root, VariableStatData *vardata,
  */
 
 static Pattern_Prefix_Status
-like_fixed_prefix(Const *patt_const, bool case_insensitive,
+like_fixed_prefix(Const *patt_const, bool case_insensitive, Oid collation,
 				  Const **prefix_const, Const **rest_const)
 {
 	char	   *match;
@@ -4766,14 +4988,38 @@ like_fixed_prefix(Const *patt_const, bool case_insensitive,
 	int			pos,
 				match_pos;
 	bool		is_multibyte = (pg_database_encoding_max_length() > 1);
+	pg_locale_t locale = 0;
+	bool		locale_is_c = false;
 
 	/* the right-hand const is type text or bytea */
 	Assert(typeid == BYTEAOID || typeid == TEXTOID);
 
-	if (typeid == BYTEAOID && case_insensitive)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-		   errmsg("case insensitive matching not supported on type bytea")));
+	if (case_insensitive)
+	{
+		if (typeid == BYTEAOID)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			errmsg("case insensitive matching not supported on type bytea")));
+
+		/* If case-insensitive, we need locale info */
+		if (lc_ctype_is_c(collation))
+			locale_is_c = true;
+		else if (collation != DEFAULT_COLLATION_OID)
+		{
+			if (!OidIsValid(collation))
+			{
+				/*
+				 * This typically means that the parser could not resolve a
+				 * conflict of implicit collations, so report it that way.
+				 */
+				ereport(ERROR,
+						(errcode(ERRCODE_INDETERMINATE_COLLATION),
+						 errmsg("could not determine which collation to use for ILIKE"),
+						 errhint("Use the COLLATE clause to set the collation explicitly.")));
+			}
+			locale = pg_newlocale_from_collation(collation);
+		}
+	}
 
 	if (typeid != BYTEAOID)
 	{
@@ -4808,23 +5054,11 @@ like_fixed_prefix(Const *patt_const, bool case_insensitive,
 				break;
 		}
 
-		/*
-		 * XXX In multibyte character sets, we can't trust isalpha, so assume
-		 * any multibyte char is potentially case-varying.
-		 */
-		if (case_insensitive)
-		{
-			if (is_multibyte && (unsigned char) patt[pos] >= 0x80)
-				break;
-			if (isalpha((unsigned char) patt[pos]))
-				break;
-		}
+		/* Stop if case-varying character (it's sort of a wildcard) */
+		if (case_insensitive &&
+		  pattern_char_isalpha(patt[pos], is_multibyte, locale, locale_is_c))
+			break;
 
-		/*
-		 * NOTE: this code used to think that %% meant a literal %, but
-		 * textlike() itself does not think that, and the SQL92 spec doesn't
-		 * say any such thing either.
-		 */
 		match[match_pos++] = patt[pos];
 	}
 
@@ -4856,7 +5090,7 @@ like_fixed_prefix(Const *patt_const, bool case_insensitive,
 }
 
 static Pattern_Prefix_Status
-regex_fixed_prefix(Const *patt_const, bool case_insensitive,
+regex_fixed_prefix(Const *patt_const, bool case_insensitive, Oid collation,
 				   Const **prefix_const, Const **rest_const)
 {
 	char	   *match;
@@ -4869,6 +5103,8 @@ regex_fixed_prefix(Const *patt_const, bool case_insensitive,
 	char	   *rest;
 	Oid			typeid = patt_const->consttype;
 	bool		is_multibyte = (pg_database_encoding_max_length() > 1);
+	pg_locale_t locale = 0;
+	bool		locale_is_c = false;
 
 	/*
 	 * Should be unnecessary, there are no bytea regex operators defined. As
@@ -4879,6 +5115,28 @@ regex_fixed_prefix(Const *patt_const, bool case_insensitive,
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 		 errmsg("regular-expression matching not supported on type bytea")));
+
+	if (case_insensitive)
+	{
+		/* If case-insensitive, we need locale info */
+		if (lc_ctype_is_c(collation))
+			locale_is_c = true;
+		else if (collation != DEFAULT_COLLATION_OID)
+		{
+			if (!OidIsValid(collation))
+			{
+				/*
+				 * This typically means that the parser could not resolve a
+				 * conflict of implicit collations, so report it that way.
+				 */
+				ereport(ERROR,
+						(errcode(ERRCODE_INDETERMINATE_COLLATION),
+						 errmsg("could not determine which collation to use for regular expression"),
+						 errhint("Use the COLLATE clause to set the collation explicitly.")));
+			}
+			locale = pg_newlocale_from_collation(collation);
+		}
+	}
 
 	/* the right-hand const is type text for all of these */
 	patt = TextDatumGetCString(patt_const->constvalue);
@@ -4955,17 +5213,10 @@ regex_fixed_prefix(Const *patt_const, bool case_insensitive,
 			patt[pos] == '$')
 			break;
 
-		/*
-		 * XXX In multibyte character sets, we can't trust isalpha, so assume
-		 * any multibyte char is potentially case-varying.
-		 */
-		if (case_insensitive)
-		{
-			if (is_multibyte && (unsigned char) patt[pos] >= 0x80)
-				break;
-			if (isalpha((unsigned char) patt[pos]))
-				break;
-		}
+		/* Stop if case-varying character (it's sort of a wildcard) */
+		if (case_insensitive &&
+		  pattern_char_isalpha(patt[pos], is_multibyte, locale, locale_is_c))
+			break;
 
 		/*
 		 * Check for quantifiers.  Except for +, this means the preceding
@@ -4990,7 +5241,7 @@ regex_fixed_prefix(Const *patt_const, bool case_insensitive,
 		 * backslash followed by alphanumeric is an escape, not a quoted
 		 * character.  Must treat it as having multiple possible matches.
 		 * Note: since only ASCII alphanumerics are escapes, we don't have to
-		 * be paranoid about multibyte here.
+		 * be paranoid about multibyte or collations here.
 		 */
 		if (patt[pos] == '\\')
 		{
@@ -5042,7 +5293,7 @@ regex_fixed_prefix(Const *patt_const, bool case_insensitive,
 }
 
 Pattern_Prefix_Status
-pattern_fixed_prefix(Const *patt, Pattern_Type ptype,
+pattern_fixed_prefix(Const *patt, Pattern_Type ptype, Oid collation,
 					 Const **prefix, Const **rest)
 {
 	Pattern_Prefix_Status result;
@@ -5050,16 +5301,16 @@ pattern_fixed_prefix(Const *patt, Pattern_Type ptype,
 	switch (ptype)
 	{
 		case Pattern_Type_Like:
-			result = like_fixed_prefix(patt, false, prefix, rest);
+			result = like_fixed_prefix(patt, false, collation, prefix, rest);
 			break;
 		case Pattern_Type_Like_IC:
-			result = like_fixed_prefix(patt, true, prefix, rest);
+			result = like_fixed_prefix(patt, true, collation, prefix, rest);
 			break;
 		case Pattern_Type_Regex:
-			result = regex_fixed_prefix(patt, false, prefix, rest);
+			result = regex_fixed_prefix(patt, false, collation, prefix, rest);
 			break;
 		case Pattern_Type_Regex_IC:
-			result = regex_fixed_prefix(patt, true, prefix, rest);
+			result = regex_fixed_prefix(patt, true, collation, prefix, rest);
 			break;
 		default:
 			elog(ERROR, "unrecognized ptype: %d", (int) ptype);
@@ -5124,8 +5375,8 @@ prefix_selectivity(PlannerInfo *root, VariableStatData *vardata,
 	if (cmpopr == InvalidOid)
 		elog(ERROR, "no < operator for opfamily %u", opfamily);
 	fmgr_info(get_opcode(cmpopr), &opproc);
-
-	greaterstrcon = make_greater_string(prefixcon, &opproc);
+	greaterstrcon = make_greater_string(prefixcon, &opproc,
+										DEFAULT_COLLATION_OID);
 	if (greaterstrcon)
 	{
 		Selectivity topsel;
@@ -5420,21 +5671,21 @@ pattern_selectivity(Const *patt, Pattern_Type ptype)
  * in the form of a Const node; else return NULL.
  *
  * The caller must provide the appropriate "less than" comparison function
- * for testing the strings.
+ * for testing the strings, along with the collation to use.
  *
  * The key requirement here is that given a prefix string, say "foo",
  * we must be able to generate another string "fop" that is greater than
  * all strings "foobar" starting with "foo".  We can test that we have
- * generated a string greater than the prefix string, but in non-C locales
+ * generated a string greater than the prefix string, but in non-C collations
  * that is not a bulletproof guarantee that an extension of the string might
  * not sort after it; an example is that "foo " is less than "foo!", but it
  * is not clear that a "dictionary" sort ordering will consider "foo!" less
  * than "foo bar".	CAUTION: Therefore, this function should be used only for
- * estimation purposes when working in a non-C locale.
+ * estimation purposes when working in a non-C collation.
  *
  * To try to catch most cases where an extended string might otherwise sort
  * before the result value, we determine which of the strings "Z", "z", "y",
- * and "9" is seen as largest by the locale, and append that to the given
+ * and "9" is seen as largest by the collation, and append that to the given
  * prefix before trying to find a string that compares as larger.
  *
  * If we max out the righthand byte, truncate off the last character
@@ -5446,7 +5697,7 @@ pattern_selectivity(Const *patt, Pattern_Type ptype)
  * won't have to try more than one or two strings before succeeding.
  */
 Const *
-make_greater_string(const Const *str_const, FmgrInfo *ltproc)
+make_greater_string(const Const *str_const, FmgrInfo *ltproc, Oid collation)
 {
 	Oid			datatype = str_const->consttype;
 	char	   *workstr;
@@ -5482,25 +5733,27 @@ make_greater_string(const Const *str_const, FmgrInfo *ltproc)
 	{
 		workstr = TextDatumGetCString(str_const->constvalue);
 		len = strlen(workstr);
-		if (lc_collate_is_c() || len == 0)
+		if (lc_collate_is_c(collation) || len == 0)
 			cmpstr = str_const->constvalue;
 		else
 		{
 			/* If first time through, determine the suffix to use */
 			static char suffixchar = 0;
+			static Oid	suffixcollation = 0;
 
-			if (!suffixchar)
+			if (!suffixchar || suffixcollation != collation)
 			{
 				char	   *best;
 
 				best = "Z";
-				if (varstr_cmp(best, 1, "z", 1) < 0)
+				if (varstr_cmp(best, 1, "z", 1, collation) < 0)
 					best = "z";
-				if (varstr_cmp(best, 1, "y", 1) < 0)
+				if (varstr_cmp(best, 1, "y", 1, collation) < 0)
 					best = "y";
-				if (varstr_cmp(best, 1, "9", 1) < 0)
+				if (varstr_cmp(best, 1, "9", 1, collation) < 0)
 					best = "9";
 				suffixchar = *best;
+				suffixcollation = collation;
 			}
 
 			/* And build the string to compare to */
@@ -5536,9 +5789,10 @@ make_greater_string(const Const *str_const, FmgrInfo *ltproc)
 			else
 				workstr_const = string_to_bytea_const(workstr, len);
 
-			if (DatumGetBool(FunctionCall2(ltproc,
-										   cmpstr,
-										   workstr_const->constvalue)))
+			if (DatumGetBool(FunctionCall2Coll(ltproc,
+											   collation,
+											   cmpstr,
+											   workstr_const->constvalue)))
 			{
 				/* Successfully made a string larger than cmpstr */
 				if (cmptxt)
@@ -5605,9 +5859,39 @@ static Const *
 string_to_const(const char *str, Oid datatype)
 {
 	Datum		conval = string_to_datum(str, datatype);
+	Oid			collation;
+	int			constlen;
 
-	return makeConst(datatype, -1,
-					 ((datatype == NAMEOID) ? NAMEDATALEN : -1),
+	/*
+	 * We only need to support a few datatypes here, so hard-wire properties
+	 * instead of incurring the expense of catalog lookups.
+	 */
+	switch (datatype)
+	{
+		case TEXTOID:
+		case VARCHAROID:
+		case BPCHAROID:
+			collation = DEFAULT_COLLATION_OID;
+			constlen = -1;
+			break;
+
+		case NAMEOID:
+			collation = InvalidOid;
+			constlen = NAMEDATALEN;
+			break;
+
+		case BYTEAOID:
+			collation = InvalidOid;
+			constlen = -1;
+			break;
+
+		default:
+			elog(ERROR, "unexpected datatype in string_to_const: %u",
+				 datatype);
+			return NULL;
+	}
+
+	return makeConst(datatype, -1, collation, constlen,
 					 conval, false, false);
 }
 
@@ -5624,7 +5908,7 @@ string_to_bytea_const(const char *str, size_t str_len)
 	SET_VARSIZE(bstr, VARHDRSZ + str_len);
 	conval = PointerGetDatum(bstr);
 
-	return makeConst(BYTEAOID, -1, -1, conval, false, false);
+	return makeConst(BYTEAOID, -1, InvalidOid, -1, conval, false, false);
 }
 
 /*-------------------------------------------------------------------------
@@ -6103,14 +6387,7 @@ btcostestimate(PG_FUNCTION_ARGS)
 	 * is that multiple columns dilute the importance of the first column's
 	 * ordering, but don't negate it entirely.  Before 8.0 we divided the
 	 * correlation by the number of columns, but that seems too strong.)
-	 *
-	 * We can skip all this if we found a ScalarArrayOpExpr, because then the
-	 * call must be for a bitmap index scan, and the caller isn't going to
-	 * care what the index correlation is.
 	 */
-	if (found_saop)
-		PG_RETURN_VOID();
-
 	MemSet(&vardata, 0, sizeof(vardata));
 
 	if (index->indexkeys[0] != 0)
@@ -6280,28 +6557,28 @@ gincostestimate(PG_FUNCTION_ARGS)
 	Cost	   *indexTotalCost = (Cost *) PG_GETARG_POINTER(6);
 	Selectivity *indexSelectivity = (Selectivity *) PG_GETARG_POINTER(7);
 	double	   *indexCorrelation = (double *) PG_GETARG_POINTER(8);
-	ListCell	   *l;
-	List		   *selectivityQuals;
-	double		   numPages = index->pages,
-				   numTuples = index->tuples;
-	double		   numEntryPages,
-				   numDataPages,
-				   numPendingPages,
-				   numEntries;
-	bool		   haveFullScan = false;
-	double		   partialEntriesInQuals = 0.0;
-	double		   searchEntriesInQuals = 0.0;
-	double		   exactEntriesInQuals = 0.0;
-	double		   entryPagesFetched,
-				   dataPagesFetched,
-				   dataPagesFetchedBySel;
-	double		   qual_op_cost,
-				   qual_arg_cost,
-				   spc_random_page_cost,
-				   num_scans;
-	QualCost	   index_qual_cost;
-	Relation	   indexRel;
-	GinStatsData   ginStats;
+	ListCell   *l;
+	List	   *selectivityQuals;
+	double		numPages = index->pages,
+				numTuples = index->tuples;
+	double		numEntryPages,
+				numDataPages,
+				numPendingPages,
+				numEntries;
+	bool		haveFullScan = false;
+	double		partialEntriesInQuals = 0.0;
+	double		searchEntriesInQuals = 0.0;
+	double		exactEntriesInQuals = 0.0;
+	double		entryPagesFetched,
+				dataPagesFetched,
+				dataPagesFetchedBySel;
+	double		qual_op_cost,
+				qual_arg_cost,
+				spc_random_page_cost,
+				num_scans;
+	QualCost	index_qual_cost;
+	Relation	indexRel;
+	GinStatsData ginStats;
 
 	/*
 	 * Obtain statistic information from the meta page
@@ -6317,7 +6594,7 @@ gincostestimate(PG_FUNCTION_ARGS)
 
 	/*
 	 * nPendingPages can be trusted, but the other fields are as of the last
-	 * VACUUM.  Scale them by the ratio numPages / nTotalPages to account for
+	 * VACUUM.	Scale them by the ratio numPages / nTotalPages to account for
 	 * growth since then.  If the fields are zero (implying no VACUUM at all,
 	 * and an index created pre-9.1), assume all pages are entry pages.
 	 */
@@ -6325,11 +6602,11 @@ gincostestimate(PG_FUNCTION_ARGS)
 	{
 		numEntryPages = numPages;
 		numDataPages = 0;
-		numEntries = numTuples;		/* bogus, but no other info available */
+		numEntries = numTuples; /* bogus, but no other info available */
 	}
 	else
 	{
-		double	scale = numPages / ginStats.nTotalPages;
+		double		scale = numPages / ginStats.nTotalPages;
 
 		numEntryPages = ceil(numEntryPages * scale);
 		numDataPages = ceil(numDataPages * scale);
@@ -6339,8 +6616,13 @@ gincostestimate(PG_FUNCTION_ARGS)
 		numDataPages = Min(numDataPages, numPages - numEntryPages);
 	}
 
+	/* In an empty index, numEntries could be zero.  Avoid divide-by-zero */
+	if (numEntries < 1)
+		numEntries = 1;
+
 	/*
-	 * Include predicate in selectivityQuals (should match genericcostestimate)
+	 * Include predicate in selectivityQuals (should match
+	 * genericcostestimate)
 	 */
 	if (index->indpred != NIL)
 	{
@@ -6362,12 +6644,12 @@ gincostestimate(PG_FUNCTION_ARGS)
 
 	/* Estimate the fraction of main-table tuples that will be visited */
 	*indexSelectivity = clauselist_selectivity(root, selectivityQuals,
-												index->rel->relid,
-												JOIN_INNER,
-												NULL);
+											   index->rel->relid,
+											   JOIN_INNER,
+											   NULL);
 
 	/* fetch estimated page cost for schema containing index */
-    get_tablespace_page_costs(index->reltablespace,
+	get_tablespace_page_costs(index->reltablespace,
 							  &spc_random_page_cost,
 							  NULL);
 
@@ -6381,22 +6663,22 @@ gincostestimate(PG_FUNCTION_ARGS)
 	 */
 	foreach(l, indexQuals)
 	{
-		RestrictInfo	*rinfo = (RestrictInfo *) lfirst(l);
-		Expr			*clause;
-		Node			*leftop,
-						*rightop,
-						*operand;
-		Oid				extractProcOid;
-		Oid				clause_op;
-		int				strategy_op;
-		Oid				lefttype,
-						righttype;
-		int32			nentries = 0;
-		bool			*partial_matches = NULL;
-		Pointer			*extra_data = NULL;
-		bool		   *nullFlags = NULL;
-		int32			searchMode = GIN_SEARCH_MODE_DEFAULT;
-		int				indexcol;
+		RestrictInfo *rinfo = (RestrictInfo *) lfirst(l);
+		Expr	   *clause;
+		Node	   *leftop,
+				   *rightop,
+				   *operand;
+		Oid			extractProcOid;
+		Oid			clause_op;
+		int			strategy_op;
+		Oid			lefttype,
+					righttype;
+		int32		nentries = 0;
+		bool	   *partial_matches = NULL;
+		Pointer    *extra_data = NULL;
+		bool	   *nullFlags = NULL;
+		int32		searchMode = GIN_SEARCH_MODE_DEFAULT;
+		int			indexcol;
 
 		Assert(IsA(rinfo, RestrictInfo));
 		clause = rinfo->clause;
@@ -6417,16 +6699,16 @@ gincostestimate(PG_FUNCTION_ARGS)
 		else
 		{
 			elog(ERROR, "could not match index to operand");
-			operand = NULL; /* keep compiler quiet */
+			operand = NULL;		/* keep compiler quiet */
 		}
 
 		if (IsA(operand, RelabelType))
 			operand = (Node *) ((RelabelType *) operand)->arg;
 
 		/*
-		 * It's impossible to call extractQuery method for unknown operand.
-		 * So unless operand is a Const we can't do much; just assume there
-		 * will be one ordinary search entry from the operand at runtime.
+		 * It's impossible to call extractQuery method for unknown operand. So
+		 * unless operand is a Const we can't do much; just assume there will
+		 * be one ordinary search entry from the operand at runtime.
 		 */
 		if (!IsA(operand, Const))
 		{
@@ -6435,7 +6717,7 @@ gincostestimate(PG_FUNCTION_ARGS)
 		}
 
 		/* If Const is null, there can be no matches */
-		if (((Const*) operand)->constisnull)
+		if (((Const *) operand)->constisnull)
 		{
 			*indexStartupCost = 0;
 			*indexTotalCost = 0;
@@ -6445,9 +6727,9 @@ gincostestimate(PG_FUNCTION_ARGS)
 
 		/*
 		 * Get the operator's strategy number and declared input data types
-		 * within the index opfamily.  (We don't need the latter, but we
-		 * use get_op_opfamily_properties because it will throw error if
-		 * it fails to find a matching pg_amop entry.)
+		 * within the index opfamily.  (We don't need the latter, but we use
+		 * get_op_opfamily_properties because it will throw error if it fails
+		 * to find a matching pg_amop entry.)
 		 */
 		get_op_opfamily_properties(clause_op, index->opfamily[indexcol], false,
 								   &strategy_op, &lefttype, &righttype);
@@ -6466,12 +6748,12 @@ gincostestimate(PG_FUNCTION_ARGS)
 		{
 			/* should not happen; throw same error as index_getprocinfo */
 			elog(ERROR, "missing support function %d for attribute %d of index \"%s\"",
-				 GIN_EXTRACTQUERY_PROC, indexcol+1,
+				 GIN_EXTRACTQUERY_PROC, indexcol + 1,
 				 get_rel_name(index->indexoid));
 		}
 
 		OidFunctionCall7(extractProcOid,
-						 ((Const*) operand)->constvalue,
+						 ((Const *) operand)->constvalue,
 						 PointerGetDatum(&nentries),
 						 UInt16GetDatum(strategy_op),
 						 PointerGetDatum(&partial_matches),
@@ -6489,9 +6771,9 @@ gincostestimate(PG_FUNCTION_ARGS)
 		}
 		else
 		{
-			int32	i;
+			int32		i;
 
-			for (i=0; i<nentries; i++)
+			for (i = 0; i < nentries; i++)
 			{
 				/*
 				 * For partial match we haven't any information to estimate
@@ -6536,32 +6818,30 @@ gincostestimate(PG_FUNCTION_ARGS)
 		num_scans = 1;
 
 	/*
-	 * cost to begin scan, first of all, pay attention to
-	 * pending list.
+	 * cost to begin scan, first of all, pay attention to pending list.
 	 */
 	entryPagesFetched = numPendingPages;
 
 	/*
 	 * Estimate number of entry pages read.  We need to do
 	 * searchEntriesInQuals searches.  Use a power function as it should be,
-	 * but tuples on leaf pages usually is much greater.
-	 * Here we include all searches in entry tree, including
-	 * search of first entry in partial match algorithm
+	 * but tuples on leaf pages usually is much greater. Here we include all
+	 * searches in entry tree, including search of first entry in partial
+	 * match algorithm
 	 */
 	entryPagesFetched += ceil(searchEntriesInQuals * rint(pow(numEntryPages, 0.15)));
 
 	/*
-	 * Add an estimate of entry pages read by partial match algorithm.
-	 * It's a scan over leaf pages in entry tree.  We haven't any useful stats
-	 * here, so estimate it as proportion.
+	 * Add an estimate of entry pages read by partial match algorithm. It's a
+	 * scan over leaf pages in entry tree.	We haven't any useful stats here,
+	 * so estimate it as proportion.
 	 */
 	entryPagesFetched += ceil(numEntryPages * partialEntriesInQuals / numEntries);
 
 	/*
-	 * Partial match algorithm reads all data pages before
-	 * doing actual scan, so it's a startup cost. Again,
-	 * we havn't any useful stats here, so, estimate it as
-	 * proportion
+	 * Partial match algorithm reads all data pages before doing actual scan,
+	 * so it's a startup cost. Again, we havn't any useful stats here, so,
+	 * estimate it as proportion
 	 */
 	dataPagesFetched = ceil(numDataPages * partialEntriesInQuals / numEntries);
 
@@ -6577,8 +6857,8 @@ gincostestimate(PG_FUNCTION_ARGS)
 	}
 
 	/*
-	 * Here we use random page cost because logically-close pages could be
-	 * far apart on disk.
+	 * Here we use random page cost because logically-close pages could be far
+	 * apart on disk.
 	 */
 	*indexStartupCost = (entryPagesFetched + dataPagesFetched) * spc_random_page_cost;
 
@@ -6590,16 +6870,16 @@ gincostestimate(PG_FUNCTION_ARGS)
 	 * capacity of data page.
 	 */
 	dataPagesFetchedBySel = ceil(*indexSelectivity *
-								 (numTuples / (BLCKSZ/SizeOfIptrData)));
+								 (numTuples / (BLCKSZ / SizeOfIptrData)));
 
 	if (dataPagesFetchedBySel > dataPagesFetched)
 	{
 		/*
-		 * At least one of entries is very frequent and, unfortunately,
-		 * we couldn't get statistic about entries (only tsvector has
-		 * such statistics). So, we obviously have too small estimation of
-		 * pages fetched from data tree. Re-estimate it from known
-		 * capacity of data pages
+		 * At least one of entries is very frequent and, unfortunately, we
+		 * couldn't get statistic about entries (only tsvector has such
+		 * statistics). So, we obviously have too small estimation of pages
+		 * fetched from data tree. Re-estimate it from known capacity of data
+		 * pages
 		 */
 		dataPagesFetched = dataPagesFetchedBySel;
 	}
@@ -6621,7 +6901,7 @@ gincostestimate(PG_FUNCTION_ARGS)
 	qual_op_cost = cpu_operator_cost *
 		(list_length(indexQuals) + list_length(indexOrderBys));
 	qual_arg_cost -= qual_op_cost;
-	if (qual_arg_cost < 0)      /* just in case... */
+	if (qual_arg_cost < 0)		/* just in case... */
 		qual_arg_cost = 0;
 
 	*indexStartupCost += qual_arg_cost;

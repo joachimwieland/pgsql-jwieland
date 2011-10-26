@@ -171,7 +171,7 @@ main(int argc, char *argv[])
 	/* loop until we have a password if requested by backend */
 	do
 	{
-#define PARAMS_ARRAY_SIZE	7
+#define PARAMS_ARRAY_SIZE	8
 		const char **keywords = pg_malloc(PARAMS_ARRAY_SIZE * sizeof(*keywords));
 		const char **values = pg_malloc(PARAMS_ARRAY_SIZE * sizeof(*values));
 
@@ -189,8 +189,10 @@ main(int argc, char *argv[])
 			"postgres" : options.dbname;
 		keywords[5] = "fallback_application_name";
 		values[5] = pset.progname;
-		keywords[6] = NULL;
-		values[6] = NULL;
+		keywords[6] = "client_encoding";
+		values[6] = (pset.notty || getenv("PGCLIENTENCODING")) ? NULL : "auto";
+		keywords[7] = NULL;
+		values[7] = NULL;
 
 		new_pass = false;
 		pset.db = PQconnectdbParams(keywords, values, true);
@@ -224,8 +226,12 @@ main(int argc, char *argv[])
 
 	if (options.action == ACT_LIST_DB)
 	{
-		int			success = listAllDbs(false);
+		int			success;
 
+		if (!options.no_psqlrc)
+			process_psqlrc(argv[0]);
+
+		success = listAllDbs(false);
 		PQfinish(pset.db);
 		exit(success ? EXIT_SUCCESS : EXIT_FAILURE);
 	}
@@ -250,7 +256,7 @@ main(int argc, char *argv[])
 		if (!options.no_psqlrc)
 			process_psqlrc(argv[0]);
 
-		successResult = process_file(options.action_string, options.single_txn);
+		successResult = process_file(options.action_string, options.single_txn, false);
 	}
 
 	/*
@@ -588,20 +594,27 @@ process_psqlrc(char *argv0)
 static void
 process_psqlrc_file(char *filename)
 {
-	char	   *psqlrc;
+	char	   *psqlrc_minor, *psqlrc_major;
 
 #if defined(WIN32) && (!defined(__MINGW32__))
 #define R_OK 4
 #endif
 
-	psqlrc = pg_malloc(strlen(filename) + 1 + strlen(PG_VERSION) + 1);
-	sprintf(psqlrc, "%s-%s", filename, PG_VERSION);
+	psqlrc_minor = pg_malloc(strlen(filename) + 1 + strlen(PG_VERSION) + 1);
+	sprintf(psqlrc_minor, "%s-%s", filename, PG_VERSION);
+	psqlrc_major = pg_malloc(strlen(filename) + 1 + strlen(PG_MAJORVERSION) + 1);
+	sprintf(psqlrc_major, "%s-%s", filename, PG_MAJORVERSION);
 
-	if (access(psqlrc, R_OK) == 0)
-		(void) process_file(psqlrc, false);
+	/* check for minor version first, then major, then no version */
+	if (access(psqlrc_minor, R_OK) == 0)
+		(void) process_file(psqlrc_minor, false, false);
+	else if (access(psqlrc_major, R_OK) == 0)
+		(void) process_file(psqlrc_major, false, false);
 	else if (access(filename, R_OK) == 0)
-		(void) process_file(filename, false);
-	free(psqlrc);
+		(void) process_file(filename, false, false);
+
+	free(psqlrc_minor);
+	free(psqlrc_major);
 }
 
 

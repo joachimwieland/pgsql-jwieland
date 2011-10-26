@@ -150,7 +150,6 @@ typedef ArrayType Acl;
 #define ACL_ALL_RIGHTS_DATABASE		(ACL_CREATE|ACL_CREATE_TEMP|ACL_CONNECT)
 #define ACL_ALL_RIGHTS_FDW			(ACL_USAGE)
 #define ACL_ALL_RIGHTS_FOREIGN_SERVER (ACL_USAGE)
-#define ACL_ALL_RIGHTS_FOREIGN_TABLE (ACL_SELECT)
 #define ACL_ALL_RIGHTS_FUNCTION		(ACL_EXECUTE)
 #define ACL_ALL_RIGHTS_LANGUAGE		(ACL_USAGE)
 #define ACL_ALL_RIGHTS_LARGEOBJECT	(ACL_SELECT|ACL_UPDATE)
@@ -188,13 +187,14 @@ typedef enum AclObjectKind
 	ACL_KIND_NAMESPACE,			/* pg_namespace */
 	ACL_KIND_OPCLASS,			/* pg_opclass */
 	ACL_KIND_OPFAMILY,			/* pg_opfamily */
+	ACL_KIND_COLLATION,			/* pg_collation */
 	ACL_KIND_CONVERSION,		/* pg_conversion */
 	ACL_KIND_TABLESPACE,		/* pg_tablespace */
 	ACL_KIND_TSDICTIONARY,		/* pg_ts_dict */
 	ACL_KIND_TSCONFIGURATION,	/* pg_ts_config */
 	ACL_KIND_FDW,				/* pg_foreign_data_wrapper */
 	ACL_KIND_FOREIGN_SERVER,	/* pg_foreign_server */
-	ACL_KIND_FOREIGN_TABLE,		/* pg_foreign_table */
+	ACL_KIND_EXTENSION,			/* pg_extension */
 	MAX_ACL_KIND				/* MUST BE LAST */
 } AclObjectKind;
 
@@ -225,7 +225,7 @@ extern bool is_member_of_role(Oid member, Oid role);
 extern bool is_member_of_role_nosuper(Oid member, Oid role);
 extern bool is_admin_of_role(Oid member, Oid role);
 extern void check_is_member_of_role(Oid member, Oid role);
-extern Oid get_role_oid(const char *rolname, bool missing_ok);
+extern Oid	get_role_oid(const char *rolname, bool missing_ok);
 
 extern void select_best_grantor(Oid roleId, AclMode privileges,
 					const Acl *acl, Oid ownerId,
@@ -309,9 +309,13 @@ extern bool pg_tablespace_ownercheck(Oid spc_oid, Oid roleid);
 extern bool pg_opclass_ownercheck(Oid opc_oid, Oid roleid);
 extern bool pg_opfamily_ownercheck(Oid opf_oid, Oid roleid);
 extern bool pg_database_ownercheck(Oid db_oid, Oid roleid);
+extern bool pg_collation_ownercheck(Oid coll_oid, Oid roleid);
 extern bool pg_conversion_ownercheck(Oid conv_oid, Oid roleid);
 extern bool pg_ts_dict_ownercheck(Oid dict_oid, Oid roleid);
 extern bool pg_ts_config_ownercheck(Oid cfg_oid, Oid roleid);
+extern bool pg_foreign_data_wrapper_ownercheck(Oid srv_oid, Oid roleid);
 extern bool pg_foreign_server_ownercheck(Oid srv_oid, Oid roleid);
+extern bool pg_extension_ownercheck(Oid ext_oid, Oid roleid);
+extern bool has_createrole_privilege(Oid roleid);
 
 #endif   /* ACL_H */

@@ -302,11 +302,17 @@ pqsecure_close(PGconn *conn)
 
 /*
  *	Read data from a secure connection.
+ *
+ * On failure, this function is responsible for putting a suitable message
+ * into conn->errorMessage.  The caller must still inspect errno, but only
+ * to determine whether to continue/retry after error.
  */
 ssize_t
 pqsecure_read(PGconn *conn, void *ptr, size_t len)
 {
 	ssize_t		n;
+	int			result_errno = 0;
+	char		sebuf[256];
 
 #ifdef USE_SSL
 	if (conn->ssl)
@@ -325,6 +331,14 @@ rloop:
 		switch (err)
 		{
 			case SSL_ERROR_NONE:
+				if (n < 0)
+				{
+					/* Not supposed to happen, so we don't translate the msg */
+					printfPQExpBuffer(&conn->errorMessage,
+									  "SSL_read failed but did not provide error information\n");
+					/* assume the connection is broken */
+					result_errno = ECONNRESET;
+				}
 				break;
 			case SSL_ERROR_WANT_READ:
 				n = 0;
@@ -339,43 +353,61 @@ rloop:
 				 */
 				goto rloop;
 			case SSL_ERROR_SYSCALL:
+				if (n < 0)
 				{
-					char		sebuf[256];
-
-					if (n == -1)
-					{
-						REMEMBER_EPIPE(spinfo, SOCK_ERRNO == EPIPE);
+					result_errno = SOCK_ERRNO;
+					REMEMBER_EPIPE(spinfo, result_errno == EPIPE);
+					if (result_errno == EPIPE ||
+						result_errno == ECONNRESET)
 						printfPQExpBuffer(&conn->errorMessage,
-									libpq_gettext("SSL SYSCALL error: %s\n"),
-							SOCK_STRERROR(SOCK_ERRNO, sebuf, sizeof(sebuf)));
-					}
+										  libpq_gettext(
+											  "server closed the connection unexpectedly\n"
+											  "\tThis probably means the server terminated abnormally\n"
+											  "\tbefore or while processing the request.\n"));
 					else
-					{
 						printfPQExpBuffer(&conn->errorMessage,
-						 libpq_gettext("SSL SYSCALL error: EOF detected\n"));
-
-						SOCK_ERRNO_SET(ECONNRESET);
-						n = -1;
-					}
-					break;
+										  libpq_gettext("SSL SYSCALL error: %s\n"),
+										  SOCK_STRERROR(result_errno,
+														sebuf, sizeof(sebuf)));
 				}
+				else
+				{
+					printfPQExpBuffer(&conn->errorMessage,
+									  libpq_gettext("SSL SYSCALL error: EOF detected\n"));
+					/* assume the connection is broken */
+					result_errno = ECONNRESET;
+					n = -1;
+				}
+				break;
 			case SSL_ERROR_SSL:
 				{
-					char	   *err = SSLerrmessage();
+					char	   *errm = SSLerrmessage();
 
 					printfPQExpBuffer(&conn->errorMessage,
-									  libpq_gettext("SSL error: %s\n"), err);
-					SSLerrfree(err);
+									  libpq_gettext("SSL error: %s\n"), errm);
+					SSLerrfree(errm);
+					/* assume the connection is broken */
+					result_errno = ECONNRESET;
+					n = -1;
+					break;
 				}
-				/* fall through */
 			case SSL_ERROR_ZERO_RETURN:
-				SOCK_ERRNO_SET(ECONNRESET);
+				/*
+				 * Per OpenSSL documentation, this error code is only returned
+				 * for a clean connection closure, so we should not report it
+				 * as a server crash.
+				 */
+				printfPQExpBuffer(&conn->errorMessage,
+								  libpq_gettext("SSL connection has been closed unexpectedly\n"));
+				result_errno = ECONNRESET;
 				n = -1;
 				break;
 			default:
 				printfPQExpBuffer(&conn->errorMessage,
 						  libpq_gettext("unrecognized SSL error code: %d\n"),
 								  err);
+				/* assume the connection is broken */
+				result_errno = ECONNRESET;
 				n = -1;
 				break;
 		}
@@ -383,19 +415,66 @@ rloop:
 		RESTORE_SIGPIPE(conn, spinfo);
 	}
 	else
-#endif
+#endif /* USE_SSL */
+	{
 		n = recv(conn->sock, ptr, len, 0);
+
+		if (n < 0)
+		{
+			result_errno = SOCK_ERRNO;
+
+			/* Set error message if appropriate */
+			switch (result_errno)
+			{
+#ifdef EAGAIN
+				case EAGAIN:
+#endif
+#if defined(EWOULDBLOCK) && (!defined(EAGAIN) || (EWOULDBLOCK != EAGAIN))
+				case EWOULDBLOCK:
+#endif
+				case EINTR:
+					/* no error message, caller is expected to retry */
+					break;
+
+#ifdef ECONNRESET
+				case ECONNRESET:
+					printfPQExpBuffer(&conn->errorMessage,
+									  libpq_gettext(
+										  "server closed the connection unexpectedly\n"
+										  "\tThis probably means the server terminated abnormally\n"
+										  "\tbefore or while processing the request.\n"));
+					break;
+#endif
+
+				default:
+					printfPQExpBuffer(&conn->errorMessage,
+									  libpq_gettext("could not receive data from server: %s\n"),
+									  SOCK_STRERROR(result_errno,
+													sebuf, sizeof(sebuf)));
+					break;
+			}
+		}
+	}
+
+	/* ensure we return the intended errno to caller */
+	SOCK_ERRNO_SET(result_errno);
 
 	return n;
 }
 
 /*
  *	Write data to a secure connection.
+ *
+ * On failure, this function is responsible for putting a suitable message
+ * into conn->errorMessage.  The caller must still inspect errno, but only
+ * to determine whether to continue/retry after error.
  */
 ssize_t
 pqsecure_write(PGconn *conn, const void *ptr, size_t len)
 {
 	ssize_t		n;
+	int			result_errno = 0;
+	char		sebuf[256];
 
 	DECLARE_SIGPIPE_INFO(spinfo);
 
@@ -412,6 +491,14 @@ pqsecure_write(PGconn *conn, const void *ptr, size_t len)
 		switch (err)
 		{
 			case SSL_ERROR_NONE:
+				if (n < 0)
+				{
+					/* Not supposed to happen, so we don't translate the msg */
+					printfPQExpBuffer(&conn->errorMessage,
+									  "SSL_write failed but did not provide error information\n");
+					/* assume the connection is broken */
+					result_errno = ECONNRESET;
+				}
 				break;
 			case SSL_ERROR_WANT_READ:
 
@@ -426,48 +513,67 @@ pqsecure_write(PGconn *conn, const void *ptr, size_t len)
 				n = 0;
 				break;
 			case SSL_ERROR_SYSCALL:
+				if (n < 0)
 				{
-					char		sebuf[256];
-
-					if (n == -1)
-					{
-						REMEMBER_EPIPE(spinfo, SOCK_ERRNO == EPIPE);
+					result_errno = SOCK_ERRNO;
+					REMEMBER_EPIPE(spinfo, result_errno == EPIPE);
+					if (result_errno == EPIPE ||
+						result_errno == ECONNRESET)
 						printfPQExpBuffer(&conn->errorMessage,
-									libpq_gettext("SSL SYSCALL error: %s\n"),
-							SOCK_STRERROR(SOCK_ERRNO, sebuf, sizeof(sebuf)));
-					}
+										  libpq_gettext(
+											  "server closed the connection unexpectedly\n"
+											  "\tThis probably means the server terminated abnormally\n"
+											  "\tbefore or while processing the request.\n"));
 					else
-					{
 						printfPQExpBuffer(&conn->errorMessage,
-						 libpq_gettext("SSL SYSCALL error: EOF detected\n"));
-						SOCK_ERRNO_SET(ECONNRESET);
-						n = -1;
-					}
-					break;
+										  libpq_gettext("SSL SYSCALL error: %s\n"),
+										  SOCK_STRERROR(result_errno,
+														sebuf, sizeof(sebuf)));
 				}
+				else
+				{
+					printfPQExpBuffer(&conn->errorMessage,
+									  libpq_gettext("SSL SYSCALL error: EOF detected\n"));
+					/* assume the connection is broken */
+					result_errno = ECONNRESET;
+					n = -1;
+				}
+				break;
 			case SSL_ERROR_SSL:
 				{
-					char	   *err = SSLerrmessage();
+					char	   *errm = SSLerrmessage();
 
 					printfPQExpBuffer(&conn->errorMessage,
-									  libpq_gettext("SSL error: %s\n"), err);
-					SSLerrfree(err);
+									  libpq_gettext("SSL error: %s\n"), errm);
+					SSLerrfree(errm);
+					/* assume the connection is broken */
+					result_errno = ECONNRESET;
+					n = -1;
+					break;
 				}
-				/* fall through */
 			case SSL_ERROR_ZERO_RETURN:
-				SOCK_ERRNO_SET(ECONNRESET);
+				/*
+				 * Per OpenSSL documentation, this error code is only returned
+				 * for a clean connection closure, so we should not report it
+				 * as a server crash.
+				 */
+				printfPQExpBuffer(&conn->errorMessage,
+								  libpq_gettext("SSL connection has been closed unexpectedly\n"));
+				result_errno = ECONNRESET;
 				n = -1;
 				break;
 			default:
 				printfPQExpBuffer(&conn->errorMessage,
 						  libpq_gettext("unrecognized SSL error code: %d\n"),
 								  err);
+				/* assume the connection is broken */
+				result_errno = ECONNRESET;
 				n = -1;
 				break;
 		}
 	}
 	else
-#endif
+#endif /* USE_SSL */
 	{
 		int			flags = 0;
 
@@ -484,13 +590,15 @@ retry_masked:
 
 		if (n < 0)
 		{
+			result_errno = SOCK_ERRNO;
+
 			/*
 			 * If we see an EINVAL, it may be because MSG_NOSIGNAL isn't
 			 * available on this machine.  So, clear sigpipe_flag so we don't
 			 * try the flag again, and retry the send().
 			 */
 #ifdef MSG_NOSIGNAL
-			if (flags != 0 && SOCK_ERRNO == EINVAL)
+			if (flags != 0 && result_errno == EINVAL)
 			{
 				conn->sigpipe_flag = false;
 				flags = 0;
@@ -498,11 +606,48 @@ retry_masked:
 			}
 #endif   /* MSG_NOSIGNAL */
 
-			REMEMBER_EPIPE(spinfo, SOCK_ERRNO == EPIPE);
+			/* Set error message if appropriate */
+			switch (result_errno)
+			{
+#ifdef EAGAIN
+				case EAGAIN:
+#endif
+#if defined(EWOULDBLOCK) && (!defined(EAGAIN) || (EWOULDBLOCK != EAGAIN))
+				case EWOULDBLOCK:
+#endif
+				case EINTR:
+					/* no error message, caller is expected to retry */
+					break;
+
+				case EPIPE:
+					/* Set flag for EPIPE */
+					REMEMBER_EPIPE(spinfo, true);
+					/* FALL THRU */
+
+#ifdef ECONNRESET
+				case ECONNRESET:
+#endif
+					printfPQExpBuffer(&conn->errorMessage,
+									  libpq_gettext(
+										  "server closed the connection unexpectedly\n"
+										  "\tThis probably means the server terminated abnormally\n"
+										  "\tbefore or while processing the request.\n"));
+					break;
+
+				default:
+					printfPQExpBuffer(&conn->errorMessage,
+									  libpq_gettext("could not send data to server: %s\n"),
+									  SOCK_STRERROR(result_errno,
+													sebuf, sizeof(sebuf)));
+					break;
+			}
 		}
 	}
 
 	RESTORE_SIGPIPE(conn, spinfo);
+
+	/* ensure we return the intended errno to caller */
+	SOCK_ERRNO_SET(result_errno);
 
 	return n;
 }
@@ -589,8 +734,8 @@ static bool
 verify_peer_name_matches_certificate(PGconn *conn)
 {
 	/*
-	 * If told not to verify the peer name, don't do it. Return true indicating
-	 * that the verification was successful.
+	 * If told not to verify the peer name, don't do it. Return true
+	 * indicating that the verification was successful.
 	 */
 	if (strcmp(conn->sslmode, "verify-full") != 0)
 		return true;
@@ -757,6 +902,12 @@ init_ssl_system(PGconn *conn)
 #endif
 			return -1;
 		}
+
+		/*
+		 * Disable OpenSSL's moving-write-buffer sanity check, because it
+		 * causes unnecessary failures in nonblocking send cases.
+		 */
+		SSL_CTX_set_mode(SSL_context, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
 	}
 
 #ifdef ENABLE_THREAD_SAFETY
@@ -825,37 +976,37 @@ initialize_SSL(PGconn *conn)
 	char		homedir[MAXPGPATH];
 	char		fnbuf[MAXPGPATH];
 	char		sebuf[256];
+	bool		have_homedir;
 	bool		have_cert;
 	EVP_PKEY   *pkey = NULL;
 
 	/*
 	 * We'll need the home directory if any of the relevant parameters are
-	 * defaulted.
+	 * defaulted.  If pqGetHomeDirectory fails, act as though none of the
+	 * files could be found.
 	 */
 	if (!(conn->sslcert && strlen(conn->sslcert) > 0) ||
 		!(conn->sslkey && strlen(conn->sslkey) > 0) ||
 		!(conn->sslrootcert && strlen(conn->sslrootcert) > 0) ||
 		!(conn->sslcrl && strlen(conn->sslcrl) > 0))
-	{
-		if (!pqGetHomeDirectory(homedir, sizeof(homedir)))
-		{
-			printfPQExpBuffer(&conn->errorMessage,
-							  libpq_gettext("could not get home directory to locate client certificate files\n"));
-			return -1;
-		}
-	}
-	else
-	{
-		homedir[0] = '\0';
-	}
+		have_homedir = pqGetHomeDirectory(homedir, sizeof(homedir));
+	else	/* won't need it */
+		have_homedir = false;
 
 	/* Read the client certificate file */
 	if (conn->sslcert && strlen(conn->sslcert) > 0)
 		strncpy(fnbuf, conn->sslcert, sizeof(fnbuf));
-	else
+	else if (have_homedir)
 		snprintf(fnbuf, sizeof(fnbuf), "%s/%s", homedir, USER_CERT_FILE);
+	else
+		fnbuf[0] = '\0';
 
-	if (stat(fnbuf, &buf) != 0)
+	if (fnbuf[0] == '\0')
+	{
+		/* no home directory, proceed without a client cert */
+		have_cert = false;
+	}
+	else if (stat(fnbuf, &buf) != 0)
 	{
 		/*
 		 * If file is not present, just go on without a client cert; server
@@ -1001,11 +1152,13 @@ initialize_SSL(PGconn *conn)
 			strncpy(fnbuf, conn->sslkey, sizeof(fnbuf));
 		}
 	}
-	else
+	else if (have_homedir)
 	{
 		/* No PGSSLKEY specified, load default file */
 		snprintf(fnbuf, sizeof(fnbuf), "%s/%s", homedir, USER_KEY_FILE);
 	}
+	else
+		fnbuf[0] = '\0';
 
 	if (have_cert && fnbuf[0] != '\0')
 	{
@@ -1060,10 +1213,13 @@ initialize_SSL(PGconn *conn)
 	 */
 	if (conn->sslrootcert && strlen(conn->sslrootcert) > 0)
 		strncpy(fnbuf, conn->sslrootcert, sizeof(fnbuf));
-	else
+	else if (have_homedir)
 		snprintf(fnbuf, sizeof(fnbuf), "%s/%s", homedir, ROOT_CERT_FILE);
+	else
+		fnbuf[0] = '\0';
 
-	if (stat(fnbuf, &buf) == 0)
+	if (fnbuf[0] != '\0' &&
+		stat(fnbuf, &buf) == 0)
 	{
 		X509_STORE *cvstore;
 
@@ -1082,11 +1238,14 @@ initialize_SSL(PGconn *conn)
 		{
 			if (conn->sslcrl && strlen(conn->sslcrl) > 0)
 				strncpy(fnbuf, conn->sslcrl, sizeof(fnbuf));
-			else
+			else if (have_homedir)
 				snprintf(fnbuf, sizeof(fnbuf), "%s/%s", homedir, ROOT_CRL_FILE);
+			else
+				fnbuf[0] = '\0';
 
 			/* Set the flags to check against the complete CRL chain */
-			if (X509_STORE_load_locations(cvstore, fnbuf, NULL) == 1)
+			if (fnbuf[0] != '\0' &&
+				X509_STORE_load_locations(cvstore, fnbuf, NULL) == 1)
 			{
 				/* OpenSSL 0.96 does not support X509_V_FLAG_CRL_CHECK */
 #ifdef X509_V_FLAG_CRL_CHECK
@@ -1116,7 +1275,17 @@ initialize_SSL(PGconn *conn)
 		 */
 		if (conn->sslmode[0] == 'v')	/* "verify-ca" or "verify-full" */
 		{
-			printfPQExpBuffer(&conn->errorMessage,
+			/*
+			 * The only way to reach here with an empty filename is if
+			 * pqGetHomeDirectory failed.  That's a sufficiently unusual case
+			 * that it seems worth having a specialized error message for it.
+			 */
+			if (fnbuf[0] == '\0')
+				printfPQExpBuffer(&conn->errorMessage,
+								  libpq_gettext("could not get home directory to locate root certificate file\n"
+												"Either provide the file or change sslmode to disable server certificate verification.\n"));
+			else
+				printfPQExpBuffer(&conn->errorMessage,
 				libpq_gettext("root certificate file \"%s\" does not exist\n"
 							  "Either provide the file or change sslmode to disable server certificate verification.\n"), fnbuf);
 			return -1;

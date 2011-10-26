@@ -63,6 +63,7 @@ extern RangeTblEntry *addRangeTableEntryForFunction(ParseState *pstate,
 							  bool inFromCl);
 extern RangeTblEntry *addRangeTableEntryForValues(ParseState *pstate,
 							List *exprs,
+							List *collations,
 							Alias *alias,
 							bool inFromCl);
 extern RangeTblEntry *addRangeTableEntryForJoin(ParseState *pstate,
@@ -74,7 +75,7 @@ extern RangeTblEntry *addRangeTableEntryForJoin(ParseState *pstate,
 extern RangeTblEntry *addRangeTableEntryForCTE(ParseState *pstate,
 						 CommonTableExpr *cte,
 						 Index levelsup,
-						 Alias *alias,
+						 RangeVar *rv,
 						 bool inFromCl);
 extern bool isLockedRefname(ParseState *pstate, const char *refname);
 extern void addRTEtoQuery(ParseState *pstate, RangeTblEntry *rte,
@@ -89,5 +90,6 @@ extern List *expandRelAttrs(ParseState *pstate, RangeTblEntry *rte,
 extern int	attnameAttNum(Relation rd, const char *attname, bool sysColOK);
 extern Name attnumAttName(Relation rd, int attid);
 extern Oid	attnumTypeId(Relation rd, int attid);
+extern Oid	attnumCollationId(Relation rd, int attid);
 
 #endif   /* PARSE_RELATION_H */

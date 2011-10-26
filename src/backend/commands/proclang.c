@@ -395,12 +395,15 @@ create_proc_lang(const char *languageName, bool replace,
 	myself.objectSubId = 0;
 
 	if (is_update)
-		deleteDependencyRecordsFor(myself.classId, myself.objectId);
+		deleteDependencyRecordsFor(myself.classId, myself.objectId, true);
 
 	/* dependency on owner of language */
 	if (!is_update)
 		recordDependencyOnOwner(myself.classId, myself.objectId,
 								languageOwner);
+
+	/* dependency on extension */
+	recordDependencyOnCurrentExtension(&myself, is_update);
 
 	/* dependency on the PL handler function */
 	referenced.classId = ProcedureRelationId;

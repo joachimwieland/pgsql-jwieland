@@ -332,7 +332,7 @@ ecpg_store_result(const PGresult *results, int act_field,
 		 */
 		if ((var->arrsize > 0 && ntuples > var->arrsize) || (var->ind_arrsize > 0 && ntuples > var->ind_arrsize))
 		{
-			ecpg_log("ecpg_store_result on line %d: incorrect number of matches; %d don't fit into array of %d\n",
+			ecpg_log("ecpg_store_result on line %d: incorrect number of matches; %d don't fit into array of %ld\n",
 					 stmt->lineno, ntuples, var->arrsize);
 			ecpg_raise(stmt->lineno, INFORMIX_MODE(stmt->compat) ? ECPG_INFORMIX_SUBSELECT_NOT_ONE : ECPG_TOO_MANY_MATCHES, ECPG_SQLSTATE_CARDINALITY_VIOLATION, NULL);
 			return false;
@@ -478,7 +478,7 @@ sprintf_double_value(char *ptr, double value, const char *delim)
 			sprintf(ptr, "%s%s", "Infinity", delim);
 	}
 	else
-		sprintf(ptr, "%.14g%s", value, delim);
+		sprintf(ptr, "%.15g%s", value, delim);
 }
 
 static void
@@ -494,7 +494,7 @@ sprintf_float_value(char *ptr, float value, const char *delim)
 			sprintf(ptr, "%s%s", "Infinity", delim);
 	}
 	else
-		sprintf(ptr, "%.14g%s", value, delim);
+		sprintf(ptr, "%.15g%s", value, delim);
 }
 
 bool
@@ -1074,7 +1074,7 @@ ecpg_store_input(const int lineno, const bool force_indicator, const struct vari
 
 			default:
 				/* Not implemented yet */
-				ecpg_raise(lineno, ECPG_UNSUPPORTED, ECPG_SQLSTATE_ECPG_INTERNAL_ERROR, (char *) ecpg_type_name(var->type));
+				ecpg_raise(lineno, ECPG_UNSUPPORTED, ECPG_SQLSTATE_ECPG_INTERNAL_ERROR, ecpg_type_name(var->type));
 				return false;
 				break;
 		}
@@ -1675,7 +1675,7 @@ ecpg_execute(struct statement * stmt)
 					if (PQresultStatus(results) == PGRES_COMMAND_OK)
 						ecpg_log("ecpg_execute on line %d: got PGRES_COMMAND_OK after PGRES_COPY_OUT\n", stmt->lineno);
 					else
-						ecpg_log("ecpg_execute on line %d: got error after PGRES_COPY_OUT: %s", PQresultErrorMessage(results));
+						ecpg_log("ecpg_execute on line %d: got error after PGRES_COPY_OUT: %s", stmt->lineno, PQresultErrorMessage(results));
 				}
 				break;
 			}
@@ -1698,7 +1698,7 @@ ecpg_execute(struct statement * stmt)
 	notify = PQnotifies(stmt->connection->connection);
 	if (notify)
 	{
-		ecpg_log("ecpg_execute on line %d: asynchronous notification of \"%s\" from backend pid %d received\n",
+		ecpg_log("ecpg_execute on line %d: asynchronous notification of \"%s\" from backend PID %d received\n",
 				 stmt->lineno, notify->relname, notify->be_pid);
 		PQfreemem(notify);
 	}
@@ -1773,7 +1773,12 @@ ECPGdo(const int lineno, const int compat, const int force_indicator, const char
 	if (statement_type == ECPGst_prepnormal)
 	{
 		if (!ecpg_auto_prepare(lineno, connection_name, compat, &prepname, query))
+		{
+			setlocale(LC_NUMERIC, oldlocale);
+			ecpg_free(oldlocale);
+			va_end(args);
 			return (false);
+		}
 
 		/*
 		 * statement is now prepared, so instead of the query we have to
@@ -1800,6 +1805,9 @@ ECPGdo(const int lineno, const int compat, const int force_indicator, const char
 		else
 		{
 			ecpg_raise(lineno, ECPG_INVALID_STMT, ECPG_SQLSTATE_INVALID_SQL_STATEMENT_NAME, stmt->command);
+			setlocale(LC_NUMERIC, oldlocale);
+			ecpg_free(oldlocale);
+			va_end(args);
 			return (false);
 		}
 	}
@@ -1932,7 +1940,7 @@ bool
 ECPGdo_descriptor(int line, const char *connection,
 				  const char *descriptor, const char *query)
 {
-	return ECPGdo(line, ECPG_COMPAT_PGSQL, true, connection, '\0', 0, (char *) query, ECPGt_EOIT,
+	return ECPGdo(line, ECPG_COMPAT_PGSQL, true, connection, '\0', 0, query, ECPGt_EOIT,
 				  ECPGt_descriptor, descriptor, 0L, 0L, 0L,
 				  ECPGt_NO_INDICATOR, NULL, 0L, 0L, 0L, ECPGt_EORT);
 }

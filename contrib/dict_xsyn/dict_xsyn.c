@@ -15,7 +15,6 @@
 #include <ctype.h>
 
 #include "commands/defrem.h"
-#include "fmgr.h"
 #include "tsearch/ts_locale.h"
 #include "tsearch/ts_utils.h"
 
@@ -70,7 +69,7 @@ find_word(char *in, char **end)
 static int
 compare_syn(const void *a, const void *b)
 {
-	return strcmp(((Syn *) a)->key, ((Syn *) b)->key);
+	return strcmp(((const Syn *) a)->key, ((const Syn *) b)->key);
 }
 
 static void

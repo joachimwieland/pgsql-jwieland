@@ -14,7 +14,8 @@
 #include "postgres.h"
 
 /*
- * Indicate if pgwin32_recv() should operate in non-blocking mode.
+ * Indicate if pgwin32_recv() and pgwin32_send() should operate
+ * in non-blocking mode.
  *
  * Since the socket emulation layer always sets the actual socket to
  * non-blocking mode in order to be able to deliver signals, we must
@@ -98,7 +99,7 @@ TranslateSocketError(void)
 			break;
 		default:
 			ereport(NOTICE,
-					(errmsg_internal("Unknown win32 socket error code: %i", WSAGetLastError())));
+					(errmsg_internal("unrecognized win32 socket error code: %d", WSAGetLastError())));
 			errno = EINVAL;
 	}
 }
@@ -142,11 +143,11 @@ pgwin32_waitforsinglesocket(SOCKET s, int what, int timeout)
 
 		if (waitevent == INVALID_HANDLE_VALUE)
 			ereport(ERROR,
-					(errmsg_internal("Failed to create socket waiting event: %i", (int) GetLastError())));
+					(errmsg_internal("could not create socket waiting event: error code %lu", GetLastError())));
 	}
 	else if (!ResetEvent(waitevent))
 		ereport(ERROR,
-				(errmsg_internal("Failed to reset socket waiting event: %i", (int) GetLastError())));
+				(errmsg_internal("could not reset socket waiting event: error code %lu", GetLastError())));
 
 	/*
 	 * make sure we don't multiplex this kernel event object with a different
@@ -220,7 +221,7 @@ pgwin32_waitforsinglesocket(SOCKET s, int what, int timeout)
 	if (r == WAIT_TIMEOUT)
 		return 0;
 	ereport(ERROR,
-			(errmsg_internal("Bad return from WaitForMultipleObjects: %i (%i)", r, (int) GetLastError())));
+			(errmsg_internal("unrecognized return value from WaitForMultipleObjects: %d (%lu)", r, GetLastError())));
 	return 0;
 }
 
@@ -363,13 +364,23 @@ pgwin32_recv(SOCKET s, char *buf, int len, int f)
 		return b;
 	}
 	ereport(NOTICE,
-	  (errmsg_internal("Failed to read from ready socket (after retries)")));
+	  (errmsg_internal("could not read from ready socket (after retries)")));
 	errno = EWOULDBLOCK;
 	return -1;
 }
 
+/*
+ * The second argument to send() is defined by SUS to be a "const void *"
+ * and so we use the same signature here to keep compilers happy when
+ * handling callers.
+ *
+ * But the buf member of a WSABUF struct is defined as "char *", so we cast
+ * the second argument to that here when assigning it, also to keep compilers
+ * happy.
+ */
+
 int
-pgwin32_send(SOCKET s, char *buf, int len, int flags)
+pgwin32_send(SOCKET s, const void *buf, int len, int flags)
 {
 	WSABUF		wbuf;
 	int			r;
@@ -379,7 +390,7 @@ pgwin32_send(SOCKET s, char *buf, int len, int flags)
 		return -1;
 
 	wbuf.len = len;
-	wbuf.buf = buf;
+	wbuf.buf = (char *) buf;
 
 	/*
 	 * Readiness of socket to send data to UDP socket may be not true: socket
@@ -396,6 +407,16 @@ pgwin32_send(SOCKET s, char *buf, int len, int flags)
 			WSAGetLastError() != WSAEWOULDBLOCK)
 		{
 			TranslateSocketError();
+			return -1;
+		}
+
+		if (pgwin32_noblock)
+		{
+			/*
+			 * No data sent, and we are in "emulated non-blocking mode", so
+			 * return indicating that we'd block if we were to continue.
+			 */
+			errno = EWOULDBLOCK;
 			return -1;
 		}
 
@@ -546,7 +567,7 @@ pgwin32_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, c
 			ZeroMemory(&resEvents, sizeof(resEvents));
 			if (WSAEnumNetworkEvents(sockets[i], events[i], &resEvents) == SOCKET_ERROR)
 				ereport(FATAL,
-						(errmsg_internal("failed to enumerate network events: %i", (int) GetLastError())));
+						(errmsg_internal("failed to enumerate network events: error code %lu", GetLastError())));
 			/* Read activity? */
 			if (readfds && FD_ISSET(sockets[i], readfds))
 			{
@@ -624,7 +645,7 @@ pgwin32_socket_strerror(int err)
 		handleDLL = LoadLibraryEx("netmsg.dll", NULL, DONT_RESOLVE_DLL_REFERENCES | LOAD_LIBRARY_AS_DATAFILE);
 		if (handleDLL == NULL)
 			ereport(FATAL,
-					(errmsg_internal("Failed to load netmsg.dll: %i", (int) GetLastError())));
+					(errmsg_internal("could not load netmsg.dll: error code %lu", GetLastError())));
 	}
 
 	ZeroMemory(&wserrbuf, sizeof(wserrbuf));
@@ -637,7 +658,7 @@ pgwin32_socket_strerror(int err)
 					  NULL) == 0)
 	{
 		/* Failed to get id */
-		sprintf(wserrbuf, "Unknown winsock error %i", err);
+		sprintf(wserrbuf, "unrecognized winsock error %d", err);
 	}
 	return wserrbuf;
 }

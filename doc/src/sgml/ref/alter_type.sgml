@@ -32,9 +32,9 @@ ALTER TYPE <replaceable class="PARAMETER">name</replaceable> ADD VALUE <replacea
 
 <phrase>where <replaceable class="PARAMETER">action</replaceable> is one of:</phrase>
 
-    ADD ATTRIBUTE <replaceable class="PARAMETER">attribute_name</replaceable> <replaceable class="PARAMETER">data_type</replaceable> [ CASCADE | RESTRICT ]
+    ADD ATTRIBUTE <replaceable class="PARAMETER">attribute_name</replaceable> <replaceable class="PARAMETER">data_type</replaceable> [ COLLATE <replaceable class="PARAMETER">collation</replaceable> ] [ CASCADE | RESTRICT ]
     DROP ATTRIBUTE [ IF EXISTS ] <replaceable class="PARAMETER">attribute_name</replaceable> [ CASCADE | RESTRICT ]
-    ALTER ATTRIBUTE <replaceable class="PARAMETER">attribute_name</replaceable> [ SET DATA ] TYPE <replaceable class="PARAMETER">data_type</replaceable> [ CASCADE | RESTRICT ]
+    ALTER ATTRIBUTE <replaceable class="PARAMETER">attribute_name</replaceable> [ SET DATA ] TYPE <replaceable class="PARAMETER">data_type</replaceable> [ COLLATE <replaceable class="PARAMETER">collation</replaceable> ] [ CASCADE | RESTRICT ]
 </synopsis>
  </refsynopsisdiv>
 
@@ -122,7 +122,7 @@ ALTER TYPE <replaceable class="PARAMETER">name</replaceable> ADD VALUE <replacea
     <listitem>
      <para>
       Automatically propagate the operation to typed tables of the
-      type being altered.
+      type being altered, and their descendants.
      </para>
     </listitem>
    </varlistentry>
@@ -313,8 +313,7 @@ ALTER TYPE compfoo ADD ATTRIBUTE f3 int;
    To add a new value to an enum type in a particular sort position:
 <programlisting>
 ALTER TYPE colors ADD VALUE 'orange' AFTER 'red';
-</programlisting>
-  </para>
+</programlisting></para>
  </refsect1>
 
  <refsect1>

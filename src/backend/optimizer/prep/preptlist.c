@@ -4,7 +4,7 @@
  *	  Routines to preprocess the parse tree target list
  *
  * For INSERT and UPDATE queries, the targetlist must contain an entry for
- * each attribute of the target relation in the correct order.  For all query
+ * each attribute of the target relation in the correct order.	For all query
  * types, we may need to add junk tlist entries for Vars used in the RETURNING
  * list and row ID information needed for EvalPlanQual checking.
  *
@@ -29,9 +29,7 @@
 #include "catalog/pg_type.h"
 #include "nodes/makefuncs.h"
 #include "optimizer/prep.h"
-#include "optimizer/subselect.h"
 #include "optimizer/tlist.h"
-#include "optimizer/var.h"
 #include "parser/parsetree.h"
 #include "parser/parse_coerce.h"
 #include "utils/rel.h"
@@ -80,7 +78,7 @@ preprocess_targetlist(PlannerInfo *root, List *tlist)
 	/*
 	 * Add necessary junk columns for rowmarked rels.  These values are needed
 	 * for locking of rels selected FOR UPDATE/SHARE, and to do EvalPlanQual
-	 * rechecking.  See comments for PlanRowMark in plannodes.h.
+	 * rechecking.	See comments for PlanRowMark in plannodes.h.
 	 */
 	foreach(lc, root->rowMarks)
 	{
@@ -100,8 +98,9 @@ preprocess_targetlist(PlannerInfo *root, List *tlist)
 						  SelfItemPointerAttributeNumber,
 						  TIDOID,
 						  -1,
+						  InvalidOid,
 						  0);
-			snprintf(resname, sizeof(resname), "ctid%u", rc->rti);
+			snprintf(resname, sizeof(resname), "ctid%u", rc->rowmarkId);
 			tle = makeTargetEntry((Expr *) var,
 								  list_length(tlist) + 1,
 								  pstrdup(resname),
@@ -115,8 +114,9 @@ preprocess_targetlist(PlannerInfo *root, List *tlist)
 							  TableOidAttributeNumber,
 							  OIDOID,
 							  -1,
+							  InvalidOid,
 							  0);
-				snprintf(resname, sizeof(resname), "tableoid%u", rc->rti);
+				snprintf(resname, sizeof(resname), "tableoid%u", rc->rowmarkId);
 				tle = makeTargetEntry((Expr *) var,
 									  list_length(tlist) + 1,
 									  pstrdup(resname),
@@ -130,7 +130,7 @@ preprocess_targetlist(PlannerInfo *root, List *tlist)
 			var = makeWholeRowVar(rt_fetch(rc->rti, range_table),
 								  rc->rti,
 								  0);
-			snprintf(resname, sizeof(resname), "wholerow%u", rc->rti);
+			snprintf(resname, sizeof(resname), "wholerow%u", rc->rowmarkId);
 			tle = makeTargetEntry((Expr *) var,
 								  list_length(tlist) + 1,
 								  pstrdup(resname),
@@ -152,6 +152,7 @@ preprocess_targetlist(PlannerInfo *root, List *tlist)
 		ListCell   *l;
 
 		vars = pull_var_clause((Node *) parse->returningList,
+							   PVC_RECURSE_AGGREGATES,
 							   PVC_INCLUDE_PLACEHOLDERS);
 		foreach(l, vars)
 		{
@@ -257,6 +258,7 @@ expand_targetlist(List *tlist, int command_type,
 			 */
 			Oid			atttype = att_tup->atttypid;
 			int32		atttypmod = att_tup->atttypmod;
+			Oid			attcollation = att_tup->attcollation;
 			Node	   *new_expr;
 
 			switch (command_type)
@@ -266,6 +268,7 @@ expand_targetlist(List *tlist, int command_type,
 					{
 						new_expr = (Node *) makeConst(atttype,
 													  -1,
+													  attcollation,
 													  att_tup->attlen,
 													  (Datum) 0,
 													  true,		/* isnull */
@@ -283,6 +286,7 @@ expand_targetlist(List *tlist, int command_type,
 						/* Insert NULL for dropped column */
 						new_expr = (Node *) makeConst(INT4OID,
 													  -1,
+													  InvalidOid,
 													  sizeof(int32),
 													  (Datum) 0,
 													  true,		/* isnull */
@@ -296,6 +300,7 @@ expand_targetlist(List *tlist, int command_type,
 													attrno,
 													atttype,
 													atttypmod,
+													attcollation,
 													0);
 					}
 					else
@@ -303,6 +308,7 @@ expand_targetlist(List *tlist, int command_type,
 						/* Insert NULL for dropped column */
 						new_expr = (Node *) makeConst(INT4OID,
 													  -1,
+													  InvalidOid,
 													  sizeof(int32),
 													  (Datum) 0,
 													  true,		/* isnull */

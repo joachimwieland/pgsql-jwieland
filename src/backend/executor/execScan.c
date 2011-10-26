@@ -120,13 +120,17 @@ ExecScan(ScanState *node,
 	 */
 	qual = node->ps.qual;
 	projInfo = node->ps.ps_ProjInfo;
+	econtext = node->ps.ps_ExprContext;
 
 	/*
 	 * If we have neither a qual to check nor a projection to do, just skip
 	 * all the overhead and return the raw scan tuple.
 	 */
 	if (!qual && !projInfo)
+	{
+		ResetExprContext(econtext);
 		return ExecScanFetch(node, accessMtd, recheckMtd);
+	}
 
 	/*
 	 * Check to see if we're still projecting out tuples from a previous scan
@@ -148,7 +152,6 @@ ExecScan(ScanState *node,
 	 * storage allocated in the previous tuple cycle.  Note this can't happen
 	 * until we're done projecting out tuples from a scan tuple.
 	 */
-	econtext = node->ps.ps_ExprContext;
 	ResetExprContext(econtext);
 
 	/*
@@ -216,6 +219,8 @@ ExecScan(ScanState *node,
 				return slot;
 			}
 		}
+		else
+			InstrCountFiltered1(node, 1);
 
 		/*
 		 * Tuple fails qual, so free per-tuple memory and try again.
@@ -241,10 +246,17 @@ void
 ExecAssignScanProjectionInfo(ScanState *node)
 {
 	Scan	   *scan = (Scan *) node->ps.plan;
+	Index		varno;
+
+	/* Vars in an index-only scan's tlist should be INDEX_VAR */
+	if (IsA(scan, IndexOnlyScan))
+		varno = INDEX_VAR;
+	else
+		varno = scan->scanrelid;
 
 	if (tlist_matches_tupdesc(&node->ps,
 							  scan->plan.targetlist,
-							  scan->scanrelid,
+							  varno,
 							  node->ss_ScanTupleSlot->tts_tupleDescriptor))
 		node->ps.ps_ProjInfo = NULL;
 	else

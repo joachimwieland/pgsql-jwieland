@@ -16,7 +16,7 @@
 
 #include <math.h>
 
-#include "catalog/pg_operator.h"
+#include "foreign/fdwapi.h"
 #include "miscadmin.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/clauses.h"
@@ -24,12 +24,9 @@
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "optimizer/tlist.h"
-#include "optimizer/var.h"
-#include "parser/parse_expr.h"
 #include "parser/parsetree.h"
-#include "utils/selfuncs.h"
 #include "utils/lsyscache.h"
-#include "utils/syscache.h"
+#include "utils/selfuncs.h"
 
 
 static List *translate_sub_tlist(List *tlist, int relid);
@@ -253,8 +250,9 @@ add_path(RelOptInfo *parent_rel, Path *new_path)
 {
 	bool		accept_new = true;		/* unless we find a superior old path */
 	ListCell   *insert_after = NULL;	/* where to insert new item */
-	ListCell   *p1_prev = NULL;
 	ListCell   *p1;
+	ListCell   *p1_prev;
+	ListCell   *p1_next;
 
 	/*
 	 * This is a convenient place to check for query cancel --- no part of the
@@ -266,13 +264,18 @@ add_path(RelOptInfo *parent_rel, Path *new_path)
 	 * Loop to check proposed new path against old paths.  Note it is possible
 	 * for more than one old path to be tossed out because new_path dominates
 	 * it.
+	 *
+	 * We can't use foreach here because the loop body may delete the current
+	 * list cell.
 	 */
-	p1 = list_head(parent_rel->pathlist);		/* cannot use foreach here */
-	while (p1 != NULL)
+	p1_prev = NULL;
+	for (p1 = list_head(parent_rel->pathlist); p1 != NULL; p1 = p1_next)
 	{
 		Path	   *old_path = (Path *) lfirst(p1);
 		bool		remove_old = false; /* unless new proves superior */
 		int			costcmp;
+
+		p1_next = lnext(p1);
 
 		/*
 		 * As of Postgres 8.0, we use fuzzy cost comparison to avoid wasting
@@ -342,20 +345,15 @@ add_path(RelOptInfo *parent_rel, Path *new_path)
 			 */
 			if (!IsA(old_path, IndexPath))
 				pfree(old_path);
-			/* Advance list pointer */
-			if (p1_prev)
-				p1 = lnext(p1_prev);
-			else
-				p1 = list_head(parent_rel->pathlist);
+			/* p1_prev does not advance */
 		}
 		else
 		{
 			/* new belongs after this old path if it has cost >= old's */
 			if (costcmp >= 0)
 				insert_after = p1;
-			/* Advance list pointers */
+			/* p1_prev advances */
 			p1_prev = p1;
-			p1 = lnext(p1);
 		}
 
 		/*
@@ -420,6 +418,7 @@ create_seqscan_path(PlannerInfo *root, RelOptInfo *rel)
  * 'indexscandir' is ForwardScanDirection or BackwardScanDirection
  *			for an ordered index, or NoMovementScanDirection for
  *			an unordered index.
+ * 'indexonly' is true if an index-only scan is wanted.
  * 'outer_rel' is the outer relation if this is a join inner indexscan path.
  *			(pathkeys and indexscandir are ignored if so.)	NULL if not.
  *
@@ -432,6 +431,7 @@ create_index_path(PlannerInfo *root,
 				  List *indexorderbys,
 				  List *pathkeys,
 				  ScanDirection indexscandir,
+				  bool indexonly,
 				  RelOptInfo *outer_rel)
 {
 	IndexPath  *pathnode = makeNode(IndexPath);
@@ -452,7 +452,7 @@ create_index_path(PlannerInfo *root,
 		indexscandir = NoMovementScanDirection;
 	}
 
-	pathnode->path.pathtype = T_IndexScan;
+	pathnode->path.pathtype = indexonly ? T_IndexOnlyScan : T_IndexScan;
 	pathnode->path.parent = rel;
 	pathnode->path.pathkeys = pathkeys;
 
@@ -508,7 +508,8 @@ create_index_path(PlannerInfo *root,
 		pathnode->rows = rel->rows;
 	}
 
-	cost_index(pathnode, root, index, indexquals, indexorderbys, outer_rel);
+	cost_index(pathnode, root, index, indexquals, indexorderbys,
+			   indexonly, outer_rel);
 
 	return pathnode;
 }
@@ -743,7 +744,7 @@ create_merge_append_path(PlannerInfo *root,
 		else
 		{
 			/* We'll need to insert a Sort node, so include cost for that */
-			Path	sort_path;		/* dummy for result of cost_sort */
+			Path		sort_path;		/* dummy for result of cost_sort */
 
 			cost_sort(&sort_path,
 					  root,
@@ -1101,7 +1102,7 @@ create_unique_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
 			all_hash = false;	/* don't try to hash */
 		else
 			cost_agg(&agg_path, root,
-					 AGG_HASHED, 0,
+					 AGG_HASHED, NULL,
 					 numCols, pathnode->rows,
 					 subpath->startup_cost,
 					 subpath->total_cost,
@@ -1415,6 +1416,41 @@ create_worktablescan_path(PlannerInfo *root, RelOptInfo *rel)
 
 	/* Cost is the same as for a regular CTE scan */
 	cost_ctescan(pathnode, root, rel);
+
+	return pathnode;
+}
+
+/*
+ * create_foreignscan_path
+ *	  Creates a path corresponding to a scan of a foreign table,
+ *	  returning the pathnode.
+ */
+ForeignPath *
+create_foreignscan_path(PlannerInfo *root, RelOptInfo *rel)
+{
+	ForeignPath *pathnode = makeNode(ForeignPath);
+	RangeTblEntry *rte;
+	FdwRoutine *fdwroutine;
+	FdwPlan    *fdwplan;
+
+	pathnode->path.pathtype = T_ForeignScan;
+	pathnode->path.parent = rel;
+	pathnode->path.pathkeys = NIL;		/* result is always unordered */
+
+	/* Get FDW's callback info */
+	rte = planner_rt_fetch(rel->relid, root);
+	fdwroutine = GetFdwRoutineByRelId(rte->relid);
+
+	/* Let the FDW do its planning */
+	fdwplan = fdwroutine->PlanForeignScan(rte->relid, root, rel);
+	if (fdwplan == NULL || !IsA(fdwplan, FdwPlan))
+		elog(ERROR, "foreign-data wrapper PlanForeignScan function for relation %u did not return an FdwPlan struct",
+			 rte->relid);
+	pathnode->fdwplan = fdwplan;
+
+	/* use costs estimated by FDW */
+	pathnode->path.startup_cost = fdwplan->startup_cost;
+	pathnode->path.total_cost = fdwplan->total_cost;
 
 	return pathnode;
 }

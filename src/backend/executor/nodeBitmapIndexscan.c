@@ -21,9 +21,7 @@
  */
 #include "postgres.h"
 
-#include "access/genam.h"
 #include "executor/execdebug.h"
-#include "executor/instrument.h"
 #include "executor/nodeBitmapIndexscan.h"
 #include "executor/nodeIndexscan.h"
 #include "miscadmin.h"
@@ -268,7 +266,6 @@ ExecInitBitmapIndexScan(BitmapIndexScan *node, EState *estate, int eflags)
 	 */
 	ExecIndexBuildScanKeys((PlanState *) indexstate,
 						   indexstate->biss_RelationDesc,
-						   node->scan.scanrelid,
 						   node->indexqual,
 						   false,
 						   &indexstate->biss_ScanKeys,
@@ -307,8 +304,8 @@ ExecInitBitmapIndexScan(BitmapIndexScan *node, EState *estate, int eflags)
 							   indexstate->biss_NumScanKeys);
 
 	/*
-	 * If no run-time keys to calculate, go ahead and pass the scankeys to
-	 * the index AM.
+	 * If no run-time keys to calculate, go ahead and pass the scankeys to the
+	 * index AM.
 	 */
 	if (indexstate->biss_NumRuntimeKeys == 0 &&
 		indexstate->biss_NumArrayKeys == 0)

@@ -98,7 +98,9 @@
        Makes a new connection to the database server.
 
 <synopsis>
-PGconn *PQconnectdbParams(const char **keywords, const char **values, int expand_dbname);
+PGconn *PQconnectdbParams(const char * const *keywords,
+                          const char * const *values,
+                          int expand_dbname);
 </synopsis>
       </para>
 
@@ -164,22 +166,36 @@ PGconn *PQconnectdbParams(const char **keywords, const char **values, int expand
            Using <literal>hostaddr</> instead of <literal>host</> allows the
            application to avoid a host name look-up, which might be important
            in applications with time constraints. However, a host name is
-           required for Kerberos, GSSAPI, or SSPI authentication, as well as
-           for full SSL certificate verification. The following rules are
-           used:
-           If <literal>host</> is specified without <literal>hostaddr</>,
-           a host name lookup occurs.
-           If <literal>hostaddr</> is specified without <literal>host</>,
-           the value for <literal>hostaddr</> gives the server network address.
-           The connection attempt will fail in any of the cases where a
-           host name is required.
-           If both <literal>host</> and <literal>hostaddr</> are specified,
-           the value for <literal>hostaddr</> gives the server network address.
-           The value for <literal>host</> is ignored unless needed for
-           authentication or verification purposes, in which case it will be
-           used as the host name.  Note that authentication is likely to fail
-           if <literal>host</> is not the name of the machine at
-           <literal>hostaddr</>.
+           required for Kerberos, GSSAPI, or SSPI authentication
+           methods, as well as for <literal>verify-full</> SSL
+           certificate verification.  The following rules are used:
+           <itemizedlist>
+            <listitem>
+             <para>
+              If <literal>host</> is specified without <literal>hostaddr</>,
+              a host name lookup occurs.
+             </para>
+            </listitem>
+            <listitem>
+             <para>
+              If <literal>hostaddr</> is specified without <literal>host</>,
+              the value for <literal>hostaddr</> gives the server network address.
+              The connection attempt will fail if the authentication
+              method requires a host name.
+             </para>
+            </listitem>
+            <listitem>
+             <para>
+              If both <literal>host</> and <literal>hostaddr</> are specified,
+              the value for <literal>hostaddr</> gives the server network address.
+              The value for <literal>host</> is ignored unless the
+              authentication method requires it, in which case it will be
+              used as the host name.
+             </para>
+            </listitem>
+           </itemizedlist>
+           Note that authentication is likely to fail if <literal>host</>
+           is not the name of the server at network address <literal>hostaddr</>.
            Also, note that <literal>host</> rather than <literal>hostaddr</>
            is used to identify the connection in <filename>~/.pgpass</> (see
            <xref linkend="libpq-pgpass">).
@@ -241,6 +257,21 @@ PGconn *PQconnectdbParams(const char **keywords, const char **values, int expand
           Maximum wait for connection, in seconds (write as a decimal integer
           string). Zero or not specified means wait indefinitely.  It is not
           recommended to use a timeout of less than 2 seconds.
+         </para>
+         </listitem>
+        </varlistentry>
+
+        <varlistentry id="libpq-connect-client-encoding" xreflabel="client_encoding">
+         <term><literal>client_encoding</literal></term>
+         <listitem>
+         <para>
+          This sets the <varname>client_encoding</varname>
+          configuration parameter for this connection.  In addition to
+          the values accepted by the corresponding server option, you
+          can use <literal>auto</literal> to determine the right
+          encoding from the current locale in the client
+          (<envar>LC_CTYPE</envar> environment variable on Unix
+          systems).
          </para>
          </listitem>
         </varlistentry>
@@ -334,7 +365,7 @@ PGconn *PQconnectdbParams(const char **keywords, const char **values, int expand
            client's connection to the server is considered dead.  A value of
            zero uses the system default. This parameter is ignored for
            connections made via a Unix-domain socket, or if keepalives are disabled.
-           It is only supported on systems where the <symbol>TCP_KEEPINTVL</>
+           It is only supported on systems where the <symbol>TCP_KEEPCNT</>
            socket option is available; on other systems, it has no effect.
           </para>
          </listitem>
@@ -356,63 +387,72 @@ PGconn *PQconnectdbParams(const char **keywords, const char **values, int expand
            This option determines whether or with what priority a secure
            <acronym>SSL</> TCP/IP connection will be negotiated with the
            server. There are six modes:
-          </para>
 
-          <table id="libpq-connect-sslmode-options">
-           <title><literal>sslmode</literal> Options</title>
-           <tgroup cols="2">
-            <thead>
-             <row>
-              <entry>Option</entry>
-              <entry>Description</entry>
-             </row>
-            </thead>
+           <variablelist>
+            <varlistentry>
+             <term><literal>disable</literal></term>
+             <listitem>
+              <para>
+               only try a non-<acronym>SSL</> connection
+              </para>
+             </listitem>
+            </varlistentry>
 
-            <tbody>
+            <varlistentry>
+             <term><literal>allow</literal></term>
+             <listitem>
+              <para>
+               first try a non-<acronym>SSL</> connection; if that
+               fails, try an <acronym>SSL</> connection
+              </para>
+             </listitem>
+            </varlistentry>
 
-             <row>
-              <entry><literal>disable</></entry>
-              <entry>only try a non-<acronym>SSL</> connection</entry>
-             </row>
+            <varlistentry>
+             <term><literal>prefer</literal> (default)</term>
+             <listitem>
+              <para>
+               first try an <acronym>SSL</> connection; if that fails,
+               try a non-<acronym>SSL</> connection
+              </para>
+             </listitem>
+            </varlistentry>
 
-             <row>
-              <entry><literal>allow</></entry>
-              <entry>first try a non-<acronym>SSL</>
-               connection;  if that fails, try an <acronym>SSL</>
-               connection</entry>
-             </row>
+            <varlistentry>
+             <term><literal>require</literal></term>
+             <listitem>
+              <para>
+               only try an <acronym>SSL</> connection. If a root CA
+               file is present, verify the certificate in the same way as
+               if <literal>verify-ca</literal> was specified
+              </para>
+             </listitem>
+            </varlistentry>
 
-             <row>
-              <entry><literal>prefer</> (default)</entry>
-              <entry>first try an <acronym>SSL</> connection;  if
-              that fails, try a non-<acronym>SSL</>
-              connection</entry>
-             </row>
+            <varlistentry>
+             <term><literal>verify-ca</literal></term>
+             <listitem>
+              <para>
+               only try an <acronym>SSL</> connection, and verify that
+               the server certificate is issued by a trusted
+               certificate authority (<acronym>CA</>)
+              </para>
+             </listitem>
+            </varlistentry>
 
-             <row>
-              <entry><literal>require</></entry>
-              <entry>only try an <acronym>SSL</> connection</entry>
-             </row>
+            <varlistentry>
+             <term><literal>verify-full</literal></term>
+             <listitem>
+              <para>
+               only try an <acronym>SSL</> connection, verify that the
+               server certificate is issued by a
+               trusted <acronym>CA</> and that the server host name
+               matches that in the certificate
+              </para>
+             </listitem>
+            </varlistentry>
+           </variablelist>
 
-             <row>
-              <entry><literal>verify-ca</></entry>
-              <entry>only try an <acronym>SSL</> connection, and verify that
-              the server certificate is issued by a trusted certificate
-              authority (<acronym>CA</>)</entry>
-             </row>
-
-             <row>
-              <entry><literal>verify-full</></entry>
-              <entry>only try an <acronym>SSL</> connection, verify that
-              the server certificate is issued by a trusted <acronym>CA</> and
-              that the server host name matches that in the certificate</entry>
-             </row>
-
-            </tbody>
-           </tgroup>
-          </table>
-
-          <para>
            See <xref linkend="libpq-ssl"> for a detailed description of how
            these options work.
           </para>
@@ -513,20 +553,21 @@ PGconn *PQconnectdbParams(const char **keywords, const char **values, int expand
          <term><literal>requirepeer</literal></term>
          <listitem>
           <para>
-           For Unix-domain socket connections, if this parameter is
-           set, the client checks at the beginning of the connection
-           that the server process runs under the specified user name,
-           otherwise the connection is aborted with an error.  This
-           parameter can be used to achieve the kind of server
-           authentication that SSL certificates achieve on TCP/IP
-           connections.  (Note that if the Unix-domain socket is
-           in <filename>/tmp</filename> or another publically writable
-           location, any user could start a server there.  Use this
-           parameter to ensure that you are connected to a server run
-           by a trusted user,
-           e.g., <literal>requirepeer=postgres</literal>.)  This
-           option is only supported on some platforms, currently
-           Linux, FreeBSD, NetBSD, OpenBSD, and Solaris.
+           This parameter specifies the operating-system user name of the
+           server, for example <literal>requirepeer=postgres</literal>.
+           When making a Unix-domain socket connection, if this
+           parameter is set, the client checks at the beginning of the
+           connection that the server process is running under the specified
+           user name; if it is not, the connection is aborted with an error.
+           This parameter can be used to provide server authentication similar
+           to that available with SSL certificates on TCP/IP connections.
+           (Note that if the Unix-domain socket is in
+           <filename>/tmp</filename> or another publicly writable location,
+           any user could start a server listening there.  Use this parameter
+           to ensure that you are connected to a server run by a trusted user.)
+           This option is only supported on platforms for which the
+           <literal>peer</> authentication method is implemented; see
+           <xref linkend="auth-peer">.
           </para>
          </listitem>
         </varlistentry>
@@ -691,8 +732,8 @@ PGconn *PQsetdb(char *pghost,
        Make a connection to the database server in a nonblocking manner.
 
 <synopsis>
-PGconn *PQconnectStartParams(const char **keywords,
-                             const char **values,
+PGconn *PQconnectStartParams(const char * const *keywords,
+                             const char * const *values,
                              int expand_dbname);
 
 PGconn *PQconnectStart(const char *conninfo);
@@ -1073,7 +1114,9 @@ PostgresPollingStatusType PQresetPoll(PGconn *conn);
        values to obtain the server status.
 
 <synopsis>
-PGPing PQpingParams(const char **keywords, const char **values, int expand_dbname);
+PGPing PQpingParams(const char * const *keywords,
+                    const char * const *values,
+                    int expand_dbname);
 </synopsis>
 
        The function returns one of the following values:
@@ -1284,7 +1327,7 @@ char *PQport(const PGconn *conn);
        Returns the debug <acronym>TTY</acronym> of the connection.
        (This is obsolete, since the server no longer pays attention
        to the <acronym>TTY</acronym> setting, but the function remains
-       for backwards compatibility.)
+       for backward compatibility.)
 
 <synopsis>
 char *PQtty(const PGconn *conn);
@@ -1418,46 +1461,46 @@ const char *PQparameterStatus(const PGconn *conn, const char *paramName);
 
       <para>
        Parameters reported as of the current release include
-       <literal>server_version</>,
-       <literal>server_encoding</>,
-       <literal>client_encoding</>,
-       <literal>application_name</>,
-       <literal>is_superuser</>,
-       <literal>session_authorization</>,
-       <literal>DateStyle</>,
-       <literal>IntervalStyle</>,
-       <literal>TimeZone</>,
-       <literal>integer_datetimes</>, and
-       <literal>standard_conforming_strings</>.
-       (<literal>server_encoding</>, <literal>TimeZone</>, and
-       <literal>integer_datetimes</> were not reported by releases before 8.0;
-       <literal>standard_conforming_strings</> was not reported by releases
+       <varname>server_version</>,
+       <varname>server_encoding</>,
+       <varname>client_encoding</>,
+       <varname>application_name</>,
+       <varname>is_superuser</>,
+       <varname>session_authorization</>,
+       <varname>DateStyle</>,
+       <varname>IntervalStyle</>,
+       <varname>TimeZone</>,
+       <varname>integer_datetimes</>, and
+       <varname>standard_conforming_strings</>.
+       (<varname>server_encoding</>, <varname>TimeZone</>, and
+       <varname>integer_datetimes</> were not reported by releases before 8.0;
+       <varname>standard_conforming_strings</> was not reported by releases
        before 8.1;
-       <literal>IntervalStyle</> was not reported by releases before 8.4;
-       <literal>application_name</> was not reported by releases before 9.0.)
+       <varname>IntervalStyle</> was not reported by releases before 8.4;
+       <varname>application_name</> was not reported by releases before 9.0.)
        Note that
-       <literal>server_version</>,
-       <literal>server_encoding</> and
-       <literal>integer_datetimes</>
+       <varname>server_version</>,
+       <varname>server_encoding</> and
+       <varname>integer_datetimes</>
        cannot change after startup.
       </para>
 
       <para>
        Pre-3.0-protocol servers do not report parameter settings, but
        <application>libpq</> includes logic to obtain values for
-       <literal>server_version</> and <literal>client_encoding</> anyway.
+       <varname>server_version</> and <varname>client_encoding</> anyway.
        Applications are encouraged to use <function>PQparameterStatus</>
        rather than <foreignphrase>ad hoc</> code to determine these values.
        (Beware however that on a pre-3.0 connection, changing
-       <literal>client_encoding</> via <command>SET</> after connection
+       <varname>client_encoding</> via <command>SET</> after connection
        startup will not be reflected by <function>PQparameterStatus</>.)
-       For <literal>server_version</>, see also
+       For <varname>server_version</>, see also
        <function>PQserverVersion</>, which returns the information in a
        numeric form that is much easier to compare against.
       </para>
 
       <para>
-       If no value for <literal>standard_conforming_strings</> is reported,
+       If no value for <varname>standard_conforming_strings</> is reported,
        applications can assume it is <literal>off</>, that is, backslashes
        are treated as escapes in string literals.  Also, the presence of
        this parameter can be taken as an indication that the escape string
@@ -1581,10 +1624,12 @@ int PQsocket(const PGconn *conn);
      <term><function>PQbackendPID</function><indexterm><primary>PQbackendPID</></></term>
      <listitem>
       <para>
-       Returns the process <acronym>ID</acronym>
-       (PID)<indexterm><primary>PID</><secondary>determining PID of
-       server process</><tertiary>in libpq</></> of the backend server
-       process handling this connection.
+       Returns the process <acronym>ID</acronym> (PID)<indexterm>
+        <primary>PID</>
+        <secondary>determining PID of server process</>
+        <tertiary>in libpq</>
+       </indexterm>
+       of the backend process handling this connection.
 
 <synopsis>
 int PQbackendPID(const PGconn *conn);
@@ -3371,15 +3416,17 @@ size_t PQescapeStringConn(PGconn *conn,
 
      <listitem>
      <para>
+       <function>PQescapeString</> is an older, deprecated version of
+       <function>PQescapeStringConn</>.
 <synopsis>
 size_t PQescapeString (char *to, const char *from, size_t length);
 </synopsis>
      </para>
 
      <para>
-      <function>PQescapeString</> is an older, deprecated version of
-      <function>PQescapeStringConn</>; the difference is that it does
-      not take <parameter>conn</> or <parameter>error</> parameters.
+      The only difference from <function>PQescapeStringConn</> is that
+      <function>PQescapeString</> does not take <structname>PGconn</>
+      or <parameter>error</> parameters.
       Because of this, it cannot adjust its behavior depending on the
       connection properties (such as character encoding) and therefore
       <emphasis>it might give the wrong results</>.  Also, it has no way
@@ -3387,7 +3434,7 @@ size_t PQescapeString (char *to, const char *from, size_t length);
      </para>
 
      <para>
-      <function>PQescapeString</> can be used safely in single-threaded
+      <function>PQescapeString</> can be used safely in
       client programs that work with only one <productname>PostgreSQL</>
       connection at a time (in this case it can find out what it needs to
       know <quote>behind the scenes</>).  In other contexts it is a security
@@ -3419,16 +3466,11 @@ unsigned char *PQescapeByteaConn(PGconn *conn,
       </para>
 
       <para>
-       Certain byte values <emphasis>must</emphasis> be escaped (but all
-       byte values <emphasis>can</emphasis> be escaped) when used as part
-       of a <type>bytea</type> literal in an <acronym>SQL</acronym>
-       statement. In general, to escape a byte, it is converted into the
-       three digit octal number equal to the octet value, and preceded by
-       usually two backslashes. The single quote (<literal>'</>) and backslash
-       (<literal>\</>) characters have special alternative escape
-       sequences. See <xref linkend="datatype-binary"> for more
-       information. <function>PQescapeByteaConn</function> performs this
-       operation, escaping only the minimally required bytes.
+       Certain byte values must be escaped when used as part of a
+       <type>bytea</type> literal in an <acronym>SQL</acronym> statement.
+       <function>PQescapeByteaConn</function> escapes bytes using
+       either hex encoding or backslash escaping.  See <xref
+       linkend="datatype-binary"> for more information.
       </para>
 
       <para>
@@ -3485,20 +3527,13 @@ unsigned char *PQescapeBytea(const unsigned char *from,
       <para>
        The only difference from <function>PQescapeByteaConn</> is that
        <function>PQescapeBytea</> does not take a <structname>PGconn</>
-       parameter.  Because of this, it cannot adjust its behavior
-       depending on the connection properties (in particular, whether
-       standard-conforming strings are enabled) and therefore
-       <emphasis>it might give the wrong results</>.  Also, it has no
-       way to return an error message on failure.
-      </para>
-
-      <para>
-       <function>PQescapeBytea</> can be used safely in single-threaded
-       client programs that work with only one <productname>PostgreSQL</>
-       connection at a time (in this case it can find out what it needs
-       to know <quote>behind the scenes</>).  In other contexts it is
-       a security hazard and should be avoided in favor of
-       <function>PQescapeByteaConn</>.
+       parameter.  Because of this, <function>PQescapeBytea</> can
+       only be used safely in client programs that use a single
+       <productname>PostgreSQL</> connection at a time (in this case
+       it can find out what it needs to know <quote>behind the
+       scenes</>).  It <emphasis>might give the wrong results</> if
+       used in programs that use multiple database connections (use
+       <function>PQescapeByteaConn</> in such cases).
       </para>
      </listitem>
     </varlistentry>
@@ -3827,6 +3862,15 @@ PGresult *PQgetResult(PGconn *conn);
        active and the necessary response data has not yet been read by
        <function>PQconsumeInput</function>.
       </para>
+
+      <note>
+       <para>
+        Even when <function>PQresultStatus</function> indicates a fatal
+        error, <function>PQgetResult</function> should be called until it
+        returns a null pointer to allow <application>libpq</> to
+        process the error information completely.
+       </para>
+      </note>
      </listitem>
     </varlistentry>
    </variablelist>
@@ -4050,7 +4094,7 @@ int PQflush(PGconn *conn);
  </sect1>
 
  <sect1 id="libpq-cancel">
-  <title>Cancelling Queries in Progress</title>
+  <title>Canceling Queries in Progress</title>
 
   <indexterm zone="libpq-cancel">
    <primary>canceling</primary>
@@ -4172,16 +4216,16 @@ int PQcancel(PGcancel *cancel, char *errbuf, int errbufsize);
 
      <listitem>
       <para>
-       Requests that the server abandon processing of the current
-       command.
+       <function>PQrequestCancel</function> is a deprecated variant of
+       <function>PQcancel</function>.
 <synopsis>
 int PQrequestCancel(PGconn *conn);
 </synopsis>
       </para>
 
       <para>
-       <function>PQrequestCancel</function> is a deprecated variant of
-       <function>PQcancel</function>.  It operates directly on the
+       Requests that the server abandon processing of the current
+       command.  It operates directly on the
        <structname>PGconn</> object, and in case of failure stores the
        error message in the <structname>PGconn</> object (whence it can
        be retrieved by <function>PQerrorMessage</function>).  Although
@@ -5317,7 +5361,7 @@ int PQsetvalue(PGresult *res, int tup_num, int field_num, char *value, int len);
       function can only grow the tuples array one tuple at a time.  But any
       field of any existing tuple can be modified in any order.  If a value at
       <parameter>field_num</parameter> already exists, it will be overwritten.
-      If <parameter>len</parameter> is <literal>-1</literal> or
+      If <parameter>len</parameter> is -1 or
       <parameter>value</parameter> is <symbol>NULL</>, the field value
       will be set to an SQL null value.  The
       <parameter>value</parameter> is copied into the result's private storage,
@@ -5373,7 +5417,7 @@ int PQlibVersion(void);
 
      <para>
       The result of this function can be used to determine, at
-      runtime, if specific functionality is available in the currently
+      run time, if specific functionality is available in the currently
       loaded version of libpq. The function can be used, for example,
       to determine which connection options are available for
       <function>PQconnectdb</> or if the <literal>hex</> <type>bytea</>
@@ -5431,12 +5475,12 @@ int PQlibVersion(void);
 
   <para>
    The function <function>PQsetNoticeReceiver</function>
-   <indexterm><primary>notice
-   receiver</></><indexterm><primary>PQsetNoticeReceiver</></> sets or
+   <indexterm><primary>notice receiver</></>
+   <indexterm><primary>PQsetNoticeReceiver</></> sets or
    examines the current notice receiver for a connection object.
    Similarly, <function>PQsetNoticeProcessor</function>
-   <indexterm><primary>notice
-   processor</></><indexterm><primary>PQsetNoticeProcessor</></> sets or
+   <indexterm><primary>notice processor</></>
+   <indexterm><primary>PQsetNoticeProcessor</></> sets or
    examines the current notice processor.
 
 <synopsis>
@@ -6078,7 +6122,7 @@ myEventProc(PGEventId evtId, void *evtInfo, void *passThrough)
             break;
         }
 
-        /* unknown event id, just return TRUE. */
+        /* unknown event ID, just return TRUE. */
         default:
             break;
     }
@@ -6341,13 +6385,23 @@ myEventProc(PGEventId evtId, void *evtInfo, void *passThrough)
       linkend="libpq-connect-connect-timeout"> connection parameter.
      </para>
     </listitem>
+
+    <listitem>
+     <para>
+      <indexterm>
+       <primary><envar>PGCLIENTENCODING</envar></primary>
+      </indexterm>
+      <envar>PGCLIENTENCODING</envar> behaves the same as the <xref
+      linkend="libpq-connect-client-encoding"> connection parameter.
+     </para>
+    </listitem>
    </itemizedlist>
   </para>
 
   <para>
    The following environment variables can be used to specify default
    behavior for each <productname>PostgreSQL</productname> session.  (See
-   also the <xref linkend="sql-alteruser">
+   also the <xref linkend="sql-alterrole">
    and <xref linkend="sql-alterdatabase">
    commands for ways to set default behavior on a per-user or per-database
    basis.)
@@ -6371,17 +6425,6 @@ myEventProc(PGEventId evtId, void *evtInfo, void *passThrough)
       </indexterm>
       <envar>PGTZ</envar> sets the default time zone.  (Equivalent to
       <literal>SET timezone TO ...</literal>.)
-     </para>
-    </listitem>
-
-    <listitem>
-     <para>
-      <indexterm>
-       <primary><envar>PGCLIENTENCODING</envar></primary>
-      </indexterm>
-      <envar>PGCLIENTENCODING</envar> sets the default client character
-      set encoding.  (Equivalent to <literal>SET client_encoding TO
-      ...</literal>.)
      </para>
     </listitem>
 
@@ -6457,6 +6500,8 @@ myEventProc(PGEventId evtId, void *evtInfo, void *passThrough)
 <synopsis>
 <replaceable>hostname</replaceable>:<replaceable>port</replaceable>:<replaceable>database</replaceable>:<replaceable>username</replaceable>:<replaceable>password</replaceable>
 </synopsis>
+   (You can add a reminder comment to the file by copying the line above and
+   preceding it with <literal>#</>.)
    Each of the first four fields can be a literal value, or
    <literal>*</literal>, which matches anything.  The password field from
    the first line that matches the current connection parameters will be
@@ -6693,6 +6738,18 @@ ldap://ldap.acme.com/cn=dbserver,cn=hosts?pgconnectinfo?base?(objectclass=*)
    the connection parameters <literal>sslrootcert</> and <literal>sslcrl</>
    or the environment variables <envar>PGSSLROOTCERT</> and <envar>PGSSLCRL</>.
   </para>
+
+  <note>
+   <para>
+    For backwards compatibility with earlier versions of PostgreSQL, if a
+    root CA file exists, the behavior of
+    <literal>sslmode</literal>=<literal>require</literal> will be the same
+    as that of <literal>verify-ca</literal>, meaning the sever certificate
+    is validated against the CA. Relying on this behavior is discouraged,
+    and applications that need certificate validation should always use
+    <literal>validate-ca</literal> or <literal>validate-full</literal>.
+   </para>
+  </note>
  </sect2>
 
  <sect2 id="libpq-ssl-clientcert">
@@ -6744,30 +6801,23 @@ ldap://ldap.acme.com/cn=dbserver,cn=hosts?pgconnectinfo?base?(objectclass=*)
    The different values for the <literal>sslmode</> parameter provide different
    levels of protection. SSL can provide
    protection against three types of attacks:
-  </para>
-  <table id="libpq-ssl-protect-attacks">
-   <title>SSL Attacks</title>
-   <tgroup cols="2">
-    <thead>
-     <row>
-      <entry>Type</entry>
-      <entry>Description</entry>
-     </row>
-    </thead>
 
-    <tbody>
-     <row>
-      <entry>Eavesdropping</entry>
-      <entry>If a third party can examine the network traffic between the
+   <variablelist>
+    <varlistentry>
+     <term>Eavesdropping</term>
+     <listitem>
+      <para>If a third party can examine the network traffic between the
        client and the server, it can read both connection information (including
        the user name and password) and the data that is passed. <acronym>SSL</>
        uses encryption to prevent this.
-      </entry>
-     </row>
+      </para>
+     </listitem>
+    </varlistentry>
 
-     <row>
-      <entry>Man in the middle (<acronym>MITM</>)</entry>
-      <entry>If a third party can modify the data while passing between the
+    <varlistentry>
+     <term>Man in the middle (<acronym>MITM</>)</term>
+     <listitem>
+      <para>If a third party can modify the data while passing between the
        client and server, it can pretend to be the server and therefore see and
        modify data <emphasis>even if it is encrypted</>. The third party can then
        forward the connection information and data to the original server,
@@ -6776,21 +6826,23 @@ ldap://ldap.acme.com/cn=dbserver,cn=hosts?pgconnectinfo?base?(objectclass=*)
        to a different server than intended. There are also several other
        attack methods that can accomplish this. <acronym>SSL</> uses certificate
        verification to prevent this, by authenticating the server to the client.
-      </entry>
-     </row>
+      </para>
+     </listitem>
+    </varlistentry>
 
-     <row>
-      <entry>Impersonation</entry>
-      <entry>If a third party can pretend to be an authorized client, it can
+    <varlistentry>
+     <term>Impersonation</term>
+     <listitem>
+      <para>If a third party can pretend to be an authorized client, it can
        simply access data it should not have access to. Typically this can
        happen through insecure password management. <acronym>SSL</> uses
        client certificates to prevent this, by making sure that only holders
        of valid certificates can access the server.
-      </entry>
-     </row>
-    </tbody>
-   </tgroup>
-  </table>
+      </para>
+     </listitem>
+    </varlistentry>
+   </variablelist>
+  </para>
 
   <para>
    For a connection to be known secure, SSL usage must be configured
@@ -6815,9 +6867,9 @@ ldap://ldap.acme.com/cn=dbserver,cn=hosts?pgconnectinfo?base?(objectclass=*)
   <para>
    All <acronym>SSL</> options carry overhead in the form of encryption and
    key-exchange, so there is a tradeoff that has to be made between performance
-   and security. The following table illustrates the risks the different
-   <literal>sslmode</> values protect against, and what statement they make
-   about security and overhead:
+   and security. <xref linkend="libpq-ssl-sslmode-statements">
+   illustrates the risks the different <literal>sslmode</> values
+   protect against, and what statement they make about security and overhead.
   </para>
 
   <table id="libpq-ssl-sslmode-statements">
@@ -6834,7 +6886,7 @@ ldap://ldap.acme.com/cn=dbserver,cn=hosts?pgconnectinfo?base?(objectclass=*)
 
     <tbody>
      <row>
-      <entry><literal>disabled</></entry>
+      <entry><literal>disable</></entry>
       <entry>No</entry>
       <entry>No</entry>
       <entry>I don't care about security, and I don't want to pay the overhead
@@ -6906,13 +6958,19 @@ ldap://ldap.acme.com/cn=dbserver,cn=hosts?pgconnectinfo?base?(objectclass=*)
    The default value for <literal>sslmode</> is <literal>prefer</>. As is shown
    in the table, this makes no sense from a security point of view, and it only
    promises performance overhead if possible. It is only provided as the default
-   for backwards compatibility, and is not recommended in secure deployments.
+   for backward compatibility, and is not recommended in secure deployments.
   </para>
 
  </sect2>
 
  <sect2 id="libpq-ssl-fileusage">
   <title>SSL Client File Usage</title>
+
+  <para>
+   <xref linkend="libpq-ssl-file-usage"> summarizes the files that are
+   relevant to the SSL setup on the client.
+  </para>
+
   <table id="libpq-ssl-file-usage">
    <title>Libpq/Client SSL File Usage</title>
    <tgroup cols="3">
@@ -7515,7 +7573,7 @@ main(int argc, char **argv)
         while ((notify = PQnotifies(conn)) != NULL)
         {
             fprintf(stderr,
-                    "ASYNC NOTIFY of '%s' received from backend pid %d\n",
+                    "ASYNC NOTIFY of '%s' received from backend PID %d\n",
                     notify->relname, notify->be_pid);
             PQfreemem(notify);
             nnotifies++;

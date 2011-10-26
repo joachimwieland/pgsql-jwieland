@@ -51,53 +51,47 @@ convert_and_check_filename(text *arg)
 	filename = text_to_cstring(arg);
 	canonicalize_path(filename);	/* filename can change length here */
 
-	/* Disallow ".." in the path */
-	if (path_contains_parent_reference(filename))
-		ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-			(errmsg("reference to parent directory (\"..\") not allowed"))));
-
 	if (is_absolute_path(filename))
 	{
-		/* Allow absolute references within DataDir */
-		if (path_is_prefix_of_path(DataDir, filename))
-			return filename;
-		/* The log directory might be outside our datadir, but allow it */
-		if (is_absolute_path(Log_directory) &&
-			path_is_prefix_of_path(Log_directory, filename))
-			return filename;
+		/* Disallow '/a/b/data/..' */
+		if (path_contains_parent_reference(filename))
+			ereport(ERROR,
+					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+			(errmsg("reference to parent directory (\"..\") not allowed"))));
 
+		/*
+		 * Allow absolute paths if within DataDir or Log_directory, even
+		 * though Log_directory might be outside DataDir.
+		 */
+		if (!path_is_prefix_of_path(DataDir, filename) &&
+			(!is_absolute_path(Log_directory) ||
+			 !path_is_prefix_of_path(Log_directory, filename)))
+			ereport(ERROR,
+					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+					 (errmsg("absolute path not allowed"))));
+	}
+	else if (!path_is_relative_and_below_cwd(filename))
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 (errmsg("absolute path not allowed"))));
-		return NULL;			/* keep compiler quiet */
-	}
-	else
-	{
-		return filename;
-	}
+				 (errmsg("path must be in or below the current directory"))));
+
+	return filename;
 }
 
 
 /*
  * Read a section of a file, returning it as bytea
  *
- * We read the whole of the file when bytes_to_read is nagative.
+ * Caller is responsible for all permissions checking.
+ *
+ * We read the whole of the file when bytes_to_read is negative.
  */
-static bytea *
-read_binary_file(text *filename_t, int64 seek_offset, int64 bytes_to_read)
+bytea *
+read_binary_file(const char *filename, int64 seek_offset, int64 bytes_to_read)
 {
 	bytea	   *buf;
 	size_t		nbytes;
 	FILE	   *file;
-	char	   *filename;
-
-	if (!superuser())
-		ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 (errmsg("must be superuser to read files"))));
-
-	filename = convert_and_check_filename(filename_t);
 
 	if (bytes_to_read < 0)
 	{
@@ -146,7 +140,6 @@ read_binary_file(text *filename_t, int64 seek_offset, int64 bytes_to_read)
 	SET_VARSIZE(buf, nbytes + VARHDRSZ);
 
 	FreeFile(file);
-	pfree(filename);
 
 	return buf;
 }
@@ -156,9 +149,11 @@ read_binary_file(text *filename_t, int64 seek_offset, int64 bytes_to_read)
  * in the database encoding.
  */
 static text *
-read_text_file(text *filename, int64 seek_offset, int64 bytes_to_read)
+read_text_file(const char *filename, int64 seek_offset, int64 bytes_to_read)
 {
-	bytea *buf = read_binary_file(filename, seek_offset, bytes_to_read);
+	bytea	   *buf;
+
+	buf = read_binary_file(filename, seek_offset, bytes_to_read);
 
 	/* Make sure the input is valid */
 	pg_verifymbstr(VARDATA(buf), VARSIZE(buf) - VARHDRSZ, false);
@@ -176,13 +171,21 @@ pg_read_file(PG_FUNCTION_ARGS)
 	text	   *filename_t = PG_GETARG_TEXT_P(0);
 	int64		seek_offset = PG_GETARG_INT64(1);
 	int64		bytes_to_read = PG_GETARG_INT64(2);
+	char	   *filename;
+
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 (errmsg("must be superuser to read files"))));
+
+	filename = convert_and_check_filename(filename_t);
 
 	if (bytes_to_read < 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("requested length cannot be negative")));
 
-	PG_RETURN_TEXT_P(read_text_file(filename_t, seek_offset, bytes_to_read));
+	PG_RETURN_TEXT_P(read_text_file(filename, seek_offset, bytes_to_read));
 }
 
 /*
@@ -192,8 +195,16 @@ Datum
 pg_read_file_all(PG_FUNCTION_ARGS)
 {
 	text	   *filename_t = PG_GETARG_TEXT_P(0);
+	char	   *filename;
 
-	PG_RETURN_TEXT_P(read_text_file(filename_t, 0, -1));
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 (errmsg("must be superuser to read files"))));
+
+	filename = convert_and_check_filename(filename_t);
+
+	PG_RETURN_TEXT_P(read_text_file(filename, 0, -1));
 }
 
 /*
@@ -205,13 +216,21 @@ pg_read_binary_file(PG_FUNCTION_ARGS)
 	text	   *filename_t = PG_GETARG_TEXT_P(0);
 	int64		seek_offset = PG_GETARG_INT64(1);
 	int64		bytes_to_read = PG_GETARG_INT64(2);
+	char	   *filename;
+
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 (errmsg("must be superuser to read files"))));
+
+	filename = convert_and_check_filename(filename_t);
 
 	if (bytes_to_read < 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("requested length cannot be negative")));
 
-	PG_RETURN_BYTEA_P(read_binary_file(filename_t, seek_offset, bytes_to_read));
+	PG_RETURN_BYTEA_P(read_binary_file(filename, seek_offset, bytes_to_read));
 }
 
 /*
@@ -221,8 +240,16 @@ Datum
 pg_read_binary_file_all(PG_FUNCTION_ARGS)
 {
 	text	   *filename_t = PG_GETARG_TEXT_P(0);
+	char	   *filename;
 
-	PG_RETURN_BYTEA_P(read_binary_file(filename_t, 0, -1));
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 (errmsg("must be superuser to read files"))));
+
+	filename = convert_and_check_filename(filename_t);
+
+	PG_RETURN_BYTEA_P(read_binary_file(filename, 0, -1));
 }
 
 /*

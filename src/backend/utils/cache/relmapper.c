@@ -51,7 +51,6 @@
 #include "storage/fd.h"
 #include "storage/lwlock.h"
 #include "utils/inval.h"
-#include "utils/pg_crc.h"
 #include "utils/relmapper.h"
 
 
@@ -792,7 +791,7 @@ write_relmap_file(bool shared, RelMapFile *newmap,
 			rnode.spcNode = tsid;
 			rnode.dbNode = dbid;
 			rnode.relNode = newmap->mappings[i].mapfilenode;
-			RelationPreserveStorage(rnode);
+			RelationPreserveStorage(rnode, false);
 		}
 	}
 

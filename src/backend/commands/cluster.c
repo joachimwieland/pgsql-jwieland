@@ -17,8 +17,6 @@
  */
 #include "postgres.h"
 
-#include "access/genam.h"
-#include "access/heapam.h"
 #include "access/relscan.h"
 #include "access/rewriteheap.h"
 #include "access/transam.h"
@@ -27,18 +25,15 @@
 #include "catalog/dependency.h"
 #include "catalog/heap.h"
 #include "catalog/index.h"
-#include "catalog/indexing.h"
-#include "catalog/namespace.h"
-#include "catalog/pg_namespace.h"
 #include "catalog/toasting.h"
 #include "commands/cluster.h"
 #include "commands/tablecmds.h"
-#include "commands/trigger.h"
 #include "commands/vacuum.h"
 #include "miscadmin.h"
 #include "optimizer/planner.h"
 #include "storage/bufmgr.h"
-#include "storage/procarray.h"
+#include "storage/lmgr.h"
+#include "storage/predicate.h"
 #include "storage/smgr.h"
 #include "utils/acl.h"
 #include "utils/fmgroids.h"
@@ -46,7 +41,6 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/pg_rusage.h"
-#include "utils/relcache.h"
 #include "utils/relmapper.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
@@ -384,6 +378,14 @@ cluster_rel(Oid tableOid, Oid indexOid, bool recheck, bool verbose,
 	if (OidIsValid(indexOid))
 		check_index_is_clusterable(OldHeap, indexOid, recheck, AccessExclusiveLock);
 
+	/*
+	 * All predicate locks on the tuples or pages are about to be made
+	 * invalid, because we move tuples around.	Promote them to relation
+	 * locks.  Predicate locks on indexes will be promoted when they are
+	 * reindexed.
+	 */
+	TransferPredicateLocksToHeapRelation(OldHeap);
+
 	/* rebuild_relation does all the dirty work */
 	rebuild_relation(OldHeap, indexOid, freeze_min_age, freeze_table_age,
 					 verbose);
@@ -581,8 +583,7 @@ rebuild_relation(Relation OldHeap, Oid indexOid,
 Oid
 make_new_heap(Oid OIDOldHeap, Oid NewTableSpace)
 {
-	TupleDesc	OldHeapDesc,
-				tupdesc;
+	TupleDesc	OldHeapDesc;
 	char		NewHeapName[NAMEDATALEN];
 	Oid			OIDNewHeap;
 	Oid			toastid;
@@ -595,13 +596,11 @@ make_new_heap(Oid OIDOldHeap, Oid NewTableSpace)
 	OldHeapDesc = RelationGetDescr(OldHeap);
 
 	/*
-	 * Need to make a copy of the tuple descriptor, since
-	 * heap_create_with_catalog modifies it.  Note that the NewHeap will not
+	 * Note that the NewHeap will not
 	 * receive any of the defaults or constraints associated with the OldHeap;
 	 * we don't need 'em, and there's no reason to spend cycles inserting them
 	 * into the catalogs only to delete them.
 	 */
-	tupdesc = CreateTupleDescCopy(OldHeapDesc);
 
 	/*
 	 * But we do want to use reloptions of the old heap for new heap.
@@ -635,7 +634,7 @@ make_new_heap(Oid OIDOldHeap, Oid NewTableSpace)
 										  InvalidOid,
 										  InvalidOid,
 										  OldHeap->rd_rel->relowner,
-										  tupdesc,
+										  OldHeapDesc,
 										  NIL,
 										  OldHeap->rd_rel->relkind,
 										  OldHeap->rd_rel->relpersistence,
@@ -646,8 +645,7 @@ make_new_heap(Oid OIDOldHeap, Oid NewTableSpace)
 										  ONCOMMIT_NOOP,
 										  reloptions,
 										  false,
-										  true,
-										  false);
+										  true);
 	Assert(OIDNewHeap != InvalidOid);
 
 	ReleaseSysCache(tuple);
@@ -718,7 +716,7 @@ copy_heap_data(Oid OIDNewHeap, Oid OIDOldHeap, Oid OIDOldIndex,
 	TransactionId OldestXmin;
 	TransactionId FreezeXid;
 	RewriteState rwstate;
-	bool 		 use_sort;
+	bool		use_sort;
 	Tuplesortstate *tuplesort;
 	double		num_tuples = 0,
 				tups_vacuumed = 0,
@@ -752,8 +750,24 @@ copy_heap_data(Oid OIDNewHeap, Oid OIDOldHeap, Oid OIDOldIndex,
 	isnull = (bool *) palloc(natts * sizeof(bool));
 
 	/*
+	 * If the OldHeap has a toast table, get lock on the toast table to keep
+	 * it from being vacuumed.	This is needed because autovacuum processes
+	 * toast tables independently of their main tables, with no lock on the
+	 * latter.	If an autovacuum were to start on the toast table after we
+	 * compute our OldestXmin below, it would use a later OldestXmin, and then
+	 * possibly remove as DEAD toast tuples belonging to main tuples we think
+	 * are only RECENTLY_DEAD.	Then we'd fail while trying to copy those
+	 * tuples.
+	 *
+	 * We don't need to open the toast relation here, just lock it.  The lock
+	 * will be held till end of transaction.
+	 */
+	if (OldHeap->rd_rel->reltoastrelid)
+		LockRelationOid(OldHeap->rd_rel->reltoastrelid, AccessExclusiveLock);
+
+	/*
 	 * We need to log the copied data in WAL iff WAL archiving/streaming is
-	 * enabled AND it's not a WAL-logged rel.
+	 * enabled AND it's a WAL-logged rel.
 	 */
 	use_wal = XLogIsNeeded() && RelationNeedsWAL(NewHeap);
 
@@ -775,6 +789,10 @@ copy_heap_data(Oid OIDNewHeap, Oid OIDOldHeap, Oid OIDOldIndex,
 		 * When doing swap by content, any toast pointers written into NewHeap
 		 * must use the old toast table's OID, because that's where the toast
 		 * data will eventually be found.  Set this up by setting rd_toastoid.
+		 * This also tells tuptoaster.c to preserve the toast value OIDs,
+		 * which we want so as not to invalidate toast pointers in system
+		 * catalog caches.
+		 *
 		 * Note that we must hold NewHeap open until we are done writing data,
 		 * since the relcache will not guarantee to remember this setting once
 		 * the relation is closed.	Also, this technique depends on the fact
@@ -813,11 +831,11 @@ copy_heap_data(Oid OIDNewHeap, Oid OIDOldHeap, Oid OIDOldIndex,
 	rwstate = begin_heap_rewrite(NewHeap, OldestXmin, FreezeXid, use_wal);
 
 	/*
-	 * Decide whether to use an indexscan or seqscan-and-optional-sort to
-	 * scan the OldHeap.  We know how to use a sort to duplicate the ordering
-	 * of a btree index, and will use seqscan-and-sort for that case if the
-	 * planner tells us it's cheaper.  Otherwise, always indexscan if an
-	 * index is provided, else plain seqscan.
+	 * Decide whether to use an indexscan or seqscan-and-optional-sort to scan
+	 * the OldHeap.  We know how to use a sort to duplicate the ordering of a
+	 * btree index, and will use seqscan-and-sort for that case if the planner
+	 * tells us it's cheaper.  Otherwise, always indexscan if an index is
+	 * provided, else plain seqscan.
 	 */
 	if (OldIndex != NULL && OldIndex->rd_rel->relam == BTREE_AM_OID)
 		use_sort = plan_cluster_use_sort(OIDOldHeap, OIDOldIndex);
@@ -869,8 +887,8 @@ copy_heap_data(Oid OIDNewHeap, Oid OIDOldHeap, Oid OIDOldIndex,
 	/*
 	 * Scan through the OldHeap, either in OldIndex order or sequentially;
 	 * copy each tuple into the NewHeap, or transiently to the tuplesort
-	 * module.  Note that we don't bother sorting dead tuples (they won't
-	 * get to the new table anyway).
+	 * module.	Note that we don't bother sorting dead tuples (they won't get
+	 * to the new table anyway).
 	 */
 	for (;;)
 	{
@@ -984,8 +1002,8 @@ copy_heap_data(Oid OIDNewHeap, Oid OIDOldHeap, Oid OIDOldIndex,
 		heap_endscan(heapScan);
 
 	/*
-	 * In scan-and-sort mode, complete the sort, then read out all live
-	 * tuples from the tuplestore and write them to the new relation.
+	 * In scan-and-sort mode, complete the sort, then read out all live tuples
+	 * from the tuplestore and write them to the new relation.
 	 */
 	if (tuplesort != NULL)
 	{
@@ -1187,6 +1205,7 @@ swap_relation_files(Oid r1, Oid r2, bool target_is_pg_class,
 	{
 		int4		swap_pages;
 		float4		swap_tuples;
+		int4		swap_allvisible;
 
 		swap_pages = relform1->relpages;
 		relform1->relpages = relform2->relpages;
@@ -1195,6 +1214,10 @@ swap_relation_files(Oid r1, Oid r2, bool target_is_pg_class,
 		swap_tuples = relform1->reltuples;
 		relform1->reltuples = relform2->reltuples;
 		relform2->reltuples = swap_tuples;
+
+		swap_allvisible = relform1->relallvisible;
+		relform1->relallvisible = relform2->relallvisible;
+		relform2->relallvisible = swap_allvisible;
 	}
 
 	/*
@@ -1277,7 +1300,8 @@ swap_relation_files(Oid r1, Oid r2, bool target_is_pg_class,
 			if (relform1->reltoastrelid)
 			{
 				count = deleteDependencyRecordsFor(RelationRelationId,
-												   relform1->reltoastrelid);
+												   relform1->reltoastrelid,
+												   false);
 				if (count != 1)
 					elog(ERROR, "expected one dependency record for TOAST table, found %ld",
 						 count);
@@ -1285,7 +1309,8 @@ swap_relation_files(Oid r1, Oid r2, bool target_is_pg_class,
 			if (relform2->reltoastrelid)
 			{
 				count = deleteDependencyRecordsFor(RelationRelationId,
-												   relform2->reltoastrelid);
+												   relform2->reltoastrelid,
+												   false);
 				if (count != 1)
 					elog(ERROR, "expected one dependency record for TOAST table, found %ld",
 						 count);
@@ -1396,11 +1421,17 @@ finish_heap_swap(Oid OIDOldHeap, Oid OIDNewHeap,
 	 * advantage to the other order anyway because this is all transactional,
 	 * so no chance to reclaim disk space before commit.  We do not need a
 	 * final CommandCounterIncrement() because reindex_relation does it.
+	 *
+	 * Note: because index_build is called via reindex_relation, it will never
+	 * set indcheckxmin true for the indexes.  This is OK even though in some
+	 * sense we are building new indexes rather than rebuilding existing ones,
+	 * because the new heap won't contain any HOT chains at all, let alone
+	 * broken ones, so it can't be necessary to set indcheckxmin.
 	 */
-	reindex_flags = REINDEX_SUPPRESS_INDEX_USE;
+	reindex_flags = REINDEX_REL_SUPPRESS_INDEX_USE;
 	if (check_constraints)
-		reindex_flags |= REINDEX_CHECK_CONSTRAINTS;
-	reindex_relation(OIDOldHeap, false, reindex_flags);
+		reindex_flags |= REINDEX_REL_CHECK_CONSTRAINTS;
+	reindex_relation(OIDOldHeap, reindex_flags);
 
 	/* Destroy new heap with old filenode */
 	object.classId = RelationRelationId;
@@ -1552,7 +1583,7 @@ reform_and_rewrite_tuple(HeapTuple tuple,
 						 bool newRelHasOids, RewriteState rwstate)
 {
 	HeapTuple	copiedTuple;
-	int 		i;
+	int			i;
 
 	heap_deform_tuple(tuple, oldTupDesc, values, isnull);
 

@@ -1,5 +1,5 @@
 # <pre>
-# @(#)australasia	8.20
+# @(#)australasia	8.25
 # This file is in the public domain, so clarified as of
 # 2009-05-17 by Arthur David Olson.
 
@@ -84,14 +84,13 @@ Rule	AS	1986	only	-	Oct	19	2:00s	1:00	-
 Rule	AS	1987	2007	-	Oct	lastSun	2:00s	1:00	-
 Rule	AS	1972	only	-	Feb	27	2:00s	0	-
 Rule	AS	1973	1985	-	Mar	Sun>=1	2:00s	0	-
-Rule	AS	1986	1989	-	Mar	Sun>=15	2:00s	0	-
-Rule	AS	1990	only	-	Mar	Sun>=18	2:00s	0	-
-Rule	AS	1991	only	-	Mar	Sun>=1	2:00s	0	-
-Rule	AS	1992	only	-	Mar	Sun>=18	2:00s	0	-
-Rule	AS	1993	only	-	Mar	Sun>=1	2:00s	0	-
-Rule	AS	1994	only	-	Mar	Sun>=18	2:00s	0	-
+Rule	AS	1986	1990	-	Mar	Sun>=15	2:00s	0	-
+Rule	AS	1991	only	-	Mar	3	2:00s	0	-
+Rule	AS	1992	only	-	Mar	22	2:00s	0	-
+Rule	AS	1993	only	-	Mar	7	2:00s	0	-
+Rule	AS	1994	only	-	Mar	20	2:00s	0	-
 Rule	AS	1995	2005	-	Mar	lastSun	2:00s	0	-
-Rule	AS	2006	only	-	Apr	Sun>=1	2:00s	0	-
+Rule	AS	2006	only	-	Apr	2	2:00s	0	-
 Rule	AS	2007	only	-	Mar	lastSun	2:00s	0	-
 Rule	AS	2008	max	-	Apr	Sun>=1	2:00s	0	-
 Rule	AS	2008	max	-	Oct	Sun>=1	2:00s	1:00	-
@@ -510,12 +509,77 @@ Zone Pacific/Pago_Pago	 12:37:12 -	LMT	1879 Jul  5
 # to 01:00am and First Sunday April 2011 (03/04/11) - adjust clocks
 # backwards from 1:00am to 12:00am"
 
+# From Raymond Hughes (2011-03-07)
+# I believe this will be posted shortly on the website
+# <a href="http://www.mcil.gov.ws">
+# www.mcil.gov.ws
+# </a>
+#
+# PUBLIC NOTICE ON DAYLIGHT SAVING TIME
+#
+# Pursuant to the Daylight Saving Act 2009 and Cabinets decision,
+# businesses and the general public are hereby advised that daylight
+# saving time is on the first Saturday of April 2011 (02/04/11).
+#
+# The public is therefore advised that when the standard time strikes
+# the hour of four oclock (4.00am or 0400 Hours) on the 2nd April 2011,
+# then all instruments used to measure standard time are to be
+# adjusted/changed to three oclock (3:00am or 0300Hrs).
+#
+# Margaret Fruean ACTING CHIEF EXECUTIVE OFFICER MINISTRY OF COMMERCE,
+# INDUSTRY AND LABOUR 28th February 2011
+
+# From David Zuelke (2011-05-09):
+# Subject: Samoa to move timezone from east to west of international date line
+# 
+# <a href="http://www.morningstar.co.uk/uk/markets/newsfeeditem.aspx?id=138501958347963">
+# http://www.morningstar.co.uk/uk/markets/newsfeeditem.aspx?id=138501958347963
+# </a>
+
+# From Mark Sim-Smith (2011-08-17):
+# I have been in contact with Leilani Tuala Warren from the Samoa Law
+# Reform Commission, and she has sent me a copy of the Bill that she
+# confirmed has been passed...Most of the sections are about maps rather
+# than the time zone change, but I'll paste the relevant bits below. But
+# the essence is that at midnight 29 Dec (UTC-11 I suppose), Samoa
+# changes from UTC-11 to UTC+13:
+#
+# International Date Line Bill 2011
+#
+# AN ACT to provide for the change to standard time in Samoa and to make
+# consequential amendments to the position of the International Date
+# Line, and for related purposes.
+#
+# BE IT ENACTED by the Legislative Assembly of Samoa in Parliament
+# assembled as follows:
+#
+# 1. Short title and commencement-(1) This Act may be cited as the
+# International Date Line Act 2011. (2) Except for section 5(3) this Act
+# commences at 12 o'clock midnight, on Thursday 29th December 2011. (3)
+# Section 5(3) commences on the date of assent by the Head of State.
+#
+# [snip]
+#
+# 3. Interpretation - [snip] "Samoa standard time" in this Act and any
+# other statute of Samoa which refers to 'Samoa standard time' means the
+# time 13 hours in advance of Co-ordinated Universal Time.
+#
+# 4. Samoa standard time - (1) Upon the commencement of this Act, Samoa
+# standard time shall be set at 13 hours in advance of Co-ordinated
+# Universal Time for the whole of Samoa. (2) All references to Samoa's
+# time zone and to Samoa standard time in Samoa in all legislation and
+# instruments after the commencement of this Act shall be references to
+# Samoa standard time as provided for in this Act. (3) Nothing in this
+# Act affects the provisions of the Daylight Saving Act 2009, except that
+# it defines Samoa standard time....
+
 Zone Pacific/Apia	 12:33:04 -	LMT	1879 Jul  5
 			-11:26:56 -	LMT	1911
 			-11:30	-	SAMT	1950		# Samoa Time
 			-11:00	-	WST	2010 Sep 26
-			-11:00	1:00	WSDT	2011 Apr 3 1:00
-			-11:00	-	WST
+			-11:00	1:00	WSDT	2011 Apr 2 4:00
+			-11:00	-	WST	2011 Dec 30
+			 13:00	-	WST
 
 # Solomon Is
 # excludes Bougainville, for which see Papua New Guinea

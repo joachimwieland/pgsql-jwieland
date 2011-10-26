@@ -21,7 +21,7 @@
 
 
 /* Version identifier for this pg_control format */
-#define PG_CONTROL_VERSION	903
+#define PG_CONTROL_VERSION	921
 
 /*
  * Body of CheckPoint XLOG records.  This is declared here because we keep
@@ -45,8 +45,8 @@ typedef struct CheckPoint
 	/*
 	 * Oldest XID still running. This is only needed to initialize hot standby
 	 * mode from an online checkpoint, so we only bother calculating this for
-	 * online checkpoints and only when wal_level is hot_standby. Otherwise it's
-	 * set to InvalidTransactionId.
+	 * online checkpoints and only when wal_level is hot_standby. Otherwise
+	 * it's set to InvalidTransactionId.
 	 */
 	TransactionId oldestActiveXid;
 } CheckPoint;
@@ -59,6 +59,7 @@ typedef struct CheckPoint
 #define XLOG_SWITCH						0x40
 #define XLOG_BACKUP_END					0x50
 #define XLOG_PARAMETER_CHANGE			0x60
+#define XLOG_RESTORE_POINT				0x70
 
 
 /*
@@ -136,9 +137,16 @@ typedef struct ControlFileData
 	 * we use the redo pointer as a cross-check when we see an end-of-backup
 	 * record, to make sure the end-of-backup record corresponds the base
 	 * backup we're recovering from.
+	 *
+	 * If backupEndRequired is true, we know for sure that we're restoring
+	 * from a backup, and must see a backup-end record before we can safely
+	 * start up. If it's false, but backupStartPoint is set, a backup_label
+	 * file was found at startup but it may have been a leftover from a stray
+	 * pg_start_backup() call, not accompanied by pg_stop_backup().
 	 */
 	XLogRecPtr	minRecoveryPoint;
 	XLogRecPtr	backupStartPoint;
+	bool		backupEndRequired;
 
 	/*
 	 * Parameter settings that determine if the WAL can be used for archival

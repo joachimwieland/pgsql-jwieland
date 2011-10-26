@@ -15,14 +15,13 @@
 #define STORAGE_H
 
 #include "access/xlog.h"
-#include "lib/stringinfo.h"
 #include "storage/block.h"
 #include "storage/relfilenode.h"
 #include "utils/relcache.h"
 
 extern void RelationCreateStorage(RelFileNode rnode, char relpersistence);
 extern void RelationDropStorage(Relation rel);
-extern void RelationPreserveStorage(RelFileNode rnode);
+extern void RelationPreserveStorage(RelFileNode rnode, bool atCommit);
 extern void RelationTruncate(Relation rel, BlockNumber nblocks);
 
 /*
@@ -30,7 +29,7 @@ extern void RelationTruncate(Relation rel, BlockNumber nblocks);
  * naming
  */
 extern void smgrDoPendingDeletes(bool isCommit);
-extern int smgrGetPendingDeletes(bool forCommit, RelFileNode **ptr);
+extern int	smgrGetPendingDeletes(bool forCommit, RelFileNode **ptr);
 extern void AtSubCommit_smgr(void);
 extern void AtSubAbort_smgr(void);
 extern void PostPrepare_smgr(void);

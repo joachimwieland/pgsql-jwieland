@@ -42,8 +42,6 @@
 
 #include "postgres.h"
 
-#include "access/genam.h"
-#include "access/heapam.h"
 #include "access/relscan.h"
 #include "access/transam.h"
 #include "catalog/index.h"
@@ -52,7 +50,6 @@
 #include "parser/parsetree.h"
 #include "storage/lmgr.h"
 #include "utils/memutils.h"
-#include "utils/relcache.h"
 #include "utils/tqual.h"
 
 
@@ -124,6 +121,7 @@ CreateExecutorState(void)
 	estate->es_trig_target_relations = NIL;
 	estate->es_trig_tuple_slot = NULL;
 	estate->es_trig_oldtup_slot = NULL;
+	estate->es_trig_newtup_slot = NULL;
 
 	estate->es_param_list_info = NULL;
 	estate->es_param_exec_vals = NULL;
@@ -137,13 +135,17 @@ CreateExecutorState(void)
 	estate->es_processed = 0;
 	estate->es_lastoid = InvalidOid;
 
-	estate->es_instrument = false;
+	estate->es_top_eflags = 0;
+	estate->es_instrument = 0;
 	estate->es_select_into = false;
 	estate->es_into_oids = false;
+	estate->es_finished = false;
 
 	estate->es_exprcontexts = NIL;
 
 	estate->es_subplanstates = NIL;
+
+	estate->es_auxmodifytables = NIL;
 
 	estate->es_per_tuple_exprcontext = NULL;
 
@@ -564,19 +566,21 @@ ExecBuildProjectionInfo(List *targetList,
 
 			switch (variable->varno)
 			{
-				case INNER:
+				case INNER_VAR:
 					varSlotOffsets[numSimpleVars] = offsetof(ExprContext,
 															 ecxt_innertuple);
 					if (projInfo->pi_lastInnerVar < attnum)
 						projInfo->pi_lastInnerVar = attnum;
 					break;
 
-				case OUTER:
+				case OUTER_VAR:
 					varSlotOffsets[numSimpleVars] = offsetof(ExprContext,
 															 ecxt_outertuple);
 					if (projInfo->pi_lastOuterVar < attnum)
 						projInfo->pi_lastOuterVar = attnum;
 					break;
+
+				/* INDEX_VAR is handled by default case */
 
 				default:
 					varSlotOffsets[numSimpleVars] = offsetof(ExprContext,
@@ -626,15 +630,17 @@ get_last_attnums(Node *node, ProjectionInfo *projInfo)
 
 		switch (variable->varno)
 		{
-			case INNER:
+			case INNER_VAR:
 				if (projInfo->pi_lastInnerVar < attnum)
 					projInfo->pi_lastInnerVar = attnum;
 				break;
 
-			case OUTER:
+			case OUTER_VAR:
 				if (projInfo->pi_lastOuterVar < attnum)
 					projInfo->pi_lastOuterVar = attnum;
 				break;
+
+			/* INDEX_VAR is handled by default case */
 
 			default:
 				if (projInfo->pi_lastScanVar < attnum)
@@ -1154,6 +1160,7 @@ check_exclusion_constraint(Relation heap, Relation index, IndexInfo *indexInfo,
 {
 	Oid		   *constr_procs = indexInfo->ii_ExclusionProcs;
 	uint16	   *constr_strats = indexInfo->ii_ExclusionStrats;
+	Oid		   *index_collations = index->rd_indcollation;
 	int			index_natts = index->rd_index->indnatts;
 	IndexScanDesc index_scan;
 	HeapTuple	tup;
@@ -1184,11 +1191,14 @@ check_exclusion_constraint(Relation heap, Relation index, IndexInfo *indexInfo,
 
 	for (i = 0; i < index_natts; i++)
 	{
-		ScanKeyInit(&scankeys[i],
-					i + 1,
-					constr_strats[i],
-					constr_procs[i],
-					values[i]);
+		ScanKeyEntryInitialize(&scankeys[i],
+							   0,
+							   i + 1,
+							   constr_strats[i],
+							   InvalidOid,
+							   index_collations[i],
+							   constr_procs[i],
+							   values[i]);
 	}
 
 	/*
@@ -1311,9 +1321,9 @@ retry:
 	/*
 	 * Ordinarily, at this point the search should have found the originally
 	 * inserted tuple, unless we exited the loop early because of conflict.
-	 * However, it is possible to define exclusion constraints for which
-	 * that wouldn't be true --- for instance, if the operator is <>.
-	 * So we no longer complain if found_self is still false.
+	 * However, it is possible to define exclusion constraints for which that
+	 * wouldn't be true --- for instance, if the operator is <>. So we no
+	 * longer complain if found_self is still false.
 	 */
 
 	econtext->ecxt_scantuple = save_scantuple;
@@ -1341,9 +1351,10 @@ index_recheck_constraint(Relation index, Oid *constr_procs,
 		if (existing_isnull[i])
 			return false;
 
-		if (!DatumGetBool(OidFunctionCall2(constr_procs[i],
-										   existing_values[i],
-										   new_values[i])))
+		if (!DatumGetBool(OidFunctionCall2Coll(constr_procs[i],
+											   index->rd_indcollation[i],
+											   existing_values[i],
+											   new_values[i])))
 			return false;
 	}
 

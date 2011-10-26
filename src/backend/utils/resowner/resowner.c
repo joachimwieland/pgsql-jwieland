@@ -21,11 +21,10 @@
 #include "postgres.h"
 
 #include "access/hash.h"
-#include "storage/bufmgr.h"
+#include "storage/predicate.h"
 #include "storage/proc.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
-#include "utils/resowner.h"
 #include "utils/snapmgr.h"
 
 
@@ -77,7 +76,7 @@ typedef struct ResourceOwnerData
 	int			nfiles;			/* number of owned temporary files */
 	File	   *files;			/* dynamically allocated array */
 	int			maxfiles;		/* currently allocated array size */
-} ResourceOwnerData;
+}	ResourceOwnerData;
 
 
 /*****************************************************************************
@@ -261,7 +260,10 @@ ResourceOwnerReleaseInternal(ResourceOwner owner,
 			 * the top of the recursion.
 			 */
 			if (owner == TopTransactionResourceOwner)
+			{
 				ProcReleaseLocks(isCommit);
+				ReleasePredicateLocks(isCommit);
+			}
 		}
 		else
 		{

@@ -19,14 +19,12 @@
 #include "catalog/indexing.h"
 #include "catalog/pg_conversion.h"
 #include "catalog/pg_conversion_fn.h"
-#include "catalog/pg_namespace.h"
 #include "catalog/pg_type.h"
 #include "commands/alter.h"
 #include "commands/conversioncmds.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "parser/parse_func.h"
-#include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
@@ -117,67 +115,6 @@ CreateConversionCommand(CreateConversionStmt *stmt)
 	 */
 	ConversionCreate(conversion_name, namespaceId, GetUserId(),
 					 from_encoding, to_encoding, funcoid, stmt->def);
-}
-
-/*
- * DROP CONVERSION
- */
-void
-DropConversionsCommand(DropStmt *drop)
-{
-	ObjectAddresses *objects;
-	ListCell   *cell;
-
-	/*
-	 * First we identify all the conversions, then we delete them in a single
-	 * performMultipleDeletions() call.  This is to avoid unwanted DROP
-	 * RESTRICT errors if one of the conversions depends on another. (Not that
-	 * that is very likely, but we may as well do this consistently.)
-	 */
-	objects = new_object_addresses();
-
-	foreach(cell, drop->objects)
-	{
-		List	   *name = (List *) lfirst(cell);
-		Oid			conversionOid;
-		HeapTuple	tuple;
-		Form_pg_conversion con;
-		ObjectAddress object;
-
-		conversionOid = get_conversion_oid(name, drop->missing_ok);
-
-		if (!OidIsValid(conversionOid))
-		{
-			ereport(NOTICE,
-					(errmsg("conversion \"%s\" does not exist, skipping",
-							NameListToString(name))));
-			continue;
-		}
-
-		tuple = SearchSysCache1(CONVOID, ObjectIdGetDatum(conversionOid));
-		if (!HeapTupleIsValid(tuple))
-			elog(ERROR, "cache lookup failed for conversion %u",
-				 conversionOid);
-		con = (Form_pg_conversion) GETSTRUCT(tuple);
-
-		/* Permission check: must own conversion or its namespace */
-		if (!pg_conversion_ownercheck(conversionOid, GetUserId()) &&
-			!pg_namespace_ownercheck(con->connamespace, GetUserId()))
-			aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_CONVERSION,
-						   NameStr(con->conname));
-
-		object.classId = ConversionRelationId;
-		object.objectId = conversionOid;
-		object.objectSubId = 0;
-
-		add_exact_object_address(&object, objects);
-
-		ReleaseSysCache(tuple);
-	}
-
-	performMultipleDeletions(objects, drop->behavior);
-
-	free_object_addresses(objects);
 }
 
 /*
@@ -335,7 +272,8 @@ AlterConversionOwner_internal(Relation rel, Oid conversionOid, Oid newOwnerId)
 void
 AlterConversionNamespace(List *name, const char *newschema)
 {
-	Oid			convOid, nspOid;
+	Oid			convOid,
+				nspOid;
 	Relation	rel;
 
 	rel = heap_open(ConversionRelationId, RowExclusiveLock);
@@ -345,12 +283,35 @@ AlterConversionNamespace(List *name, const char *newschema)
 	/* get schema OID */
 	nspOid = LookupCreationNamespace(newschema);
 
-	AlterObjectNamespace(rel, CONVOID, ConversionRelationId, convOid, nspOid,
+	AlterObjectNamespace(rel, CONVOID, CONNAMENSP,
+						 convOid, nspOid,
 						 Anum_pg_conversion_conname,
 						 Anum_pg_conversion_connamespace,
 						 Anum_pg_conversion_conowner,
-						 ACL_KIND_CONVERSION,
-						 false);
+						 ACL_KIND_CONVERSION);
 
-	heap_close(rel, NoLock);
+	heap_close(rel, RowExclusiveLock);
+}
+
+/*
+ * Change conversion schema, by oid
+ */
+Oid
+AlterConversionNamespace_oid(Oid convOid, Oid newNspOid)
+{
+	Oid			oldNspOid;
+	Relation	rel;
+
+	rel = heap_open(ConversionRelationId, RowExclusiveLock);
+
+	oldNspOid = AlterObjectNamespace(rel, CONVOID, CONNAMENSP,
+									 convOid, newNspOid,
+									 Anum_pg_conversion_conname,
+									 Anum_pg_conversion_connamespace,
+									 Anum_pg_conversion_conowner,
+									 ACL_KIND_CONVERSION);
+
+	heap_close(rel, RowExclusiveLock);
+
+	return oldNspOid;
 }

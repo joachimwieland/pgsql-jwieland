@@ -28,6 +28,7 @@
 #include "miscadmin.h"
 #include "pg_trace.h"
 #include "storage/ipc.h"
+#include "storage/predicate.h"
 #include "storage/proc.h"
 #include "storage/spin.h"
 
@@ -166,6 +167,9 @@ NumLWLocks(void)
 	/* bufmgr.c needs two for each shared buffer */
 	numLocks += 2 * NBuffers;
 
+	/* lock.c needs one per backend */
+	numLocks += MaxBackends;
+
 	/* clog.c needs one per CLOG buffer */
 	numLocks += NUM_CLOG_BUFFERS;
 
@@ -177,6 +181,9 @@ NumLWLocks(void)
 
 	/* async.c needs one per Async buffer */
 	numLocks += NUM_ASYNC_BUFFERS;
+
+	/* predicate.c needs one per old serializable xid buffer */
+	numLocks += NUM_OLDSERXID_BUFFERS;
 
 	/*
 	 * Add any requested by loadable modules; for backwards-compatibility

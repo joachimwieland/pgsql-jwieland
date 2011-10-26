@@ -250,6 +250,12 @@ FROM pg_proc as p1
 WHERE proargmodes IS NOT NULL AND proargnames IS NOT NULL AND
     array_length(proargmodes,1) <> array_length(proargnames,1);
 
+-- Insist that all built-in pg_proc entries have descriptions
+SELECT p1.oid, p1.proname
+FROM pg_proc as p1 LEFT JOIN pg_description as d
+     ON p1.tableoid = d.classoid and p1.oid = d.objoid and d.objsubid = 0
+WHERE d.classoid IS NULL AND p1.oid <= 9999;
+
 
 -- **************** pg_cast ****************
 
@@ -515,6 +521,32 @@ WHERE p1.oprjoin = p2.oid AND
      p2.proargtypes[2] != 'internal'::regtype OR
      p2.proargtypes[3] != 'int2'::regtype OR
      p2.proargtypes[4] != 'internal'::regtype);
+
+-- Insist that all built-in pg_operator entries have descriptions
+SELECT p1.oid, p1.oprname
+FROM pg_operator as p1 LEFT JOIN pg_description as d
+     ON p1.tableoid = d.classoid and p1.oid = d.objoid and d.objsubid = 0
+WHERE d.classoid IS NULL AND p1.oid <= 9999;
+
+-- Check that operators' underlying functions have suitable comments,
+-- namely 'implementation of XXX operator'.  In some cases involving legacy
+-- names for operators, there are multiple operators referencing the same
+-- pg_proc entry, so ignore operators whose comments say they are deprecated.
+-- We also have a few functions that are both operator support and meant to
+-- be called directly; those should have comments matching their operator.
+WITH funcdescs AS (
+  SELECT p.oid as p_oid, proname, o.oid as o_oid,
+    obj_description(p.oid, 'pg_proc') as prodesc,
+    'implementation of ' || oprname || ' operator' as expecteddesc,
+    obj_description(o.oid, 'pg_operator') as oprdesc
+  FROM pg_proc p JOIN pg_operator o ON oprcode = p.oid
+  WHERE o.oid <= 9999
+)
+SELECT * FROM funcdescs
+  WHERE prodesc IS DISTINCT FROM expecteddesc
+    AND oprdesc NOT LIKE 'deprecated%'
+    AND prodesc IS DISTINCT FROM oprdesc;
+
 
 -- **************** pg_aggregate ****************
 
@@ -888,7 +920,7 @@ WHERE p1.amprocfamily = p3.oid AND p3.opfmethod = p2.oid AND
 
 -- Detect missing pg_amproc entries: should have as many support functions
 -- as AM expects for each datatype combination supported by the opfamily.
--- GIST/GIN are special cases because each has an optional support function.
+-- GiST/GIN are special cases because each has an optional support function.
 
 SELECT p1.amname, p2.opfname, p3.amproclefttype, p3.amprocrighttype
 FROM pg_am AS p1, pg_opfamily AS p2, pg_amproc AS p3
@@ -899,7 +931,7 @@ WHERE p2.opfmethod = p1.oid AND p3.amprocfamily = p2.oid AND
                            p4.amproclefttype = p3.amproclefttype AND
                            p4.amprocrighttype = p3.amprocrighttype);
 
--- Similar check for GIST/GIN, allowing one optional proc
+-- Similar check for GiST/GIN, allowing one optional proc
 
 SELECT p1.amname, p2.opfname, p3.amproclefttype, p3.amprocrighttype
 FROM pg_am AS p1, pg_opfamily AS p2, pg_amproc AS p3
@@ -912,7 +944,7 @@ WHERE p2.opfmethod = p1.oid AND p3.amprocfamily = p2.oid AND
       NOT IN (p1.amsupport, p1.amsupport - 1);
 
 -- Also, check if there are any pg_opclass entries that don't seem to have
--- pg_amproc support.  Again, GIST/GIN have to be checked specially.
+-- pg_amproc support.  Again, GiST/GIN have to be checked specially.
 
 SELECT amname, opcname, count(*)
 FROM pg_am am JOIN pg_opclass op ON opcmethod = am.oid

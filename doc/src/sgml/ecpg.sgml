@@ -407,7 +407,7 @@ EXEC SQL SELECT foo INTO :FooBar FROM table1 WHERE ascii = 'doodad';
   </para>
 
   <para>
-   Also, a configuration parameter can be retreived with the
+   Also, a configuration parameter can be retrieved with the
    <literal>SHOW</literal> command:
 <programlisting>
 EXEC SQL SHOW search_path INTO :var;
@@ -555,7 +555,7 @@ EXEC SQL EXECUTE stmt1 INTO :dboid, :dbname USING 1;
    </para>
 
    <para>
-    If a statement return multiple rows, the application can use a
+    If a statement returns multiple rows, the application can use a
     cursor declared based on the prepared statement.  To bind input
     parameters, the cursor must be opened with
     a <literal>USING</literal> clause:
@@ -845,6 +845,11 @@ do
       </row>
 
       <row>
+       <entry><type>smallserial</type></entry>
+       <entry><type>short</type></entry>
+      </row>
+
+      <row>
        <entry><type>serial</type></entry>
        <entry><type>int</type></entry>
       </row>
@@ -983,7 +988,7 @@ VARCHAR v2[128];
      the pgtypes library.  The pgtypes library, described in detail
      in <xref linkend="ecpg-pgtypes"> contains basic functions to deal
      with those types, such that you do not need to send a query to
-     the SQL server just for adding an interval to a timestamp for
+     the SQL server just for adding an interval to a time stamp for
      example.
     </para>
 
@@ -1038,9 +1043,9 @@ ts = 2010-06-27 18:03:56.949343
 
      <para>
       In addition, the DATE type can be handled in the same way. The
-      program has to include pg_types_date.h, declare a host variable
+      program has to include <filename>pg_types_date.h</filename>, declare a host variable
       as the date type and convert a DATE value into a text form using
-      PGTYPESdate_to_asc() function. For more details about the
+      <function>PGTYPESdate_to_asc()</function> function. For more details about the
       pgtypes library functions, see <xref linkend="ecpg-pgtypes">.
      </para>
     </sect4>
@@ -1173,12 +1178,12 @@ EXEC SQL END DECLARE SECTION;
       is a way to store some text string in <type>char[]</type>
       or <type>VARCHAR[]</type>, as
       explained <xref linkend="ecpg-char">.  The second use case is to
-      retreive multiple rows from a query result without using a
+      retrieve multiple rows from a query result without using a
       cursor.  Without an array, to process a query result consisting
       of multiple rows, it is required to use a cursor and
       the <command>FETCH</command> command.  But with array host
       variables, multiple rows can be received at once.  The length of
-      the array has to be defined to be able to accomodate all rows,
+      the array has to be defined to be able to accommodate all rows,
       otherwise a buffer overflow will likely occur.
      </para>
 
@@ -1239,7 +1244,7 @@ oid=0, dbname=
 
      <para>
       The following example retrieves OIDs, names, and sizes of the
-      avilable databases from the <literal>pg_database</literal>
+      available databases from the <literal>pg_database</literal>
       system table and using
       the <function>pg_database_size()</function> function.  In this
       example, a structure variable <varname>dbinfo_t</varname> with
@@ -1624,7 +1629,7 @@ while (1)
    </sect3>
 
    <sect3>
-    <title>User-Defined Base Types</title>
+    <title>User-defined Base Types</title>
 
     <para>
      New user-defined base types are not directly supported by ECPG.
@@ -3006,7 +3011,7 @@ int PGTYPEStimestamp_fmt_asc(timestamp *ts, char *output, int str_len, char *fmt
          <listitem>
           <para>
            <literal>%p</literal> - is replaced by national representation of
-           either "ante meridiem" or "post meridiem" as appropriate.
+           either <quote>ante meridiem</quote> or <quote>post meridiem</quote> as appropriate.
           </para>
          </listitem>
          <listitem>
@@ -3852,7 +3857,7 @@ EXEC SQL DESCRIBE prepared_statement INTO mysqlda;
     </procedure>
 
    <sect3>
-    <title>SQLDA Datac Structure</title>
+    <title>SQLDA Data Structure</title>
 
     <para>
      SQLDA uses three data structure
@@ -3948,8 +3953,9 @@ typedef struct sqlda_struct sqlda_t;
       <term><literal>desc_next</></term>
       <listitem>
        <para>
-        If the query returns more than one records, multiple linked SQLDA structures
-        are returned, the first record is stored in the SQLDA returned in the
+        If the query returns more than one record, multiple linked
+        SQLDA structures are returned, and <literal>desc_next</> holds
+        a pointer to the next entry in the list.
        </para>
       </listitem>
      </varlistentry>
@@ -4080,7 +4086,7 @@ struct sqlname
    </sect3>
 
    <sect3 id="ecpg-sqlda-output">
-    <title>Retreiving a Result Set Using an SQLDA</title>
+    <title>Retrieving a Result Set Using an SQLDA</title>
 
     <procedure>
      <para>
@@ -4154,7 +4160,7 @@ switch (v.sqltype)
 {
     case ECPGt_char:
         memset(&amp;var_buf, 0, sizeof(var_buf));
-        memcpy(&amp;var_buf, sqldata, (sizeof(var_buf) <= sqllen ? sizeof(var_buf) - 1 : sqllen));
+        memcpy(&amp;var_buf, sqldata, (sizeof(var_buf) &lt;= sqllen ? sizeof(var_buf) - 1 : sqllen));
         break;
 
     case ECPGt_int: /* integer */
@@ -4265,9 +4271,9 @@ free(sqlda2);
 
     <para>
      This application joins two system tables, pg_database and
-     pg_stat_database on the database oid, and also fetches and shows
-     the database statistics which are retreived by two input
-     parameters (a database "postgres", and oid "1").
+     pg_stat_database on the database OID, and also fetches and shows
+     the database statistics which are retrieved by two input
+     parameters (a database <literal>postgres</literal>, and OID <literal>1</literal>).
     </para>
 
     <para>
@@ -4390,7 +4396,7 @@ main(void)
 
                 case ECPGt_char:
                     memset(&amp;var_buf, 0, sizeof(var_buf));
-                    memcpy(&amp;var_buf, sqldata, (sizeof(var_buf) <= sqllen ? sizeof(var_buf)-1 : sqllen));
+                    memcpy(&amp;var_buf, sqldata, (sizeof(var_buf) &lt;= sqllen ? sizeof(var_buf)-1 : sqllen));
                     break;
 
                 case ECPGt_int: /* integer */
@@ -5832,7 +5838,7 @@ ECPG = ecpg
   <para>
    Large object functions have to be called in a transaction block, so
    when autocommit is off, <command>BEGIN</command> commands have to
-   be isssued explicitly.
+   be issued explicitly.
   </para>
 
   <para>
@@ -5871,39 +5877,39 @@ main(void)
 
     /* create */
     loid = lo_create(conn, 0);
-    if (loid < 0)
+    if (loid &lt; 0)
         printf("lo_create() failed: %s", PQerrorMessage(conn));
 
     printf("loid = %d\n", loid);
 
     /* write test */
     fd = lo_open(conn, loid, INV_READ|INV_WRITE);
-    if (fd < 0)
+    if (fd &lt; 0)
         printf("lo_open() failed: %s", PQerrorMessage(conn));
 
     printf("fd = %d\n", fd);
 
     rc = lo_write(conn, fd, buf, buflen);
-    if (rc < 0)
+    if (rc &lt; 0)
         printf("lo_write() failed\n");
 
     rc = lo_close(conn, fd);
-    if (rc < 0)
+    if (rc &lt; 0)
         printf("lo_close() failed: %s", PQerrorMessage(conn));
 
     /* read test */
     fd = lo_open(conn, loid, INV_READ);
-    if (fd < 0)
+    if (fd &lt; 0)
         printf("lo_open() failed: %s", PQerrorMessage(conn));
 
     printf("fd = %d\n", fd);
 
     rc = lo_read(conn, fd, buf2, buflen);
-    if (rc < 0)
+    if (rc &lt; 0)
         printf("lo_read() failed\n");
 
     rc = lo_close(conn, fd);
-    if (rc < 0)
+    if (rc &lt; 0)
         printf("lo_close() failed: %s", PQerrorMessage(conn));
 
     /* check */
@@ -5912,7 +5918,7 @@ main(void)
 
     /* cleanup */
     rc = lo_unlink(conn, loid);
-    if (rc < 0)
+    if (rc &lt; 0)
         printf("lo_unlink() failed: %s", PQerrorMessage(conn));
 
     EXEC SQL COMMIT;
@@ -6616,7 +6622,7 @@ DECLARE <replaceable class="PARAMETER">cursor_name</replaceable> [ BINARY ] [ IN
       <term><replaceable class="PARAMETER">prepared_name</replaceable></term>
       <listitem>
        <para>
-        The name of a prepared query, either as an SQL identfier or a
+        The name of a prepared query, either as an SQL identifier or a
         host variable.
        </para>
       </listitem>
@@ -7477,7 +7483,7 @@ SET DESCRIPTOR <replaceable class="PARAMETER">descriptor_name</replaceable> VALU
       <term><replaceable class="PARAMETER">descriptor_item</replaceable></term>
       <listitem>
        <para>
-        A token identifiying which item of information to set in the
+        A token identifying which item of information to set in the
         descriptor.  See <xref linkend="ecpg-named-descriptors"> for a
         list of supported items.
        </para>
@@ -7931,7 +7937,7 @@ EXEC SQL CLOSE DATABASE;
   </sect2>
 
   <sect2 id="ecpg-informix-sqlda">
-   <title>Informix-Compatible SQLDA Descriptor Areas</title>
+   <title>Informix-compatible SQLDA Descriptor Areas</title>
    <para>
     Informix-compatible mode supports a different structure than the one described in
     <xref linkend="ecpg-sqlda-descriptors">. See below:
@@ -8018,7 +8024,7 @@ typedef struct sqlda_compat     sqlda_t;
      <term><literal>desc_next</></term>
       <listitem>
        <para>
-        Pointer to the next SQLDA structure if the result set contains more than one records.
+        Pointer to the next SQLDA structure if the result set contains more than one record.
        </para>
       </listitem>
      </varlistentry>
@@ -8461,7 +8467,7 @@ int dectoasc(decimal *np, char *cp, int len, int right)
         <literal>right</> to -1 indicates that all available decimal digits
         should be included in the output. If the length of the output buffer,
         which is indicated by <literal>len</> is not sufficient to hold the
-        textual representation including the trailing NUL character, only a
+        textual representation including the trailing zero byte, only a
         single <literal>*</> character is stored in the result and -1 is
         returned.
        </para>
@@ -8556,7 +8562,7 @@ int rdatestr(date d, char *str);
         The function receives two arguments, the first one is the date to
         convert (<literal>d</> and the second one is a pointer to the target
         string. The output format is always <literal>yyyy-mm-dd</>, so you need
-        to allocate at least 11 bytes (including the NUL-terminator) for the
+        to allocate at least 11 bytes (including the zero-byte terminator) for the
         string.
        </para>
        <para>
@@ -9280,7 +9286,7 @@ risnull(CINTTYPE, (char *) &i);
       <listitem>
        <para>
         Functions return this value if an overflow occurred in a
-        calculation. Internally it is defined to -1200 (the <productname>Informix</productname>
+        calculation. Internally it is defined as -1200 (the <productname>Informix</productname>
         definition).
        </para>
       </listitem>
@@ -9291,7 +9297,7 @@ risnull(CINTTYPE, (char *) &i);
       <listitem>
        <para>
         Functions return this value if an underflow occurred in a calculation.
-        Internally it is defined to -1201 (the <productname>Informix</productname> definition).
+        Internally it is defined as -1201 (the <productname>Informix</productname> definition).
        </para>
       </listitem>
      </varlistentry>
@@ -9301,7 +9307,7 @@ risnull(CINTTYPE, (char *) &i);
       <listitem>
        <para>
         Functions return this value if an attempt to divide by zero is
-        observed. Internally it is defined to -1202 (the <productname>Informix</productname> definition).
+        observed. Internally it is defined as -1202 (the <productname>Informix</productname> definition).
        </para>
       </listitem>
      </varlistentry>
@@ -9311,7 +9317,7 @@ risnull(CINTTYPE, (char *) &i);
       <listitem>
        <para>
         Functions return this value if a bad value for a year was found while
-        parsing a date. Internally it is defined to -1204 (the <productname>Informix</productname>
+        parsing a date. Internally it is defined as -1204 (the <productname>Informix</productname>
         definition).
        </para>
       </listitem>
@@ -9322,7 +9328,7 @@ risnull(CINTTYPE, (char *) &i);
       <listitem>
        <para>
         Functions return this value if a bad value for a month was found while
-        parsing a date. Internally it is defined to -1205 (the <productname>Informix</productname>
+        parsing a date. Internally it is defined as -1205 (the <productname>Informix</productname>
         definition).
        </para>
       </listitem>
@@ -9333,7 +9339,7 @@ risnull(CINTTYPE, (char *) &i);
       <listitem>
        <para>
         Functions return this value if a bad value for a day was found while
-        parsing a date. Internally it is defined to -1206 (the <productname>Informix</productname>
+        parsing a date. Internally it is defined as -1206 (the <productname>Informix</productname>
         definition).
        </para>
       </listitem>
@@ -9345,7 +9351,7 @@ risnull(CINTTYPE, (char *) &i);
        <para>
         Functions return this value if a parsing routine needs a short date
         representation but did not get the date string in the right length.
-        Internally it is defined to -1209 (the <productname>Informix</productname> definition).
+        Internally it is defined as -1209 (the <productname>Informix</productname> definition).
        </para>
       </listitem>
      </varlistentry>
@@ -9354,7 +9360,8 @@ risnull(CINTTYPE, (char *) &i);
       <term><literal>ECPG_INFORMIX_DATE_CONVERT</></term>
       <listitem>
        <para>
-        Functions return this value if Internally it is defined to -1210 (the
+        Functions return this value if an error occurred during date
+        formatting.  Internally it is defined as -1210 (the
         <productname>Informix</productname> definition).
        </para>
       </listitem>
@@ -9364,7 +9371,8 @@ risnull(CINTTYPE, (char *) &i);
       <term><literal>ECPG_INFORMIX_OUT_OF_MEMORY</></term>
       <listitem>
        <para>
-        Functions return this value if Internally it is defined to -1211 (the
+        Functions return this value if memory was exhausted during
+        their operation.  Internally it is defined as -1211 (the
         <productname>Informix</productname> definition).
        </para>
       </listitem>
@@ -9376,7 +9384,7 @@ risnull(CINTTYPE, (char *) &i);
        <para>
         Functions return this value if a parsing routine was supposed to get a
         format mask (like <literal>mmddyy</>) but not all fields were listed
-        correctly. Internally it is defined to -1212 (the <productname>Informix</productname> definition).
+        correctly. Internally it is defined as -1212 (the <productname>Informix</productname> definition).
        </para>
       </listitem>
      </varlistentry>
@@ -9389,7 +9397,7 @@ risnull(CINTTYPE, (char *) &i);
         the textual representation for a numeric value because it contains
         errors or if a routine cannot complete a calculation involving numeric
         variables because at least one of the numeric variables is invalid.
-        Internally it is defined to -1213 (the <productname>Informix</productname> definition).
+        Internally it is defined as -1213 (the <productname>Informix</productname> definition).
        </para>
       </listitem>
      </varlistentry>
@@ -9398,7 +9406,8 @@ risnull(CINTTYPE, (char *) &i);
       <term><literal>ECPG_INFORMIX_BAD_EXPONENT</></term>
       <listitem>
        <para>
-        Functions return this value if Internally it is defined to -1216 (the
+        Functions return this value if a parsing routine cannot parse
+        an exponent.  Internally it is defined as -1216 (the
         <productname>Informix</productname> definition).
        </para>
       </listitem>
@@ -9408,7 +9417,8 @@ risnull(CINTTYPE, (char *) &i);
       <term><literal>ECPG_INFORMIX_BAD_DATE</></term>
       <listitem>
        <para>
-        Functions return this value if Internally it is defined to -1218 (the
+        Functions return this value if a parsing routine cannot parse
+        a date.  Internally it is defined as -1218 (the
         <productname>Informix</productname> definition).
        </para>
       </listitem>
@@ -9418,7 +9428,8 @@ risnull(CINTTYPE, (char *) &i);
       <term><literal>ECPG_INFORMIX_EXTRA_CHARS</></term>
       <listitem>
        <para>
-        Functions return this value if Internally it is defined to -1264 (the
+        Functions return this value if a parsing routine is passed extra
+        characters it cannot parse.  Internally it is defined as -1264 (the
         <productname>Informix</productname> definition).
        </para>
       </listitem>

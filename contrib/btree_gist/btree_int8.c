@@ -1,6 +1,8 @@
 /*
  * contrib/btree_gist/btree_int8.c
  */
+#include "postgres.h"
+
 #include "btree_gist.h"
 #include "btree_utils_num.h"
 
@@ -17,6 +19,7 @@ PG_FUNCTION_INFO_V1(gbt_int8_compress);
 PG_FUNCTION_INFO_V1(gbt_int8_union);
 PG_FUNCTION_INFO_V1(gbt_int8_picksplit);
 PG_FUNCTION_INFO_V1(gbt_int8_consistent);
+PG_FUNCTION_INFO_V1(gbt_int8_distance);
 PG_FUNCTION_INFO_V1(gbt_int8_penalty);
 PG_FUNCTION_INFO_V1(gbt_int8_same);
 
@@ -24,6 +27,7 @@ Datum		gbt_int8_compress(PG_FUNCTION_ARGS);
 Datum		gbt_int8_union(PG_FUNCTION_ARGS);
 Datum		gbt_int8_picksplit(PG_FUNCTION_ARGS);
 Datum		gbt_int8_consistent(PG_FUNCTION_ARGS);
+Datum		gbt_int8_distance(PG_FUNCTION_ARGS);
 Datum		gbt_int8_penalty(PG_FUNCTION_ARGS);
 Datum		gbt_int8_same(PG_FUNCTION_ARGS);
 
@@ -31,34 +35,34 @@ Datum		gbt_int8_same(PG_FUNCTION_ARGS);
 static bool
 gbt_int8gt(const void *a, const void *b)
 {
-	return (*((int64 *) a) > *((int64 *) b));
+	return (*((const int64 *) a) > *((const int64 *) b));
 }
 static bool
 gbt_int8ge(const void *a, const void *b)
 {
-	return (*((int64 *) a) >= *((int64 *) b));
+	return (*((const int64 *) a) >= *((const int64 *) b));
 }
 static bool
 gbt_int8eq(const void *a, const void *b)
 {
-	return (*((int64 *) a) == *((int64 *) b));
+	return (*((const int64 *) a) == *((const int64 *) b));
 }
 static bool
 gbt_int8le(const void *a, const void *b)
 {
-	return (*((int64 *) a) <= *((int64 *) b));
+	return (*((const int64 *) a) <= *((const int64 *) b));
 }
 static bool
 gbt_int8lt(const void *a, const void *b)
 {
-	return (*((int64 *) a) < *((int64 *) b));
+	return (*((const int64 *) a) < *((const int64 *) b));
 }
 
 static int
 gbt_int8key_cmp(const void *a, const void *b)
 {
-	int64KEY   *ia = (int64KEY *) (((Nsrt *) a)->t);
-	int64KEY   *ib = (int64KEY *) (((Nsrt *) b)->t);
+	int64KEY   *ia = (int64KEY *) (((const Nsrt *) a)->t);
+	int64KEY   *ib = (int64KEY *) (((const Nsrt *) b)->t);
 
 	if (ia->lower == ib->lower)
 	{
@@ -71,6 +75,12 @@ gbt_int8key_cmp(const void *a, const void *b)
 	return (ia->lower > ib->lower) ? 1 : -1;
 }
 
+static float8
+gbt_int8_dist(const void *a, const void *b)
+{
+	return GET_FLOAT_DISTANCE(int64, a, b);
+}
+
 
 static const gbtree_ninfo tinfo =
 {
@@ -81,8 +91,32 @@ static const gbtree_ninfo tinfo =
 	gbt_int8eq,
 	gbt_int8le,
 	gbt_int8lt,
-	gbt_int8key_cmp
+	gbt_int8key_cmp,
+	gbt_int8_dist
 };
+
+
+PG_FUNCTION_INFO_V1(int8_dist);
+Datum		int8_dist(PG_FUNCTION_ARGS);
+Datum
+int8_dist(PG_FUNCTION_ARGS)
+{
+	int64		a = PG_GETARG_INT64(0);
+	int64		b = PG_GETARG_INT64(1);
+	int64		r;
+	int64		ra;
+
+	r = a - b;
+	ra = Abs(r);
+
+	/* Overflow check. */
+	if (ra < 0 || (!SAMESIGN(a, b) && !SAMESIGN(r, a)))
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("bigint out of range")));
+
+	PG_RETURN_INT64(ra);
+}
 
 
 /**************************************************
@@ -120,6 +154,25 @@ gbt_int8_consistent(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(
 				   gbt_num_consistent(&key, (void *) &query, &strategy, GIST_LEAF(entry), &tinfo)
+		);
+}
+
+
+Datum
+gbt_int8_distance(PG_FUNCTION_ARGS)
+{
+	GISTENTRY  *entry = (GISTENTRY *) PG_GETARG_POINTER(0);
+	int64		query = PG_GETARG_INT64(1);
+
+	/* Oid		subtype = PG_GETARG_OID(3); */
+	int64KEY   *kkk = (int64KEY *) DatumGetPointer(entry->key);
+	GBT_NUMKEY_R key;
+
+	key.lower = (GBT_NUMKEY *) &kkk->lower;
+	key.upper = (GBT_NUMKEY *) &kkk->upper;
+
+	PG_RETURN_FLOAT8(
+			gbt_num_distance(&key, (void *) &query, GIST_LEAF(entry), &tinfo)
 		);
 }
 

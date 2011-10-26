@@ -25,12 +25,7 @@
 
 #include "postgres.h"
 
-#include "fmgr.h"
 #include "funcapi.h"
-#include "access/heapam.h"
-#include "access/transam.h"
-#include "catalog/namespace.h"
-#include "catalog/pg_type.h"
 #include "utils/builtins.h"
 #include "miscadmin.h"
 
@@ -170,8 +165,8 @@ heap_page_items(PG_FUNCTION_ARGS)
 			values[5] = UInt32GetDatum(HeapTupleHeaderGetXmax(tuphdr));
 			values[6] = UInt32GetDatum(HeapTupleHeaderGetRawCommandId(tuphdr)); /* shared with xvac */
 			values[7] = PointerGetDatum(&tuphdr->t_ctid);
-			values[8] = UInt16GetDatum(tuphdr->t_infomask2);
-			values[9] = UInt16GetDatum(tuphdr->t_infomask);
+			values[8] = UInt32GetDatum(tuphdr->t_infomask2);
+			values[9] = UInt32GetDatum(tuphdr->t_infomask);
 			values[10] = UInt8GetDatum(tuphdr->t_hoff);
 
 			/*

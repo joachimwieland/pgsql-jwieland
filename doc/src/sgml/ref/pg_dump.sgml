@@ -142,7 +142,8 @@ PostgreSQL documentation
       <listitem>
        <para>
         Output commands to clean (drop)
-        database objects prior to (the commands for) creating them.
+        database objects prior to outputting the commands for creating them.
+        (Restore might generate some harmless errors.)
        </para>
 
        <para>
@@ -267,10 +268,7 @@ PostgreSQL documentation
           </para>
          </listitem>
         </varlistentry>
-
-       </variablelist>
-       </para>
-
+       </variablelist></para>
       </listitem>
      </varlistentry>
 
@@ -301,7 +299,8 @@ PostgreSQL documentation
         linkend="APP-PSQL-patterns" endterm="APP-PSQL-patterns-title">),
         so multiple schemas can also be selected by writing wildcard characters
         in the pattern.  When using wildcards, be careful to quote the pattern
-        if needed to prevent the shell from expanding the wildcards.
+        if needed to prevent the shell from expanding the wildcards;  see
+        <xref linkend="pg-dump-examples" endterm="pg-dump-examples-title">.
        </para>
 
        <note>
@@ -435,7 +434,8 @@ PostgreSQL documentation
         linkend="APP-PSQL-patterns" endterm="APP-PSQL-patterns-title">),
         so multiple tables can also be selected by writing wildcard characters
         in the pattern.  When using wildcards, be careful to quote the pattern
-        if needed to prevent the shell from expanding the wildcards.
+        if needed to prevent the shell from expanding the wildcards;  see
+        <xref linkend="pg-dump-examples" endterm="pg-dump-examples-title">.
        </para>
 
        <para>
@@ -556,25 +556,6 @@ PostgreSQL documentation
      </varlistentry>
 
      <varlistentry>
-      <term><option>--inserts</option></term>
-      <listitem>
-       <para>
-        Dump data as <command>INSERT</command> commands (rather
-        than <command>COPY</command>).  This will make restoration very slow;
-        it is mainly useful for making dumps that can be loaded into
-        non-<productname>PostgreSQL</productname> databases.
-        However, since this option generates a separate command for each row,
-        an error in reloading a row causes only that row to be lost rather
-        than the entire table contents.
-        Note that
-        the restore might fail altogether if you have rearranged column order.
-        The <option>--column-inserts</option> option is safe against column
-        order changes, though even slower.
-       </para>
-      </listitem>
-     </varlistentry>
-
-     <varlistentry>
       <term><option>--column-inserts</option></term>
       <term><option>--attribute-inserts</option></term>
       <listitem>
@@ -631,6 +612,25 @@ PostgreSQL documentation
      </varlistentry>
 
      <varlistentry>
+      <term><option>--inserts</option></term>
+      <listitem>
+       <para>
+        Dump data as <command>INSERT</command> commands (rather
+        than <command>COPY</command>).  This will make restoration very slow;
+        it is mainly useful for making dumps that can be loaded into
+        non-<productname>PostgreSQL</productname> databases.
+        However, since this option generates a separate command for each row,
+        an error in reloading a row causes only that row to be lost rather
+        than the entire table contents.
+        Note that
+        the restore might fail altogether if you have rearranged column order.
+        The <option>--column-inserts</option> option is safe against column
+        order changes, though even slower.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
       <term><option>--lock-wait-timeout=<replaceable class="parameter">timeout</replaceable></option></term>
       <listitem>
        <para>
@@ -642,6 +642,15 @@ PostgreSQL documentation
         version you are dumping from, but an integer number of milliseconds
         is accepted by all versions since 7.3.  This option is ignored when
         dumping from a pre-7.3 server.)
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><option>--no-security-labels</option></term>
+      <listitem>
+       <para>
+        Do not dump security labels.
        </para>
       </listitem>
      </varlistentry>
@@ -664,30 +673,6 @@ PostgreSQL documentation
      </varlistentry>
 
      <varlistentry>
-      <term><option>--no-security-label</option></term>
-      <listitem>
-       <para>
-        Do not dump security labels.
-       </para>
-      </listitem>
-     </varlistentry>
-
-     <varlistentry>
-      <term><option>--use-set-session-authorization</></term>
-      <listitem>
-       <para>
-        Output SQL-standard <command>SET SESSION AUTHORIZATION</> commands
-        instead of <command>ALTER OWNER</> commands to determine object
-        ownership.  This makes the dump more standards-compatible, but
-        depending on the history of the objects in the dump, might not restore
-        properly.  Also, a dump using <command>SET SESSION AUTHORIZATION</>
-        will certainly require superuser privileges to restore correctly,
-        whereas <command>ALTER OWNER</> requires lesser privileges.
-       </para>
-      </listitem>
-     </varlistentry>
-
-     <varlistentry>
       <term><option>--no-unlogged-table-data</option></term>
       <listitem>
        <para>
@@ -705,6 +690,56 @@ PostgreSQL documentation
         Force quoting of all identifiers.  This may be useful when dumping a
         database for migration to a future version that may have introduced
         additional keywords.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><option>--serializable-deferrable</option></term>
+      <listitem>
+       <para>
+        Use a <literal>serializable</literal> transaction for the dump, to
+        ensure that the snapshot used is consistent with later database
+        states; but do this by waiting for a point in the transaction stream
+        at which no anomalies can be present, so that there isn't a risk of
+        the dump failing or causing other transactions to roll back with a
+        <literal>serialization_failure</literal>.  See <xref linkend="mvcc">
+        for more information about transaction isolation and concurrency
+        control.
+       </para>
+
+       <para>
+        This option is not beneficial for a dump which is intended only for
+        disaster recovery.  It could be useful for a dump used to load a
+        copy of the database for reporting or other read-only load sharing
+        while the original database continues to be updated.  Without it the
+        dump may reflect a state which is not consistent with any serial
+        execution of the transactions eventually committed.  For example, if
+        batch processing techniques are used, a batch may show as closed in
+        the dump without all of the items which are in the batch appearing.
+       </para>
+
+       <para>
+        This option will make no difference if there are no read-write
+        transactions active when pg_dump is started.  If read-write
+        transactions are active, the start of the dump may be delayed for an
+        indeterminate length of time.  Once running, performance with or
+        without the switch is the same.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><option>--use-set-session-authorization</></term>
+      <listitem>
+       <para>
+        Output SQL-standard <command>SET SESSION AUTHORIZATION</> commands
+        instead of <command>ALTER OWNER</> commands to determine object
+        ownership.  This makes the dump more standards-compatible, but
+        depending on the history of the objects in the dump, might not restore
+        properly.  Also, a dump using <command>SET SESSION AUTHORIZATION</>
+        will certainly require superuser privileges to restore correctly,
+        whereas <command>ALTER OWNER</> requires lesser privileges.
        </para>
       </listitem>
      </varlistentry>
@@ -864,7 +899,7 @@ PostgreSQL documentation
   <para>
    The database activity of <application>pg_dump</application> is
    normally collected by the statistics collector.  If this is
-   undesirable, you can set parameter <literal>track_counts</literal>
+   undesirable, you can set parameter <varname>track_counts</>
    to false via <envar>PGOPTIONS</envar> or the <literal>ALTER
    USER</literal> command.
   </para>
@@ -938,7 +973,7 @@ CREATE DATABASE foo WITH TEMPLATE template0;
  </refsect1>
 
  <refsect1 id="pg-dump-examples">
-  <title>Examples</title>
+  <title id="pg-dump-examples-title">Examples</title>
 
   <para>
    To dump a database called <literal>mydb</> into a SQL-script file:
@@ -1037,8 +1072,7 @@ CREATE DATABASE foo WITH TEMPLATE template0;
 
 <screen>
 <prompt>$</prompt> <userinput>pg_dump -t '"MixedCaseName"' mydb &gt; mytab.sql</userinput>
-</screen>
-  </para>
+</screen></para>
 
  </refsect1>
 

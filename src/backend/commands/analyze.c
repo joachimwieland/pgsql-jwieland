@@ -16,17 +16,18 @@
 
 #include <math.h>
 
-#include "access/heapam.h"
 #include "access/transam.h"
 #include "access/tupconvert.h"
 #include "access/tuptoaster.h"
+#include "access/visibilitymap.h"
 #include "access/xact.h"
 #include "catalog/index.h"
 #include "catalog/indexing.h"
-#include "catalog/namespace.h"
+#include "catalog/pg_collation.h"
 #include "catalog/pg_inherits_fn.h"
 #include "catalog/pg_namespace.h"
 #include "commands/dbcommands.h"
+#include "commands/tablecmds.h"
 #include "commands/vacuum.h"
 #include "executor/executor.h"
 #include "miscadmin.h"
@@ -36,6 +37,7 @@
 #include "pgstat.h"
 #include "postmaster/autovacuum.h"
 #include "storage/bufmgr.h"
+#include "storage/lmgr.h"
 #include "storage/proc.h"
 #include "storage/procarray.h"
 #include "utils/acl.h"
@@ -47,6 +49,7 @@
 #include "utils/pg_rusage.h"
 #include "utils/syscache.h"
 #include "utils/tuplesort.h"
+#include "utils/timestamp.h"
 #include "utils/tqual.h"
 
 
@@ -82,8 +85,7 @@ static MemoryContext anl_context = NULL;
 static BufferAccessStrategy vac_strategy;
 
 
-static void do_analyze_rel(Relation onerel, VacuumStmt *vacstmt,
-			   bool update_reltuples, bool inh);
+static void do_analyze_rel(Relation onerel, VacuumStmt *vacstmt, bool inh);
 static void BlockSampler_Init(BlockSampler bs, BlockNumber nblocks,
 				  int samplesize);
 static bool BlockSampler_HasMore(BlockSampler bs);
@@ -93,7 +95,7 @@ static void compute_index_stats(Relation onerel, double totalrows,
 					HeapTuple *rows, int numrows,
 					MemoryContext col_context);
 static VacAttrStats *examine_attribute(Relation onerel, int attnum,
-									   Node *index_expr);
+				  Node *index_expr);
 static int acquire_sample_rows(Relation onerel, HeapTuple *rows,
 					int targrows, double *totalrows, double *totaldeadrows);
 static double random_fract(void);
@@ -113,18 +115,9 @@ static bool std_typanalyze(VacAttrStats *stats);
 
 /*
  *	analyze_rel() -- analyze one relation
- *
- * If update_reltuples is true, we update reltuples and relpages columns
- * in pg_class.  Caller should pass false if we're part of VACUUM ANALYZE,
- * and the VACUUM didn't skip any pages.  We only have an approximate count,
- * so we don't want to overwrite the accurate values already inserted by the
- * VACUUM in that case.  VACUUM always scans all indexes, however, so the
- * pg_class entries for indexes are never updated if we're part of VACUUM
- * ANALYZE.
  */
 void
-analyze_rel(Oid relid, VacuumStmt *vacstmt,
-			BufferAccessStrategy bstrategy, bool update_reltuples)
+analyze_rel(Oid relid, VacuumStmt *vacstmt, BufferAccessStrategy bstrategy)
 {
 	Relation	onerel;
 
@@ -148,7 +141,19 @@ analyze_rel(Oid relid, VacuumStmt *vacstmt,
 	 * matter if we ever try to accumulate stats on dead tuples.) If the rel
 	 * has been dropped since we last saw it, we don't need to process it.
 	 */
-	onerel = try_relation_open(relid, ShareUpdateExclusiveLock);
+	if (!(vacstmt->options & VACOPT_NOWAIT))
+		onerel = try_relation_open(relid, ShareUpdateExclusiveLock);
+	else if (ConditionalLockRelationOid(relid, ShareUpdateExclusiveLock))
+		onerel = try_relation_open(relid, NoLock);
+	else
+	{
+		onerel = NULL;
+		if (IsAutoVacuumWorkerProcess() && Log_autovacuum_min_duration >= 0)
+			ereport(LOG,
+					(errcode(ERRCODE_LOCK_NOT_AVAILABLE),
+				  errmsg("skipping analyze of \"%s\" --- lock not available",
+						 vacstmt->relation->relname)));
+	}
 	if (!onerel)
 		return;
 
@@ -224,13 +229,13 @@ analyze_rel(Oid relid, VacuumStmt *vacstmt,
 	/*
 	 * Do the normal non-recursive ANALYZE.
 	 */
-	do_analyze_rel(onerel, vacstmt, update_reltuples, false);
+	do_analyze_rel(onerel, vacstmt, false);
 
 	/*
 	 * If there are child tables, do recursive ANALYZE.
 	 */
 	if (onerel->rd_rel->relhassubclass)
-		do_analyze_rel(onerel, vacstmt, false, true);
+		do_analyze_rel(onerel, vacstmt, true);
 
 	/*
 	 * Close source relation now, but keep lock so that no one deletes it
@@ -253,8 +258,7 @@ analyze_rel(Oid relid, VacuumStmt *vacstmt,
  *	do_analyze_rel() -- analyze one relation, recursively or not
  */
 static void
-do_analyze_rel(Relation onerel, VacuumStmt *vacstmt,
-			   bool update_reltuples, bool inh)
+do_analyze_rel(Relation onerel, VacuumStmt *vacstmt, bool inh)
 {
 	int			attr_cnt,
 				tcnt,
@@ -263,7 +267,6 @@ do_analyze_rel(Relation onerel, VacuumStmt *vacstmt,
 	Relation   *Irel;
 	int			nindexes;
 	bool		hasindex;
-	bool		analyzableindex;
 	VacAttrStats **vacattrstats;
 	AnlIndexData *indexdata;
 	int			targrows,
@@ -377,7 +380,6 @@ do_analyze_rel(Relation onerel, VacuumStmt *vacstmt,
 	}
 	hasindex = (nindexes > 0);
 	indexdata = NULL;
-	analyzableindex = false;
 	if (hasindex)
 	{
 		indexdata = (AnlIndexData *) palloc0(nindexes * sizeof(AnlIndexData));
@@ -411,10 +413,7 @@ do_analyze_rel(Relation onerel, VacuumStmt *vacstmt,
 						thisdata->vacattrstats[tcnt] =
 							examine_attribute(Irel[ind], i + 1, indexkey);
 						if (thisdata->vacattrstats[tcnt] != NULL)
-						{
 							tcnt++;
-							analyzableindex = true;
-						}
 					}
 				}
 				thisdata->attr_cnt = tcnt;
@@ -423,15 +422,10 @@ do_analyze_rel(Relation onerel, VacuumStmt *vacstmt,
 	}
 
 	/*
-	 * Quit if no analyzable columns and no pg_class update needed.
-	 */
-	if (attr_cnt <= 0 && !analyzableindex && !update_reltuples)
-		goto cleanup;
-
-	/*
 	 * Determine how many rows we need to sample, using the worst case from
 	 * all analyzable columns.	We use a lower bound of 100 rows to avoid
-	 * possible overflow in Vitter's algorithm.
+	 * possible overflow in Vitter's algorithm.  (Note: that will also be
+	 * the target in the corner case where there are no analyzable columns.)
 	 */
 	targrows = 100;
 	for (i = 0; i < attr_cnt; i++)
@@ -535,20 +529,23 @@ do_analyze_rel(Relation onerel, VacuumStmt *vacstmt,
 	}
 
 	/*
-	 * Update pages/tuples stats in pg_class, but not if we're inside a VACUUM
-	 * that got a more precise number.
+	 * Update pages/tuples stats in pg_class ... but not if we're doing
+	 * inherited stats.
 	 */
-	if (update_reltuples)
+	if (!inh)
 		vac_update_relstats(onerel,
 							RelationGetNumberOfBlocks(onerel),
-							totalrows, hasindex, InvalidTransactionId);
+							totalrows,
+							visibilitymap_count(onerel),
+							hasindex,
+							InvalidTransactionId);
 
 	/*
 	 * Same for indexes. Vacuum always scans all indexes, so if we're part of
 	 * VACUUM ANALYZE, don't overwrite the accurate count already inserted by
 	 * VACUUM.
 	 */
-	if (!(vacstmt->options & VACOPT_VACUUM))
+	if (!inh && !(vacstmt->options & VACOPT_VACUUM))
 	{
 		for (ind = 0; ind < nindexes; ind++)
 		{
@@ -558,21 +555,20 @@ do_analyze_rel(Relation onerel, VacuumStmt *vacstmt,
 			totalindexrows = ceil(thisdata->tupleFract * totalrows);
 			vac_update_relstats(Irel[ind],
 								RelationGetNumberOfBlocks(Irel[ind]),
-								totalindexrows, false, InvalidTransactionId);
+								totalindexrows,
+								0,
+								false,
+								InvalidTransactionId);
 		}
 	}
 
 	/*
-	 * Report ANALYZE to the stats collector, too; likewise, tell it to adopt
-	 * these numbers only if we're not inside a VACUUM that got a better
-	 * number.	However, a call with inh = true shouldn't reset the stats.
+	 * Report ANALYZE to the stats collector, too.	However, if doing
+	 * inherited stats we shouldn't report, because the stats collector only
+	 * tracks per-table stats.
 	 */
 	if (!inh)
-		pgstat_report_analyze(onerel, update_reltuples,
-							  totalrows, totaldeadrows);
-
-	/* We skip to here if there were no analyzable columns */
-cleanup:
+		pgstat_report_analyze(onerel, totalrows, totaldeadrows);
 
 	/* If this isn't part of VACUUM ANALYZE, let index AMs do cleanup */
 	if (!(vacstmt->options & VACOPT_VACUUM))
@@ -839,10 +835,10 @@ examine_attribute(Relation onerel, int attnum, Node *index_expr)
 	/*
 	 * When analyzing an expression index, believe the expression tree's type
 	 * not the column datatype --- the latter might be the opckeytype storage
-	 * type of the opclass, which is not interesting for our purposes.  (Note:
+	 * type of the opclass, which is not interesting for our purposes.	(Note:
 	 * if we did anything with non-expression index columns, we'd need to
 	 * figure out where to get the correct type info from, but for now that's
-	 * not a problem.)  It's not clear whether anyone will care about the
+	 * not a problem.)	It's not clear whether anyone will care about the
 	 * typmod, but we store that too just in case.
 	 */
 	if (index_expr)
@@ -856,12 +852,11 @@ examine_attribute(Relation onerel, int attnum, Node *index_expr)
 		stats->attrtypmod = attr->atttypmod;
 	}
 
-	typtuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(stats->attrtypid));
+	typtuple = SearchSysCacheCopy1(TYPEOID,
+								   ObjectIdGetDatum(stats->attrtypid));
 	if (!HeapTupleIsValid(typtuple))
 		elog(ERROR, "cache lookup failed for type %u", stats->attrtypid);
-	stats->attrtype = (Form_pg_type) palloc(sizeof(FormData_pg_type));
-	memcpy(stats->attrtype, GETSTRUCT(typtuple), sizeof(FormData_pg_type));
-	ReleaseSysCache(typtuple);
+	stats->attrtype = (Form_pg_type) GETSTRUCT(typtuple);
 	stats->anl_context = anl_context;
 	stats->tupattnum = attnum;
 
@@ -890,7 +885,7 @@ examine_attribute(Relation onerel, int attnum, Node *index_expr)
 
 	if (!ok || stats->compute_stats == NULL || stats->minrows <= 0)
 	{
-		pfree(stats->attrtype);
+		heap_freetuple(typtuple);
 		pfree(stats->attr);
 		pfree(stats);
 		return NULL;
@@ -1229,18 +1224,19 @@ acquire_sample_rows(Relation onerel, HeapTuple *rows, int targrows,
 		qsort((void *) rows, numrows, sizeof(HeapTuple), compare_rows);
 
 	/*
-	 * Estimate total numbers of rows in relation.
+	 * Estimate total numbers of rows in relation.	For live rows, use
+	 * vac_estimate_reltuples; for dead rows, we have no source of old
+	 * information, so we have to assume the density is the same in unseen
+	 * pages as in the pages we scanned.
 	 */
+	*totalrows = vac_estimate_reltuples(onerel, true,
+										totalblocks,
+										bs.m,
+										liverows);
 	if (bs.m > 0)
-	{
-		*totalrows = floor((liverows * totalblocks) / bs.m + 0.5);
-		*totaldeadrows = floor((deadrows * totalblocks) / bs.m + 0.5);
-	}
+		*totaldeadrows = floor((deadrows / bs.m) * totalblocks + 0.5);
 	else
-	{
-		*totalrows = 0.0;
 		*totaldeadrows = 0.0;
-	}
 
 	/*
 	 * Emit some interesting relation info
@@ -1373,8 +1369,8 @@ get_next_S(double t, int n, double *stateptr)
 static int
 compare_rows(const void *a, const void *b)
 {
-	HeapTuple	ha = *(HeapTuple *) a;
-	HeapTuple	hb = *(HeapTuple *) b;
+	HeapTuple	ha = *(const HeapTuple *) a;
+	HeapTuple	hb = *(const HeapTuple *) b;
 	BlockNumber ba = ItemPointerGetBlockNumber(&ha->t_self);
 	OffsetNumber oa = ItemPointerGetOffsetNumber(&ha->t_self);
 	BlockNumber bb = ItemPointerGetBlockNumber(&hb->t_self);
@@ -1422,14 +1418,15 @@ acquire_inherited_sample_rows(Relation onerel, HeapTuple *rows, int targrows,
 	/*
 	 * Check that there's at least one descendant, else fail.  This could
 	 * happen despite analyze_rel's relhassubclass check, if table once had a
-	 * child but no longer does.
+	 * child but no longer does.  In that case, we can clear the
+	 * relhassubclass field so as not to make the same mistake again later.
+	 * (This is safe because we hold ShareUpdateExclusiveLock.)
 	 */
 	if (list_length(tableOIDs) < 2)
 	{
-		/*
-		 * XXX It would be desirable to clear relhassubclass here, but we
-		 * don't have adequate lock to do that safely.
-		 */
+		/* CCI because we already updated the pg_class row in this command */
+		CommandCounterIncrement();
+		SetRelationHasSubclass(RelationGetRelid(onerel), false);
 		return 0;
 	}
 
@@ -1600,21 +1597,23 @@ update_attstats(Oid relid, bool inh, int natts, VacAttrStats **vacattrstats)
 			replaces[i] = true;
 		}
 
-		i = 0;
-		values[i++] = ObjectIdGetDatum(relid);	/* starelid */
-		values[i++] = Int16GetDatum(stats->attr->attnum);		/* staattnum */
-		values[i++] = BoolGetDatum(inh);		/* stainherit */
-		values[i++] = Float4GetDatum(stats->stanullfrac);		/* stanullfrac */
-		values[i++] = Int32GetDatum(stats->stawidth);	/* stawidth */
-		values[i++] = Float4GetDatum(stats->stadistinct);		/* stadistinct */
+		values[Anum_pg_statistic_starelid - 1] = ObjectIdGetDatum(relid);
+		values[Anum_pg_statistic_staattnum - 1] = Int16GetDatum(stats->attr->attnum);
+		values[Anum_pg_statistic_stainherit - 1] = BoolGetDatum(inh);
+		values[Anum_pg_statistic_stanullfrac - 1] = Float4GetDatum(stats->stanullfrac);
+		values[Anum_pg_statistic_stawidth - 1] = Int32GetDatum(stats->stawidth);
+		values[Anum_pg_statistic_stadistinct - 1] = Float4GetDatum(stats->stadistinct);
+		i = Anum_pg_statistic_stakind1 - 1;
 		for (k = 0; k < STATISTIC_NUM_SLOTS; k++)
 		{
 			values[i++] = Int16GetDatum(stats->stakind[k]);		/* stakindN */
 		}
+		i = Anum_pg_statistic_staop1 - 1;
 		for (k = 0; k < STATISTIC_NUM_SLOTS; k++)
 		{
 			values[i++] = ObjectIdGetDatum(stats->staop[k]);	/* staopN */
 		}
+		i = Anum_pg_statistic_stanumbers1 - 1;
 		for (k = 0; k < STATISTIC_NUM_SLOTS; k++)
 		{
 			int			nnum = stats->numnumbers[k];
@@ -1638,6 +1637,7 @@ update_attstats(Oid relid, bool inh, int natts, VacAttrStats **vacattrstats)
 				values[i++] = (Datum) 0;
 			}
 		}
+		i = Anum_pg_statistic_stavalues1 - 1;
 		for (k = 0; k < STATISTIC_NUM_SLOTS; k++)
 		{
 			if (stats->numvalues[k] > 0)
@@ -1974,7 +1974,10 @@ compute_minimal_stats(VacAttrStatsP stats,
 		firstcount1 = track_cnt;
 		for (j = 0; j < track_cnt; j++)
 		{
-			if (DatumGetBool(FunctionCall2(&f_cmpeq, value, track[j].value)))
+			/* We always use the default collation for statistics */
+			if (DatumGetBool(FunctionCall2Coll(&f_cmpeq,
+											   DEFAULT_COLLATION_OID,
+											   value, track[j].value)))
 			{
 				match = true;
 				break;
@@ -2704,14 +2707,16 @@ compute_scalar_stats(VacAttrStatsP stats,
 static int
 compare_scalars(const void *a, const void *b, void *arg)
 {
-	Datum		da = ((ScalarItem *) a)->value;
-	int			ta = ((ScalarItem *) a)->tupno;
-	Datum		db = ((ScalarItem *) b)->value;
-	int			tb = ((ScalarItem *) b)->tupno;
+	Datum		da = ((const ScalarItem *) a)->value;
+	int			ta = ((const ScalarItem *) a)->tupno;
+	Datum		db = ((const ScalarItem *) b)->value;
+	int			tb = ((const ScalarItem *) b)->tupno;
 	CompareScalarsContext *cxt = (CompareScalarsContext *) arg;
 	int32		compare;
 
+	/* We always use the default collation for statistics */
 	compare = ApplySortFunction(cxt->cmpFn, cxt->cmpFlags,
+								DEFAULT_COLLATION_OID,
 								da, false, db, false);
 	if (compare != 0)
 		return compare;
@@ -2736,8 +2741,8 @@ compare_scalars(const void *a, const void *b, void *arg)
 static int
 compare_mcvs(const void *a, const void *b)
 {
-	int			da = ((ScalarMCVItem *) a)->first;
-	int			db = ((ScalarMCVItem *) b)->first;
+	int			da = ((const ScalarMCVItem *) a)->first;
+	int			db = ((const ScalarMCVItem *) b)->first;
 
 	return da - db;
 }

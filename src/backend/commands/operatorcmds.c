@@ -37,9 +37,7 @@
 #include "access/heapam.h"
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
-#include "catalog/namespace.h"
 #include "catalog/pg_operator.h"
-#include "catalog/pg_namespace.h"
 #include "catalog/pg_type.h"
 #include "commands/alter.h"
 #include "commands/defrem.h"
@@ -47,7 +45,6 @@
 #include "parser/parse_func.h"
 #include "parser/parse_oper.h"
 #include "parser/parse_type.h"
-#include "utils/acl.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
@@ -464,7 +461,8 @@ AlterOperatorNamespace(List *names, List *argtypes, const char *newschema)
 	List	   *operatorName = names;
 	TypeName   *typeName1 = (TypeName *) linitial(argtypes);
 	TypeName   *typeName2 = (TypeName *) lsecond(argtypes);
-	Oid			operOid, nspOid;
+	Oid			operOid,
+				nspOid;
 	Relation	rel;
 
 	rel = heap_open(OperatorRelationId, RowExclusiveLock);
@@ -477,12 +475,32 @@ AlterOperatorNamespace(List *names, List *argtypes, const char *newschema)
 	/* get schema OID */
 	nspOid = LookupCreationNamespace(newschema);
 
-	AlterObjectNamespace(rel, OPEROID, OperatorRelationId, operOid, nspOid,
+	AlterObjectNamespace(rel, OPEROID, -1,
+						 operOid, nspOid,
 						 Anum_pg_operator_oprname,
 						 Anum_pg_operator_oprnamespace,
 						 Anum_pg_operator_oprowner,
-						 ACL_KIND_OPER,
-						 false);
+						 ACL_KIND_OPER);
 
-	heap_close(rel, NoLock);
+	heap_close(rel, RowExclusiveLock);
+}
+
+Oid
+AlterOperatorNamespace_oid(Oid operOid, Oid newNspOid)
+{
+	Oid			oldNspOid;
+	Relation	rel;
+
+	rel = heap_open(OperatorRelationId, RowExclusiveLock);
+
+	oldNspOid = AlterObjectNamespace(rel, OPEROID, -1,
+									 operOid, newNspOid,
+									 Anum_pg_operator_oprname,
+									 Anum_pg_operator_oprnamespace,
+									 Anum_pg_operator_oprowner,
+									 ACL_KIND_OPER);
+
+	heap_close(rel, RowExclusiveLock);
+
+	return oldNspOid;
 }

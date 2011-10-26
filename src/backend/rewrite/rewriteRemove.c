@@ -19,6 +19,7 @@
 #include "access/sysattr.h"
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
+#include "catalog/namespace.h"
 #include "catalog/pg_rewrite.h"
 #include "miscadmin.h"
 #include "rewrite/rewriteRemove.h"
@@ -26,7 +27,6 @@
 #include "utils/fmgroids.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
-#include "utils/rel.h"
 #include "utils/syscache.h"
 #include "utils/tqual.h"
 
@@ -37,12 +37,17 @@
  * Delete a rule given its name.
  */
 void
-RemoveRewriteRule(Oid owningRel, const char *ruleName, DropBehavior behavior,
-				  bool missing_ok)
+RemoveRewriteRule(RangeVar *relation, const char *ruleName,
+				  DropBehavior behavior, bool missing_ok)
 {
 	HeapTuple	tuple;
 	Oid			eventRelationOid;
+	Oid			owningRel;
 	ObjectAddress object;
+
+	/* lock level should match RemoveRewriteRuleById */
+	owningRel = RangeVarGetRelid(relation, AccessExclusiveLock,
+								 false, false);
 
 	/*
 	 * Find the tuple for the target rule.

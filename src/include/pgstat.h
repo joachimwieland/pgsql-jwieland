@@ -11,11 +11,12 @@
 #ifndef PGSTAT_H
 #define PGSTAT_H
 
+#include "datatype/timestamp.h"
+#include "fmgr.h"
 #include "libpq/pqcomm.h"
 #include "portability/instr_time.h"
 #include "utils/hsearch.h"
 #include "utils/relcache.h"
-#include "utils/timestamp.h"
 
 
 /* Values for track_functions GUC variable --- order is significant! */
@@ -24,7 +25,7 @@ typedef enum TrackFunctionsLevel
 	TRACK_FUNC_OFF,
 	TRACK_FUNC_PL,
 	TRACK_FUNC_ALL
-} TrackFunctionsLevel;
+}	TrackFunctionsLevel;
 
 /* ----------
  * The types of backend -> collector messages
@@ -322,7 +323,6 @@ typedef struct PgStat_MsgVacuum
 	PgStat_MsgHdr m_hdr;
 	Oid			m_databaseid;
 	Oid			m_tableoid;
-	bool		m_adopt_counts;
 	bool		m_autovacuum;
 	TimestampTz m_vacuumtime;
 	PgStat_Counter m_tuples;
@@ -339,7 +339,6 @@ typedef struct PgStat_MsgAnalyze
 	PgStat_MsgHdr m_hdr;
 	Oid			m_databaseid;
 	Oid			m_tableoid;
-	bool		m_adopt_counts;
 	bool		m_autovacuum;
 	TimestampTz m_analyzetime;
 	PgStat_Counter m_live_tuples;
@@ -484,7 +483,7 @@ typedef union PgStat_Msg
  * ------------------------------------------------------------
  */
 
-#define PGSTAT_FILE_FORMAT_ID	0x01A5BC98
+#define PGSTAT_FILE_FORMAT_ID	0x01A5BC99
 
 /* ----------
  * PgStat_StatDBEntry			The collector's data per database
@@ -508,6 +507,7 @@ typedef struct PgStat_StatDBEntry
 	PgStat_Counter n_conflict_snapshot;
 	PgStat_Counter n_conflict_bufferpin;
 	PgStat_Counter n_conflict_startup_deadlock;
+	TimestampTz stat_reset_timestamp;
 
 
 	/*
@@ -584,6 +584,7 @@ typedef struct PgStat_GlobalStats
 	PgStat_Counter buf_written_backend;
 	PgStat_Counter buf_fsync_backend;
 	PgStat_Counter buf_alloc;
+	TimestampTz stat_reset_timestamp;
 } PgStat_GlobalStats;
 
 
@@ -626,6 +627,7 @@ typedef struct PgBackendStatus
 	Oid			st_databaseid;
 	Oid			st_userid;
 	SockAddr	st_clientaddr;
+	char	   *st_clienthostname;		/* MUST be null-terminated */
 
 	/* Is backend currently waiting on an lmgr lock? */
 	bool		st_waiting;
@@ -703,9 +705,9 @@ extern void pgstat_reset_shared_counters(const char *);
 extern void pgstat_reset_single_counter(Oid objectid, PgStat_Single_Reset_Type type);
 
 extern void pgstat_report_autovac(Oid dboid);
-extern void pgstat_report_vacuum(Oid tableoid, bool shared, bool adopt_counts,
+extern void pgstat_report_vacuum(Oid tableoid, bool shared,
 					 PgStat_Counter tuples);
-extern void pgstat_report_analyze(Relation rel, bool adopt_counts,
+extern void pgstat_report_analyze(Relation rel,
 					  PgStat_Counter livetuples, PgStat_Counter deadtuples);
 
 extern void pgstat_report_recovery_conflict(int reason);
@@ -718,6 +720,8 @@ extern void pgstat_report_appname(const char *appname);
 extern void pgstat_report_xact_timestamp(TimestampTz tstamp);
 extern void pgstat_report_waiting(bool waiting);
 extern const char *pgstat_get_backend_current_activity(int pid, bool checkUser);
+extern const char *pgstat_get_crashed_backend_activity(int pid, char *buffer,
+									int buflen);
 
 extern PgStat_TableStatus *find_tabstat_entry(Oid rel_id);
 extern PgStat_BackendFunctionEntry *find_funcstat_entry(Oid func_id);

@@ -17,7 +17,6 @@
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/tlist.h"
-#include "optimizer/var.h"
 
 
 /*****************************************************************************
@@ -76,9 +75,8 @@ tlist_member_ignore_relabel(Node *node, List *targetlist)
  * flatten_tlist
  *	  Create a target list that only contains unique variables.
  *
- * Note that Vars with varlevelsup > 0 are not included in the output
- * tlist.  We expect that those will eventually be replaced with Params,
- * but that probably has not happened at the time this routine is called.
+ * Aggrefs and PlaceHolderVars in the input are treated according to
+ * aggbehavior and phbehavior, for which see pull_var_clause().
  *
  * 'tlist' is the current target list
  *
@@ -88,10 +86,12 @@ tlist_member_ignore_relabel(Node *node, List *targetlist)
  * Copying the Var nodes is probably overkill, but be safe for now.
  */
 List *
-flatten_tlist(List *tlist)
+flatten_tlist(List *tlist, PVCAggregateBehavior aggbehavior,
+			  PVCPlaceHolderBehavior phbehavior)
 {
 	List	   *vlist = pull_var_clause((Node *) tlist,
-										PVC_INCLUDE_PLACEHOLDERS);
+										aggbehavior,
+										phbehavior);
 	List	   *new_tlist;
 
 	new_tlist = add_to_flat_tlist(NIL, vlist);
@@ -192,6 +192,40 @@ tlist_same_datatypes(List *tlist, List *colTypes, bool junkOK)
 	}
 	if (curColType != NULL)
 		return false;			/* tlist shorter than colTypes */
+	return true;
+}
+
+/*
+ * Does tlist have same exposed collations as listed in colCollations?
+ *
+ * Identical logic to the above, but for collations.
+ */
+bool
+tlist_same_collations(List *tlist, List *colCollations, bool junkOK)
+{
+	ListCell   *l;
+	ListCell   *curColColl = list_head(colCollations);
+
+	foreach(l, tlist)
+	{
+		TargetEntry *tle = (TargetEntry *) lfirst(l);
+
+		if (tle->resjunk)
+		{
+			if (!junkOK)
+				return false;
+		}
+		else
+		{
+			if (curColColl == NULL)
+				return false;	/* tlist longer than colCollations */
+			if (exprCollation((Node *) tle->expr) != lfirst_oid(curColColl))
+				return false;
+			curColColl = lnext(curColColl);
+		}
+	}
+	if (curColColl != NULL)
+		return false;			/* tlist shorter than colCollations */
 	return true;
 }
 

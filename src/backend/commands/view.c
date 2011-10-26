@@ -97,10 +97,10 @@ isViewOnTempTable_walker(Node *node, void *context)
  *---------------------------------------------------------------------
  */
 static Oid
-DefineVirtualRelation(const RangeVar *relation, List *tlist, bool replace)
+DefineVirtualRelation(const RangeVar *relation, List *tlist, bool replace,
+					  Oid namespaceId)
 {
-	Oid			viewOid,
-				namespaceId;
+	Oid			viewOid;
 	CreateStmt *createStmt = makeNode(CreateStmt);
 	List	   *attrList;
 	ListCell   *t;
@@ -124,9 +124,28 @@ DefineVirtualRelation(const RangeVar *relation, List *tlist, bool replace)
 			def->inhcount = 0;
 			def->is_local = true;
 			def->is_not_null = false;
+			def->is_from_type = false;
 			def->storage = 0;
 			def->raw_default = NULL;
 			def->cooked_default = NULL;
+			def->collClause = NULL;
+			def->collOid = exprCollation((Node *) tle->expr);
+
+			/*
+			 * It's possible that the column is of a collatable type but the
+			 * collation could not be resolved, so double-check.
+			 */
+			if (type_is_collatable(exprType((Node *) tle->expr)))
+			{
+				if (!OidIsValid(def->collOid))
+					ereport(ERROR,
+							(errcode(ERRCODE_INDETERMINATE_COLLATION),
+							 errmsg("could not determine which collation to use for view column \"%s\"",
+									def->colname),
+							 errhint("Use the COLLATE clause to set the collation explicitly.")));
+			}
+			else
+				Assert(!OidIsValid(def->collOid));
 			def->constraints = NIL;
 
 			attrList = lappend(attrList, def);
@@ -141,7 +160,6 @@ DefineVirtualRelation(const RangeVar *relation, List *tlist, bool replace)
 	/*
 	 * Check to see if we want to replace an existing view.
 	 */
-	namespaceId = RangeVarGetCreationNamespace(relation);
 	viewOid = get_relname_relid(relation->relname, namespaceId);
 
 	if (OidIsValid(viewOid) && replace)
@@ -222,7 +240,7 @@ DefineVirtualRelation(const RangeVar *relation, List *tlist, bool replace)
 	}
 	else
 	{
-		Oid		relid;
+		Oid			relid;
 
 		/*
 		 * now set the parameters for keys/inheritance etc. All of these are
@@ -398,6 +416,7 @@ DefineView(ViewStmt *stmt, const char *queryString)
 {
 	Query	   *viewParse;
 	Oid			viewOid;
+	Oid			namespaceId;
 	RangeVar   *view;
 
 	/*
@@ -416,6 +435,20 @@ DefineView(ViewStmt *stmt, const char *queryString)
 	if (!IsA(viewParse, Query) ||
 		viewParse->commandType != CMD_SELECT)
 		elog(ERROR, "unexpected parse analysis result");
+
+	/*
+	 * Check for unsupported cases.  These tests are redundant with ones in
+	 * DefineQueryRewrite(), but that function will complain about a bogus ON
+	 * SELECT rule, and we'd rather the message complain about a view.
+	 */
+	if (viewParse->intoClause != NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("views must not contain SELECT INTO")));
+	if (viewParse->hasModifyingCTE)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+		errmsg("views must not contain data-modifying statements in WITH")));
 
 	/*
 	 * If a list of column names was given, run through and insert these into
@@ -447,22 +480,31 @@ DefineView(ViewStmt *stmt, const char *queryString)
 							"names than columns")));
 	}
 
+	/* Unlogged views are not sensible. */
+	if (stmt->view->relpersistence == RELPERSISTENCE_UNLOGGED)
+		ereport(ERROR,
+				(errcode(ERRCODE_SYNTAX_ERROR),
+		errmsg("views cannot be unlogged because they do not have storage")));
+
 	/*
 	 * If the user didn't explicitly ask for a temporary view, check whether
 	 * we need one implicitly.	We allow TEMP to be inserted automatically as
 	 * long as the CREATE command is consistent with that --- no explicit
 	 * schema name.
 	 */
-	view = stmt->view;
+	view = copyObject(stmt->view);  /* don't corrupt original command */
 	if (view->relpersistence == RELPERSISTENCE_PERMANENT
 		&& isViewOnTempTable(viewParse))
 	{
-		view = copyObject(view);	/* don't corrupt original command */
 		view->relpersistence = RELPERSISTENCE_TEMP;
 		ereport(NOTICE,
 				(errmsg("view \"%s\" will be a temporary view",
 						view->relname)));
 	}
+
+	/* Might also need to make it temporary if placed in temp schema. */
+	namespaceId = RangeVarGetCreationNamespace(view);
+	RangeVarAdjustRelationPersistence(view, namespaceId);
 
 	/*
 	 * Create the view relation
@@ -471,7 +513,7 @@ DefineView(ViewStmt *stmt, const char *queryString)
 	 * aborted.
 	 */
 	viewOid = DefineVirtualRelation(view, viewParse->targetList,
-									stmt->replace);
+									stmt->replace, namespaceId);
 
 	/*
 	 * The relation we have just created is not visible to any other commands

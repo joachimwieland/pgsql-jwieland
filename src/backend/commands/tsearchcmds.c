@@ -22,7 +22,6 @@
 #include "access/xact.h"
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
-#include "catalog/namespace.h"
 #include "catalog/objectaccess.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_proc.h"
@@ -38,11 +37,8 @@
 #include "nodes/makefuncs.h"
 #include "parser/parse_func.h"
 #include "tsearch/ts_cache.h"
-#include "tsearch/ts_public.h"
 #include "tsearch/ts_utils.h"
-#include "utils/acl.h"
 #include "utils/builtins.h"
-#include "utils/catcache.h"
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
@@ -96,6 +92,12 @@ get_ts_parser_func(DefElem *defel, int attnum)
 			break;
 		case Anum_pg_ts_parser_prslextype:
 			nargs = 1;
+
+			/*
+			 * Note: because the lextype method returns type internal, it must
+			 * have an internal-type argument for security reasons.  The
+			 * argument is not actually used, but is just passed as a zero.
+			 */
 			break;
 		default:
 			/* should not be here */
@@ -134,6 +136,9 @@ makeParserDependencies(HeapTuple tuple)
 	referenced.objectId = prs->prsnamespace;
 	referenced.objectSubId = 0;
 	recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
+
+	/* dependency on extension */
+	recordDependencyOnCurrentExtension(&myself, false);
 
 	/* dependencies on functions */
 	referenced.classId = ProcedureRelationId;
@@ -274,65 +279,6 @@ DefineTSParser(List *names, List *parameters)
 }
 
 /*
- * DROP TEXT SEARCH PARSER
- */
-void
-RemoveTSParsers(DropStmt *drop)
-{
-	ObjectAddresses *objects;
-	ListCell   *cell;
-
-	if (!superuser())
-		ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("must be superuser to drop text search parsers")));
-
-	/*
-	 * First we identify all the objects, then we delete them in a single
-	 * performMultipleDeletions() call.  This is to avoid unwanted DROP
-	 * RESTRICT errors if one of the objects depends on another.
-	 */
-	objects = new_object_addresses();
-
-	foreach(cell, drop->objects)
-	{
-		List	   *names = (List *) lfirst(cell);
-		Oid			prsOid;
-		ObjectAddress object;
-
-		prsOid = get_ts_parser_oid(names, true);
-
-		if (!OidIsValid(prsOid))
-		{
-			if (!drop->missing_ok)
-			{
-				ereport(ERROR,
-						(errcode(ERRCODE_UNDEFINED_OBJECT),
-						 errmsg("text search parser \"%s\" does not exist",
-								NameListToString(names))));
-			}
-			else
-			{
-				ereport(NOTICE,
-				(errmsg("text search parser \"%s\" does not exist, skipping",
-						NameListToString(names))));
-			}
-			continue;
-		}
-
-		object.classId = TSParserRelationId;
-		object.objectId = prsOid;
-		object.objectSubId = 0;
-
-		add_exact_object_address(&object, objects);
-	}
-
-	performMultipleDeletions(objects, drop->behavior);
-
-	free_object_addresses(objects);
-}
-
-/*
  * Guts of TS parser deletion.
  */
 void
@@ -404,7 +350,8 @@ RenameTSParser(List *oldname, const char *newname)
 void
 AlterTSParserNamespace(List *name, const char *newschema)
 {
-	Oid			prsId, nspOid;
+	Oid			prsId,
+				nspOid;
 	Relation	rel;
 
 	rel = heap_open(TSParserRelationId, RowExclusiveLock);
@@ -414,12 +361,33 @@ AlterTSParserNamespace(List *name, const char *newschema)
 	/* get schema OID */
 	nspOid = LookupCreationNamespace(newschema);
 
-	AlterObjectNamespace(rel, TSPARSEROID, TSParserRelationId, prsId, nspOid,
+	AlterObjectNamespace(rel, TSPARSEROID, TSPARSERNAMENSP,
+						 prsId, nspOid,
 						 Anum_pg_ts_parser_prsname,
 						 Anum_pg_ts_parser_prsnamespace,
-						 -1, -1, true);
+						 -1, -1);
 
-	heap_close(rel, NoLock);
+	heap_close(rel, RowExclusiveLock);
+}
+
+Oid
+AlterTSParserNamespace_oid(Oid prsId, Oid newNspOid)
+{
+	Oid			oldNspOid;
+	Relation	rel;
+
+	rel = heap_open(TSParserRelationId, RowExclusiveLock);
+
+	oldNspOid =
+		AlterObjectNamespace(rel, TSPARSEROID, TSPARSERNAMENSP,
+							 prsId, newNspOid,
+							 Anum_pg_ts_parser_prsname,
+							 Anum_pg_ts_parser_prsnamespace,
+							 -1, -1);
+
+	heap_close(rel, RowExclusiveLock);
+
+	return oldNspOid;
 }
 
 /* ---------------------- TS Dictionary commands -----------------------*/
@@ -446,6 +414,9 @@ makeDictionaryDependencies(HeapTuple tuple)
 
 	/* dependency on owner */
 	recordDependencyOnOwner(myself.classId, myself.objectId, dict->dictowner);
+
+	/* dependency on extension */
+	recordDependencyOnCurrentExtension(&myself, false);
 
 	/* dependency on template */
 	referenced.classId = TSTemplateRelationId;
@@ -658,7 +629,8 @@ RenameTSDictionary(List *oldname, const char *newname)
 void
 AlterTSDictionaryNamespace(List *name, const char *newschema)
 {
-	Oid			dictId, nspOid;
+	Oid			dictId,
+				nspOid;
 	Relation	rel;
 
 	rel = heap_open(TSDictionaryRelationId, RowExclusiveLock);
@@ -668,84 +640,35 @@ AlterTSDictionaryNamespace(List *name, const char *newschema)
 	/* get schema OID */
 	nspOid = LookupCreationNamespace(newschema);
 
-	AlterObjectNamespace(rel, TSDICTOID, TSDictionaryRelationId, dictId, nspOid,
+	AlterObjectNamespace(rel, TSDICTOID, TSDICTNAMENSP,
+						 dictId, nspOid,
 						 Anum_pg_ts_dict_dictname,
 						 Anum_pg_ts_dict_dictnamespace,
 						 Anum_pg_ts_dict_dictowner,
-						 ACL_KIND_TSDICTIONARY,
-						 true);
+						 ACL_KIND_TSDICTIONARY);
 
-	heap_close(rel, NoLock);
+	heap_close(rel, RowExclusiveLock);
 }
 
-/*
- * DROP TEXT SEARCH DICTIONARY
- */
-void
-RemoveTSDictionaries(DropStmt *drop)
+Oid
+AlterTSDictionaryNamespace_oid(Oid dictId, Oid newNspOid)
 {
-	ObjectAddresses *objects;
-	ListCell   *cell;
+	Oid			oldNspOid;
+	Relation	rel;
 
-	/*
-	 * First we identify all the objects, then we delete them in a single
-	 * performMultipleDeletions() call.  This is to avoid unwanted DROP
-	 * RESTRICT errors if one of the objects depends on another.
-	 */
-	objects = new_object_addresses();
+	rel = heap_open(TSDictionaryRelationId, RowExclusiveLock);
 
-	foreach(cell, drop->objects)
-	{
-		List	   *names = (List *) lfirst(cell);
-		Oid			dictOid;
-		ObjectAddress object;
-		HeapTuple	tup;
-		Oid			namespaceId;
+	oldNspOid =
+		AlterObjectNamespace(rel, TSDICTOID, TSDICTNAMENSP,
+							 dictId, newNspOid,
+							 Anum_pg_ts_dict_dictname,
+							 Anum_pg_ts_dict_dictnamespace,
+							 Anum_pg_ts_dict_dictowner,
+							 ACL_KIND_TSDICTIONARY);
 
-		dictOid = get_ts_dict_oid(names, true);
+	heap_close(rel, RowExclusiveLock);
 
-		if (!OidIsValid(dictOid))
-		{
-			if (!drop->missing_ok)
-			{
-				ereport(ERROR,
-						(errcode(ERRCODE_UNDEFINED_OBJECT),
-					   errmsg("text search dictionary \"%s\" does not exist",
-							  NameListToString(names))));
-			}
-			else
-			{
-				ereport(NOTICE,
-						(errmsg("text search dictionary \"%s\" does not exist, skipping",
-								NameListToString(names))));
-			}
-			continue;
-		}
-
-		tup = SearchSysCache1(TSDICTOID, ObjectIdGetDatum(dictOid));
-		if (!HeapTupleIsValid(tup))		/* should not happen */
-			elog(ERROR, "cache lookup failed for text search dictionary %u",
-				 dictOid);
-
-		/* Permission check: must own dictionary or its namespace */
-		namespaceId = ((Form_pg_ts_dict) GETSTRUCT(tup))->dictnamespace;
-		if (!pg_ts_dict_ownercheck(dictOid, GetUserId()) &&
-			!pg_namespace_ownercheck(namespaceId, GetUserId()))
-			aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_TSDICTIONARY,
-						   NameListToString(names));
-
-		object.classId = TSDictionaryRelationId;
-		object.objectId = dictOid;
-		object.objectSubId = 0;
-
-		add_exact_object_address(&object, objects);
-
-		ReleaseSysCache(tup);
-	}
-
-	performMultipleDeletions(objects, drop->behavior);
-
-	free_object_addresses(objects);
+	return oldNspOid;
 }
 
 /*
@@ -1012,6 +935,9 @@ makeTSTemplateDependencies(HeapTuple tuple)
 	referenced.objectSubId = 0;
 	recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 
+	/* dependency on extension */
+	recordDependencyOnCurrentExtension(&myself, false);
+
 	/* dependencies on functions */
 	referenced.classId = ProcedureRelationId;
 	referenced.objectSubId = 0;
@@ -1167,7 +1093,8 @@ RenameTSTemplate(List *oldname, const char *newname)
 void
 AlterTSTemplateNamespace(List *name, const char *newschema)
 {
-	Oid			tmplId, nspOid;
+	Oid			tmplId,
+				nspOid;
 	Relation	rel;
 
 	rel = heap_open(TSTemplateRelationId, RowExclusiveLock);
@@ -1177,72 +1104,33 @@ AlterTSTemplateNamespace(List *name, const char *newschema)
 	/* get schema OID */
 	nspOid = LookupCreationNamespace(newschema);
 
-	AlterObjectNamespace(rel, TSTEMPLATEOID, TSTemplateRelationId,
+	AlterObjectNamespace(rel, TSTEMPLATEOID, TSTEMPLATENAMENSP,
 						 tmplId, nspOid,
 						 Anum_pg_ts_template_tmplname,
 						 Anum_pg_ts_template_tmplnamespace,
-						 -1, -1, true);
+						 -1, -1);
 
-	heap_close(rel, NoLock);
+	heap_close(rel, RowExclusiveLock);
 }
 
-/*
- * DROP TEXT SEARCH TEMPLATE
- */
-void
-RemoveTSTemplates(DropStmt *drop)
+Oid
+AlterTSTemplateNamespace_oid(Oid tmplId, Oid newNspOid)
 {
-	ObjectAddresses *objects;
-	ListCell   *cell;
+	Oid			oldNspOid;
+	Relation	rel;
 
-	if (!superuser())
-		ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("must be superuser to drop text search templates")));
+	rel = heap_open(TSTemplateRelationId, RowExclusiveLock);
 
-	/*
-	 * First we identify all the objects, then we delete them in a single
-	 * performMultipleDeletions() call.  This is to avoid unwanted DROP
-	 * RESTRICT errors if one of the objects depends on another.
-	 */
-	objects = new_object_addresses();
+	oldNspOid =
+		AlterObjectNamespace(rel, TSTEMPLATEOID, TSTEMPLATENAMENSP,
+							 tmplId, newNspOid,
+							 Anum_pg_ts_template_tmplname,
+							 Anum_pg_ts_template_tmplnamespace,
+							 -1, -1);
 
-	foreach(cell, drop->objects)
-	{
-		List	   *names = (List *) lfirst(cell);
-		Oid			tmplOid;
-		ObjectAddress object;
+	heap_close(rel, RowExclusiveLock);
 
-		tmplOid = get_ts_template_oid(names, true);
-
-		if (!OidIsValid(tmplOid))
-		{
-			if (!drop->missing_ok)
-			{
-				ereport(ERROR,
-						(errcode(ERRCODE_UNDEFINED_OBJECT),
-						 errmsg("text search template \"%s\" does not exist",
-								NameListToString(names))));
-			}
-			else
-			{
-				ereport(NOTICE,
-						(errmsg("text search template \"%s\" does not exist, skipping",
-								NameListToString(names))));
-			}
-			continue;
-		}
-
-		object.classId = TSTemplateRelationId;
-		object.objectId = tmplOid;
-		object.objectSubId = 0;
-
-		add_exact_object_address(&object, objects);
-	}
-
-	performMultipleDeletions(objects, drop->behavior);
-
-	free_object_addresses(objects);
+	return oldNspOid;
 }
 
 /*
@@ -1313,10 +1201,10 @@ makeConfigurationDependencies(HeapTuple tuple, bool removeOld,
 	myself.objectId = HeapTupleGetOid(tuple);
 	myself.objectSubId = 0;
 
-	/* for ALTER case, first flush old dependencies */
+	/* for ALTER case, first flush old dependencies, except extension deps */
 	if (removeOld)
 	{
-		deleteDependencyRecordsFor(myself.classId, myself.objectId);
+		deleteDependencyRecordsFor(myself.classId, myself.objectId, true);
 		deleteSharedDependencyRecordsFor(myself.classId, myself.objectId, 0);
 	}
 
@@ -1335,6 +1223,9 @@ makeConfigurationDependencies(HeapTuple tuple, bool removeOld,
 
 	/* dependency on owner */
 	recordDependencyOnOwner(myself.classId, myself.objectId, cfg->cfgowner);
+
+	/* dependency on extension */
+	recordDependencyOnCurrentExtension(&myself, removeOld);
 
 	/* dependency on parser */
 	referenced.classId = TSParserRelationId;
@@ -1593,7 +1484,8 @@ RenameTSConfiguration(List *oldname, const char *newname)
 void
 AlterTSConfigurationNamespace(List *name, const char *newschema)
 {
-	Oid			cfgId, nspOid;
+	Oid			cfgId,
+				nspOid;
 	Relation	rel;
 
 	rel = heap_open(TSConfigRelationId, RowExclusiveLock);
@@ -1603,80 +1495,35 @@ AlterTSConfigurationNamespace(List *name, const char *newschema)
 	/* get schema OID */
 	nspOid = LookupCreationNamespace(newschema);
 
-	AlterObjectNamespace(rel, TSCONFIGOID, TSConfigRelationId, cfgId, nspOid,
+	AlterObjectNamespace(rel, TSCONFIGOID, TSCONFIGNAMENSP,
+						 cfgId, nspOid,
 						 Anum_pg_ts_config_cfgname,
 						 Anum_pg_ts_config_cfgnamespace,
 						 Anum_pg_ts_config_cfgowner,
-						 ACL_KIND_TSCONFIGURATION,
-						 false);
+						 ACL_KIND_TSCONFIGURATION);
 
-	heap_close(rel, NoLock);
+	heap_close(rel, RowExclusiveLock);
 }
 
-/*
- * DROP TEXT SEARCH CONFIGURATION
- */
-void
-RemoveTSConfigurations(DropStmt *drop)
+Oid
+AlterTSConfigurationNamespace_oid(Oid cfgId, Oid newNspOid)
 {
-	ObjectAddresses *objects;
-	ListCell   *cell;
+	Oid			oldNspOid;
+	Relation	rel;
 
-	/*
-	 * First we identify all the objects, then we delete them in a single
-	 * performMultipleDeletions() call.  This is to avoid unwanted DROP
-	 * RESTRICT errors if one of the objects depends on another.
-	 */
-	objects = new_object_addresses();
+	rel = heap_open(TSConfigRelationId, RowExclusiveLock);
 
-	foreach(cell, drop->objects)
-	{
-		List	   *names = (List *) lfirst(cell);
-		Oid			cfgOid;
-		Oid			namespaceId;
-		ObjectAddress object;
-		HeapTuple	tup;
+	oldNspOid =
+		AlterObjectNamespace(rel, TSCONFIGOID, TSCONFIGNAMENSP,
+							 cfgId, newNspOid,
+							 Anum_pg_ts_config_cfgname,
+							 Anum_pg_ts_config_cfgnamespace,
+							 Anum_pg_ts_config_cfgowner,
+							 ACL_KIND_TSCONFIGURATION);
 
-		tup = GetTSConfigTuple(names);
+	heap_close(rel, RowExclusiveLock);
 
-		if (!HeapTupleIsValid(tup))
-		{
-			if (!drop->missing_ok)
-			{
-				ereport(ERROR,
-						(errcode(ERRCODE_UNDEFINED_OBJECT),
-					errmsg("text search configuration \"%s\" does not exist",
-						   NameListToString(names))));
-			}
-			else
-			{
-				ereport(NOTICE,
-						(errmsg("text search configuration \"%s\" does not exist, skipping",
-								NameListToString(names))));
-			}
-			continue;
-		}
-
-		/* Permission check: must own configuration or its namespace */
-		cfgOid = HeapTupleGetOid(tup);
-		namespaceId = ((Form_pg_ts_config) GETSTRUCT(tup))->cfgnamespace;
-		if (!pg_ts_config_ownercheck(cfgOid, GetUserId()) &&
-			!pg_namespace_ownercheck(namespaceId, GetUserId()))
-			aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_TSCONFIGURATION,
-						   NameListToString(names));
-
-		object.classId = TSConfigRelationId;
-		object.objectId = cfgOid;
-		object.objectSubId = 0;
-
-		add_exact_object_address(&object, objects);
-
-		ReleaseSysCache(tup);
-	}
-
-	performMultipleDeletions(objects, drop->behavior);
-
-	free_object_addresses(objects);
+	return oldNspOid;
 }
 
 /*
@@ -1847,7 +1694,7 @@ getTokenTypes(Oid prsId, List *tokennames)
 		elog(ERROR, "method lextype isn't defined for text search parser %u",
 			 prsId);
 
-	/* OidFunctionCall0 is absent */
+	/* lextype takes one dummy argument */
 	list = (LexDescr *) DatumGetPointer(OidFunctionCall1(prs->lextypeOid,
 														 (Datum) 0));
 
@@ -2056,14 +1903,12 @@ DropConfigurationMapping(AlterTSConfigurationStmt *stmt,
 	HeapTuple	maptup;
 	int			i;
 	Oid			prsId;
-	int		   *tokens,
-				ntoken;
+	int		   *tokens;
 	ListCell   *c;
 
 	prsId = ((Form_pg_ts_config) GETSTRUCT(tup))->cfgparser;
 
 	tokens = getTokenTypes(prsId, stmt->tokentype);
-	ntoken = list_length(stmt->tokentype);
 
 	i = 0;
 	foreach(c, stmt->tokentype)

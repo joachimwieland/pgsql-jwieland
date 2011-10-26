@@ -78,7 +78,7 @@ PostgreSQL documentation
 
      <varlistentry>
       <term><option>-c <replaceable class="parameter">number</replaceable></></term>
-      <term><option>--connection-limit <replaceable class="parameter">number</replaceable></></term>
+      <term><option>--connection-limit=<replaceable class="parameter">number</replaceable></></term>
       <listitem>
        <para>
         Set a maximum number of connections for the new user.
@@ -241,6 +241,28 @@ PostgreSQL documentation
      </varlistentry>
 
      <varlistentry>
+      <term><option>--replication</></term>
+      <listitem>
+       <para>
+        The new user will have the REPLICATION privilege, which is
+        described more fully in the documentation for 
+        <xref linkend="sql-createrole">.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><option>--no-replication</></term>
+      <listitem>
+       <para>
+        The new user will not have the REPLICATION privilege, which is
+        described more fully in the documentation for 
+        <xref linkend="sql-createrole">.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
        <term><option>-V</></term>
        <term><option>--version</></term>
        <listitem>
@@ -276,7 +298,7 @@ PostgreSQL documentation
    <variablelist>
      <varlistentry>
       <term><option>-h <replaceable class="parameter">host</replaceable></></term>
-      <term><option>--host <replaceable class="parameter">host</replaceable></></term>
+      <term><option>--host=<replaceable class="parameter">host</replaceable></></term>
       <listitem>
        <para>
         Specifies the host name of the machine on which the
@@ -289,7 +311,7 @@ PostgreSQL documentation
 
      <varlistentry>
       <term><option>-p <replaceable class="parameter">port</replaceable></></term>
-      <term><option>--port <replaceable class="parameter">port</replaceable></></term>
+      <term><option>--port=<replaceable class="parameter">port</replaceable></></term>
       <listitem>
        <para>
         Specifies the TCP port or local Unix domain socket file
@@ -301,7 +323,7 @@ PostgreSQL documentation
 
      <varlistentry>
       <term><option>-U <replaceable class="parameter">username</replaceable></></term>
-      <term><option>--username <replaceable class="parameter">username</replaceable></></term>
+      <term><option>--username=<replaceable class="parameter">username</replaceable></></term>
       <listitem>
        <para>
         User name to connect as (not the user name to create).

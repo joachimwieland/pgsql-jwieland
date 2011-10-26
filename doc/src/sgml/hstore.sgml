@@ -1,6 +1,6 @@
 <!-- doc/src/sgml/hstore.sgml -->
 
-<sect1 id="hstore">
+<sect1 id="hstore" xreflabel="hstore">
  <title>hstore</title>
 
  <indexterm zone="hstore">
@@ -84,6 +84,12 @@ key =&gt; NULL
 
  <sect2>
   <title><type>hstore</> Operators and Functions</title>
+
+  <para>
+   The operators provided by the <literal>hstore</literal> module are
+   shown in <xref linkend="hstore-op-table">, the functions
+   in <xref linkend="hstore-func-table">.
+  </para>
 
   <table id="hstore-op-table">
    <title><type>hstore</> Operators</title>
@@ -552,12 +558,6 @@ SELECT key, count(*) FROM
 
  <sect2>
   <title>Compatibility</title>
-
-  <para>
-   <emphasis>When upgrading from older versions, always load the new
-   version of this module into the database before restoring a dump.
-   Otherwise, many new features will be unavailable.</emphasis>
-  </para>
 
   <para>
    As of PostgreSQL 9.0, <type>hstore</> uses a different internal

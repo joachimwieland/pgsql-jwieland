@@ -37,20 +37,19 @@
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "replication/walsender.h"
-#include "storage/bufmgr.h"
-#include "storage/fd.h"
+#include "replication/syncrep.h"
 #include "storage/lmgr.h"
+#include "storage/predicate.h"
 #include "storage/procarray.h"
 #include "storage/sinvaladt.h"
 #include "storage/smgr.h"
-#include "storage/standby.h"
 #include "utils/combocid.h"
 #include "utils/guc.h"
 #include "utils/inval.h"
 #include "utils/memutils.h"
-#include "utils/relcache.h"
 #include "utils/relmapper.h"
 #include "utils/snapmgr.h"
+#include "utils/timestamp.h"
 #include "pg_trace.h"
 
 
@@ -63,7 +62,10 @@ int			XactIsoLevel;
 bool		DefaultXactReadOnly = false;
 bool		XactReadOnly;
 
-bool		XactSyncCommit = true;
+bool		DefaultXactDeferrable = false;
+bool		XactDeferrable;
+
+int			synchronous_commit = SYNCHRONOUS_COMMIT_ON;
 
 int			CommitDelay = 0;	/* precommit delay in microseconds */
 int			CommitSiblings = 5; /* # concurrent xacts needed to sleep */
@@ -113,7 +115,8 @@ typedef enum TBlockState
 	/* subtransaction states */
 	TBLOCK_SUBBEGIN,			/* starting a subtransaction */
 	TBLOCK_SUBINPROGRESS,		/* live subtransaction */
-	TBLOCK_SUBEND,				/* RELEASE received */
+	TBLOCK_SUBRELEASE,			/* RELEASE received */
+	TBLOCK_SUBCOMMIT,			/* COMMIT received while TBLOCK_SUBINPROGRESS */
 	TBLOCK_SUBABORT,			/* failed subxact, awaiting ROLLBACK */
 	TBLOCK_SUBABORT_END,		/* failed subxact, ROLLBACK received */
 	TBLOCK_SUBABORT_PENDING,	/* live subxact, ROLLBACK received */
@@ -415,11 +418,11 @@ AssignTransactionId(TransactionState s)
 	 */
 	if (isSubXact && !TransactionIdIsValid(s->parent->transactionId))
 	{
-		TransactionState	p = s->parent;
-		TransactionState   *parents;
-		size_t	parentOffset = 0;
+		TransactionState p = s->parent;
+		TransactionState *parents;
+		size_t		parentOffset = 0;
 
-		parents = palloc(sizeof(TransactionState) *  s->nestingLevel);
+		parents = palloc(sizeof(TransactionState) * s->nestingLevel);
 		while (p != NULL && !TransactionIdIsValid(p->transactionId))
 		{
 			parents[parentOffset++] = p;
@@ -427,8 +430,8 @@ AssignTransactionId(TransactionState s)
 		}
 
 		/*
-		 * This is technically a recursive call, but the recursion will
-		 * never be more than one layer deep.
+		 * This is technically a recursive call, but the recursion will never
+		 * be more than one layer deep.
 		 */
 		while (parentOffset != 0)
 			AssignTransactionId(parents[--parentOffset]);
@@ -448,6 +451,13 @@ AssignTransactionId(TransactionState s)
 
 	if (isSubXact)
 		SubTransSetParent(s->transactionId, s->parent->transactionId, false);
+
+	/*
+	 * If it's a top-level transaction, the predicate locking system needs to
+	 * be told about it too.
+	 */
+	if (!isSubXact)
+		RegisterPredicateLockingXid(s->transactionId);
 
 	/*
 	 * Acquire lock on the transaction XID.  (We assume this cannot block.) We
@@ -950,24 +960,8 @@ RecordTransactionCommit(void)
 		/*
 		 * Begin commit critical section and insert the commit XLOG record.
 		 */
-		XLogRecData rdata[4];
-		int			lastrdata = 0;
-		xl_xact_commit xlrec;
-
 		/* Tell bufmgr and smgr to prepare for commit */
 		BufmgrCommit();
-
-		/*
-		 * Set flags required for recovery processing of commits.
-		 */
-		xlrec.xinfo = 0;
-		if (RelcacheInitFileInval)
-			xlrec.xinfo |= XACT_COMPLETION_UPDATE_RELCACHE_FILE;
-		if (forceSyncCommit)
-			xlrec.xinfo |= XACT_COMPLETION_FORCE_SYNC_COMMIT;
-
-		xlrec.dbId = MyDatabaseId;
-		xlrec.tsId = MyDatabaseTableSpace;
 
 		/*
 		 * Mark ourselves as within our "commit critical section".	This
@@ -990,58 +984,104 @@ RecordTransactionCommit(void)
 		MyProc->inCommit = true;
 
 		SetCurrentTransactionStopTimestamp();
-		xlrec.xact_time = xactStopTimestamp;
-		xlrec.nrels = nrels;
-		xlrec.nsubxacts = nchildren;
-		xlrec.nmsgs = nmsgs;
-		rdata[0].data = (char *) (&xlrec);
-		rdata[0].len = MinSizeOfXactCommit;
-		rdata[0].buffer = InvalidBuffer;
-		/* dump rels to delete */
-		if (nrels > 0)
-		{
-			rdata[0].next = &(rdata[1]);
-			rdata[1].data = (char *) rels;
-			rdata[1].len = nrels * sizeof(RelFileNode);
-			rdata[1].buffer = InvalidBuffer;
-			lastrdata = 1;
-		}
-		/* dump committed child Xids */
-		if (nchildren > 0)
-		{
-			rdata[lastrdata].next = &(rdata[2]);
-			rdata[2].data = (char *) children;
-			rdata[2].len = nchildren * sizeof(TransactionId);
-			rdata[2].buffer = InvalidBuffer;
-			lastrdata = 2;
-		}
-		/* dump shared cache invalidation messages */
-		if (nmsgs > 0)
-		{
-			rdata[lastrdata].next = &(rdata[3]);
-			rdata[3].data = (char *) invalMessages;
-			rdata[3].len = nmsgs * sizeof(SharedInvalidationMessage);
-			rdata[3].buffer = InvalidBuffer;
-			lastrdata = 3;
-		}
-		rdata[lastrdata].next = NULL;
 
-		(void) XLogInsert(RM_XACT_ID, XLOG_XACT_COMMIT, rdata);
+		/*
+		 * Do we need the long commit record? If not, use the compact format.
+		 */
+		if (nrels > 0 || nmsgs > 0 || RelcacheInitFileInval || forceSyncCommit)
+		{
+			XLogRecData rdata[4];
+			int			lastrdata = 0;
+			xl_xact_commit xlrec;
+			/*
+			 * Set flags required for recovery processing of commits.
+			 */
+			xlrec.xinfo = 0;
+			if (RelcacheInitFileInval)
+				xlrec.xinfo |= XACT_COMPLETION_UPDATE_RELCACHE_FILE;
+			if (forceSyncCommit)
+				xlrec.xinfo |= XACT_COMPLETION_FORCE_SYNC_COMMIT;
+
+			xlrec.dbId = MyDatabaseId;
+			xlrec.tsId = MyDatabaseTableSpace;
+
+			xlrec.xact_time = xactStopTimestamp;
+			xlrec.nrels = nrels;
+			xlrec.nsubxacts = nchildren;
+			xlrec.nmsgs = nmsgs;
+			rdata[0].data = (char *) (&xlrec);
+			rdata[0].len = MinSizeOfXactCommit;
+			rdata[0].buffer = InvalidBuffer;
+			/* dump rels to delete */
+			if (nrels > 0)
+			{
+				rdata[0].next = &(rdata[1]);
+				rdata[1].data = (char *) rels;
+				rdata[1].len = nrels * sizeof(RelFileNode);
+				rdata[1].buffer = InvalidBuffer;
+				lastrdata = 1;
+			}
+			/* dump committed child Xids */
+			if (nchildren > 0)
+			{
+				rdata[lastrdata].next = &(rdata[2]);
+				rdata[2].data = (char *) children;
+				rdata[2].len = nchildren * sizeof(TransactionId);
+				rdata[2].buffer = InvalidBuffer;
+				lastrdata = 2;
+			}
+			/* dump shared cache invalidation messages */
+			if (nmsgs > 0)
+			{
+				rdata[lastrdata].next = &(rdata[3]);
+				rdata[3].data = (char *) invalMessages;
+				rdata[3].len = nmsgs * sizeof(SharedInvalidationMessage);
+				rdata[3].buffer = InvalidBuffer;
+				lastrdata = 3;
+			}
+			rdata[lastrdata].next = NULL;
+
+			(void) XLogInsert(RM_XACT_ID, XLOG_XACT_COMMIT, rdata);
+		}
+		else
+		{
+			XLogRecData rdata[2];
+			int			lastrdata = 0;
+			xl_xact_commit_compact	xlrec;
+			xlrec.xact_time = xactStopTimestamp;
+			xlrec.nsubxacts = nchildren;
+			rdata[0].data = (char *) (&xlrec);
+			rdata[0].len = MinSizeOfXactCommitCompact;
+			rdata[0].buffer = InvalidBuffer;
+			/* dump committed child Xids */
+			if (nchildren > 0)
+			{
+				rdata[0].next = &(rdata[1]);
+				rdata[1].data = (char *) children;
+				rdata[1].len = nchildren * sizeof(TransactionId);
+				rdata[1].buffer = InvalidBuffer;
+				lastrdata = 1;
+			}
+			rdata[lastrdata].next = NULL;
+
+			(void) XLogInsert(RM_XACT_ID, XLOG_XACT_COMMIT_COMPACT, rdata);
+		}
 	}
 
 	/*
 	 * Check if we want to commit asynchronously.  We can allow the XLOG flush
 	 * to happen asynchronously if synchronous_commit=off, or if the current
-	 * transaction has not performed any WAL-logged operation.  The latter case
-	 * can arise if the current transaction wrote only to temporary and/or
-	 * unlogged tables.  In case of a crash, the loss of such a transaction
-	 * will be irrelevant since temp tables will be lost anyway, and unlogged
-	 * tables will be truncated.  (Given the foregoing, you might think that it
-	 * would be unnecessary to emit the XLOG record at all in this case, but we
-	 * don't currently try to do that.  It would certainly cause problems at
-	 * least in Hot Standby mode, where the KnownAssignedXids machinery
-	 * requires tracking every XID assignment.  It might be OK to skip it only
-	 * when wal_level < hot_standby, but for now we don't.)
+	 * transaction has not performed any WAL-logged operation.	The latter
+	 * case can arise if the current transaction wrote only to temporary
+	 * and/or unlogged tables.	In case of a crash, the loss of such a
+	 * transaction will be irrelevant since temp tables will be lost anyway,
+	 * and unlogged tables will be truncated.  (Given the foregoing, you might
+	 * think that it would be unnecessary to emit the XLOG record at all in
+	 * this case, but we don't currently try to do that.  It would certainly
+	 * cause problems at least in Hot Standby mode, where the
+	 * KnownAssignedXids machinery requires tracking every XID assignment.	It
+	 * might be OK to skip it only when wal_level < hot_standby, but for now
+	 * we don't.)
 	 *
 	 * However, if we're doing cleanup of any non-temp rels or committing any
 	 * command that wanted to force sync commit, then we must flush XLOG
@@ -1051,7 +1091,8 @@ RecordTransactionCommit(void)
 	 * if all to-be-deleted tables are temporary though, since they are lost
 	 * anyway if we crash.)
 	 */
-	if ((wrote_xlog && XactSyncCommit) || forceSyncCommit || nrels > 0)
+	if ((wrote_xlog && synchronous_commit > SYNCHRONOUS_COMMIT_OFF) ||
+		forceSyncCommit || nrels > 0)
 	{
 		/*
 		 * Synchronous commit case:
@@ -1120,6 +1161,14 @@ RecordTransactionCommit(void)
 
 	/* Compute latestXid while we have the child XIDs handy */
 	latestXid = TransactionIdLatest(xid, nchildren, children);
+
+	/*
+	 * Wait for synchronous replication, if required.
+	 *
+	 * Note that at this stage we have marked clog, but still show as running
+	 * in the procarray and continue to hold locks.
+	 */
+	SyncRepWaitForLSN(XactLastRecEnd);
 
 	/* Reset XactLastRecEnd until the next transaction writes something */
 	XactLastRecEnd.xrecoff = 0;
@@ -1640,6 +1689,7 @@ StartTransaction(void)
 		s->startedInRecovery = false;
 		XactReadOnly = DefaultXactReadOnly;
 	}
+	XactDeferrable = DefaultXactDeferrable;
 	XactIsoLevel = DefaultXactIsoLevel;
 	forceSyncCommit = false;
 	MyXactAccessedTempRel = false;
@@ -1748,12 +1798,10 @@ CommitTransaction(void)
 	Assert(s->parent == NULL);
 
 	/*
-	 * Do pre-commit processing (most of this stuff requires database access,
-	 * and in fact could still cause an error...)
-	 *
-	 * It is possible for CommitHoldablePortals to invoke functions that queue
-	 * deferred triggers, and it's also possible that triggers create holdable
-	 * cursors.  So we have to loop until there's nothing left to do.
+	 * Do pre-commit processing that involves calling user-defined code, such
+	 * as triggers.  Since closing cursors could queue trigger actions,
+	 * triggers could open cursors, etc, we have to keep looping until there's
+	 * nothing left to do.
 	 */
 	for (;;)
 	{
@@ -1763,19 +1811,23 @@ CommitTransaction(void)
 		AfterTriggerFireDeferred();
 
 		/*
-		 * Convert any open holdable cursors into static portals.  If there
-		 * weren't any, we are done ... otherwise loop back to check if they
-		 * queued deferred triggers.  Lather, rinse, repeat.
+		 * Close open portals (converting holdable ones into static portals).
+		 * If there weren't any, we are done ... otherwise loop back to check
+		 * if they queued deferred triggers.  Lather, rinse, repeat.
 		 */
-		if (!CommitHoldablePortals())
+		if (!PreCommit_Portals(false))
 			break;
 	}
 
-	/* Now we can shut down the deferred-trigger manager */
-	AfterTriggerEndXact(true);
+	/*
+	 * The remaining actions cannot call any user-defined code, so it's safe
+	 * to start shutting down within-transaction services.	But note that most
+	 * of this stuff could still throw an error, which would switch us into
+	 * the transaction-abort path.
+	 */
 
-	/* Close any open regular cursors */
-	AtCommit_Portals();
+	/* Shut down the deferred-trigger manager */
+	AfterTriggerEndXact(true);
 
 	/*
 	 * Let ON COMMIT management do its thing (must happen after closing
@@ -1785,6 +1837,13 @@ CommitTransaction(void)
 
 	/* close large objects before lower-level cleanup */
 	AtEOXact_LargeObject(true);
+
+	/*
+	 * Mark serializable transaction as complete for predicate locking
+	 * purposes.  This should be done as late as we can put it and still allow
+	 * errors to be raised for failure patterns found at commit.
+	 */
+	PreCommit_CheckForSerializationFailure();
 
 	/*
 	 * Insert notifications sent by NOTIFY commands into the queue.  This
@@ -1846,9 +1905,6 @@ CommitTransaction(void)
 
 	/* Clean up the relation cache */
 	AtEOXact_RelationCache(true);
-
-	/* Clean up the snapshot manager */
-	AtEarlyCommit_Snapshot();
 
 	/*
 	 * Make catalog changes visible to all backends.  This has to happen after
@@ -1942,12 +1998,10 @@ PrepareTransaction(void)
 	Assert(s->parent == NULL);
 
 	/*
-	 * Do pre-commit processing (most of this stuff requires database access,
-	 * and in fact could still cause an error...)
-	 *
-	 * It is possible for PrepareHoldablePortals to invoke functions that
-	 * queue deferred triggers, and it's also possible that triggers create
-	 * holdable cursors.  So we have to loop until there's nothing left to do.
+	 * Do pre-commit processing that involves calling user-defined code, such
+	 * as triggers.  Since closing cursors could queue trigger actions,
+	 * triggers could open cursors, etc, we have to keep looping until there's
+	 * nothing left to do.
 	 */
 	for (;;)
 	{
@@ -1957,19 +2011,23 @@ PrepareTransaction(void)
 		AfterTriggerFireDeferred();
 
 		/*
-		 * Convert any open holdable cursors into static portals.  If there
-		 * weren't any, we are done ... otherwise loop back to check if they
-		 * queued deferred triggers.  Lather, rinse, repeat.
+		 * Close open portals (converting holdable ones into static portals).
+		 * If there weren't any, we are done ... otherwise loop back to check
+		 * if they queued deferred triggers.  Lather, rinse, repeat.
 		 */
-		if (!PrepareHoldablePortals())
+		if (!PreCommit_Portals(true))
 			break;
 	}
 
-	/* Now we can shut down the deferred-trigger manager */
-	AfterTriggerEndXact(true);
+	/*
+	 * The remaining actions cannot call any user-defined code, so it's safe
+	 * to start shutting down within-transaction services.	But note that most
+	 * of this stuff could still throw an error, which would switch us into
+	 * the transaction-abort path.
+	 */
 
-	/* Close any open regular cursors */
-	AtCommit_Portals();
+	/* Shut down the deferred-trigger manager */
+	AfterTriggerEndXact(true);
 
 	/*
 	 * Let ON COMMIT management do its thing (must happen after closing
@@ -1979,6 +2037,13 @@ PrepareTransaction(void)
 
 	/* close large objects before lower-level cleanup */
 	AtEOXact_LargeObject(true);
+
+	/*
+	 * Mark serializable transaction as complete for predicate locking
+	 * purposes.  This should be done as late as we can put it and still allow
+	 * errors to be raised for failure patterns found at commit.
+	 */
+	PreCommit_CheckForSerializationFailure();
 
 	/* NOTIFY will be handled below */
 
@@ -2001,6 +2066,16 @@ PrepareTransaction(void)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("cannot PREPARE a transaction that has operated on temporary tables")));
+
+	/*
+	 * Likewise, don't allow PREPARE after pg_export_snapshot.  This could be
+	 * supported if we added cleanup logic to twophase.c, but for now it
+	 * doesn't seem worth the trouble.
+	 */
+	if (XactHasExportedSnapshots())
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot PREPARE a transaction that has exported snapshots")));
 
 	/* Prevent cancel/die interrupt while cleaning up */
 	HOLD_INTERRUPTS();
@@ -2044,6 +2119,7 @@ PrepareTransaction(void)
 
 	AtPrepare_Notify();
 	AtPrepare_Locks();
+	AtPrepare_PredicateLocks();
 	AtPrepare_PgStat();
 	AtPrepare_MultiXact();
 	AtPrepare_RelationMap();
@@ -2089,9 +2165,6 @@ PrepareTransaction(void)
 	/* Clean up the relation cache */
 	AtEOXact_RelationCache(true);
 
-	/* Clean up the snapshot manager */
-	AtEarlyCommit_Snapshot();
-
 	/* notify doesn't need a postprepare call */
 
 	PostPrepare_PgStat();
@@ -2103,6 +2176,7 @@ PrepareTransaction(void)
 	PostPrepare_MultiXact(xid);
 
 	PostPrepare_Locks(xid);
+	PostPrepare_PredicateLocks(xid);
 
 	ResourceOwnerRelease(TopTransactionResourceOwner,
 						 RESOURCE_RELEASE_LOCKS,
@@ -2269,7 +2343,6 @@ AbortTransaction(void)
 		AtEOXact_ComboCid();
 		AtEOXact_HashTables(false);
 		AtEOXact_PgStat(false);
-		AtEOXact_Snapshot(false);
 		pgstat_report_xact_timestamp(0);
 	}
 
@@ -2298,6 +2371,7 @@ CleanupTransaction(void)
 	 * do abort cleanup processing
 	 */
 	AtCleanup_Portals();		/* now safe to release portal memory */
+	AtEOXact_Snapshot(false);	/* and release the transaction's snapshots */
 
 	CurrentResourceOwner = NULL;	/* and resource owner */
 	if (TopTransactionResourceOwner)
@@ -2370,7 +2444,8 @@ StartTransactionCommand(void)
 		case TBLOCK_BEGIN:
 		case TBLOCK_SUBBEGIN:
 		case TBLOCK_END:
-		case TBLOCK_SUBEND:
+		case TBLOCK_SUBRELEASE:
+		case TBLOCK_SUBCOMMIT:
 		case TBLOCK_ABORT_END:
 		case TBLOCK_SUBABORT_END:
 		case TBLOCK_ABORT_PENDING:
@@ -2500,17 +2575,37 @@ CommitTransactionCommand(void)
 			break;
 
 			/*
-			 * We were issued a COMMIT or RELEASE command, so we end the
+			 * We were issued a RELEASE command, so we end the
 			 * current subtransaction and return to the parent transaction.
-			 * The parent might be ended too, so repeat till we are all the
-			 * way out or find an INPROGRESS transaction.
+			 * The parent might be ended too, so repeat till we find an
+			 * INPROGRESS transaction or subtransaction.
 			 */
-		case TBLOCK_SUBEND:
+		case TBLOCK_SUBRELEASE:
 			do
 			{
 				CommitSubTransaction();
 				s = CurrentTransactionState;	/* changed by pop */
-			} while (s->blockState == TBLOCK_SUBEND);
+			} while (s->blockState == TBLOCK_SUBRELEASE);
+
+			Assert(s->blockState == TBLOCK_INPROGRESS ||
+				   s->blockState == TBLOCK_SUBINPROGRESS);
+			break;
+
+			/*
+			 * We were issued a COMMIT, so we end the current subtransaction
+			 * hierarchy and perform final commit. We do this by rolling up
+			 * any subtransactions into their parent, which leads to O(N^2)
+			 * operations with respect to resource owners - this isn't that
+			 * bad until we approach a thousands of savepoints but is necessary
+			 * for correctness should after triggers create new resource
+			 * owners.
+			 */
+		case TBLOCK_SUBCOMMIT:
+			do
+			{
+				CommitSubTransaction();
+				s = CurrentTransactionState;	/* changed by pop */
+			} while (s->blockState == TBLOCK_SUBCOMMIT);
 			/* If we had a COMMIT command, finish off the main xact too */
 			if (s->blockState == TBLOCK_END)
 			{
@@ -2525,10 +2620,8 @@ CommitTransactionCommand(void)
 				s->blockState = TBLOCK_DEFAULT;
 			}
 			else
-			{
-				Assert(s->blockState == TBLOCK_INPROGRESS ||
-					   s->blockState == TBLOCK_SUBINPROGRESS);
-			}
+				elog(ERROR, "CommitTransactionCommand: unexpected state %s",
+					 BlockStateAsString(s->blockState));
 			break;
 
 			/*
@@ -2742,7 +2835,8 @@ AbortCurrentTransaction(void)
 			 * applies if we get a failure while ending a subtransaction.
 			 */
 		case TBLOCK_SUBBEGIN:
-		case TBLOCK_SUBEND:
+		case TBLOCK_SUBRELEASE:
+		case TBLOCK_SUBCOMMIT:
 		case TBLOCK_SUBABORT_PENDING:
 		case TBLOCK_SUBRESTART:
 			AbortSubTransaction();
@@ -3050,7 +3144,8 @@ BeginTransactionBlock(void)
 		case TBLOCK_BEGIN:
 		case TBLOCK_SUBBEGIN:
 		case TBLOCK_END:
-		case TBLOCK_SUBEND:
+		case TBLOCK_SUBRELEASE:
+		case TBLOCK_SUBCOMMIT:
 		case TBLOCK_ABORT_END:
 		case TBLOCK_SUBABORT_END:
 		case TBLOCK_ABORT_PENDING:
@@ -3160,7 +3255,7 @@ EndTransactionBlock(void)
 			while (s->parent != NULL)
 			{
 				if (s->blockState == TBLOCK_SUBINPROGRESS)
-					s->blockState = TBLOCK_SUBEND;
+					s->blockState = TBLOCK_SUBCOMMIT;
 				else
 					elog(FATAL, "EndTransactionBlock: unexpected state %s",
 						 BlockStateAsString(s->blockState));
@@ -3218,7 +3313,8 @@ EndTransactionBlock(void)
 		case TBLOCK_BEGIN:
 		case TBLOCK_SUBBEGIN:
 		case TBLOCK_END:
-		case TBLOCK_SUBEND:
+		case TBLOCK_SUBRELEASE:
+		case TBLOCK_SUBCOMMIT:
 		case TBLOCK_ABORT_END:
 		case TBLOCK_SUBABORT_END:
 		case TBLOCK_ABORT_PENDING:
@@ -3310,7 +3406,8 @@ UserAbortTransactionBlock(void)
 		case TBLOCK_BEGIN:
 		case TBLOCK_SUBBEGIN:
 		case TBLOCK_END:
-		case TBLOCK_SUBEND:
+		case TBLOCK_SUBRELEASE:
+		case TBLOCK_SUBCOMMIT:
 		case TBLOCK_ABORT_END:
 		case TBLOCK_SUBABORT_END:
 		case TBLOCK_ABORT_PENDING:
@@ -3355,7 +3452,8 @@ DefineSavepoint(char *name)
 		case TBLOCK_BEGIN:
 		case TBLOCK_SUBBEGIN:
 		case TBLOCK_END:
-		case TBLOCK_SUBEND:
+		case TBLOCK_SUBRELEASE:
+		case TBLOCK_SUBCOMMIT:
 		case TBLOCK_ABORT:
 		case TBLOCK_SUBABORT:
 		case TBLOCK_ABORT_END:
@@ -3411,7 +3509,8 @@ ReleaseSavepoint(List *options)
 		case TBLOCK_BEGIN:
 		case TBLOCK_SUBBEGIN:
 		case TBLOCK_END:
-		case TBLOCK_SUBEND:
+		case TBLOCK_SUBRELEASE:
+		case TBLOCK_SUBCOMMIT:
 		case TBLOCK_ABORT:
 		case TBLOCK_SUBABORT:
 		case TBLOCK_ABORT_END:
@@ -3462,7 +3561,7 @@ ReleaseSavepoint(List *options)
 	for (;;)
 	{
 		Assert(xact->blockState == TBLOCK_SUBINPROGRESS);
-		xact->blockState = TBLOCK_SUBEND;
+		xact->blockState = TBLOCK_SUBRELEASE;
 		if (xact == target)
 			break;
 		xact = xact->parent;
@@ -3511,7 +3610,8 @@ RollbackToSavepoint(List *options)
 		case TBLOCK_BEGIN:
 		case TBLOCK_SUBBEGIN:
 		case TBLOCK_END:
-		case TBLOCK_SUBEND:
+		case TBLOCK_SUBRELEASE:
+		case TBLOCK_SUBCOMMIT:
 		case TBLOCK_ABORT_END:
 		case TBLOCK_SUBABORT_END:
 		case TBLOCK_ABORT_PENDING:
@@ -3619,7 +3719,8 @@ BeginInternalSubTransaction(char *name)
 		case TBLOCK_DEFAULT:
 		case TBLOCK_BEGIN:
 		case TBLOCK_SUBBEGIN:
-		case TBLOCK_SUBEND:
+		case TBLOCK_SUBRELEASE:
+		case TBLOCK_SUBCOMMIT:
 		case TBLOCK_ABORT:
 		case TBLOCK_SUBABORT:
 		case TBLOCK_ABORT_END:
@@ -3685,7 +3786,8 @@ RollbackAndReleaseCurrentSubTransaction(void)
 		case TBLOCK_SUBBEGIN:
 		case TBLOCK_INPROGRESS:
 		case TBLOCK_END:
-		case TBLOCK_SUBEND:
+		case TBLOCK_SUBRELEASE:
+		case TBLOCK_SUBCOMMIT:
 		case TBLOCK_ABORT:
 		case TBLOCK_ABORT_END:
 		case TBLOCK_SUBABORT_END:
@@ -3759,7 +3861,8 @@ AbortOutOfAnyTransaction(void)
 				 */
 			case TBLOCK_SUBBEGIN:
 			case TBLOCK_SUBINPROGRESS:
-			case TBLOCK_SUBEND:
+			case TBLOCK_SUBRELEASE:
+			case TBLOCK_SUBCOMMIT:
 			case TBLOCK_SUBABORT_PENDING:
 			case TBLOCK_SUBRESTART:
 				AbortSubTransaction();
@@ -3831,7 +3934,8 @@ TransactionBlockStatusCode(void)
 		case TBLOCK_INPROGRESS:
 		case TBLOCK_SUBINPROGRESS:
 		case TBLOCK_END:
-		case TBLOCK_SUBEND:
+		case TBLOCK_SUBRELEASE:
+		case TBLOCK_SUBCOMMIT:
 		case TBLOCK_PREPARE:
 			return 'T';			/* in transaction */
 		case TBLOCK_ABORT:
@@ -3964,12 +4068,14 @@ CommitSubTransaction(void)
 
 	/*
 	 * The only lock we actually release here is the subtransaction XID lock.
-	 * The rest just get transferred to the parent resource owner.
 	 */
 	CurrentResourceOwner = s->curTransactionOwner;
 	if (TransactionIdIsValid(s->transactionId))
 		XactLockTableDelete(s->transactionId);
 
+	/*
+	 * Other locks should get transferred to their parent resource owner.
+	 */
 	ResourceOwnerRelease(s->curTransactionOwner,
 						 RESOURCE_RELEASE_LOCKS,
 						 true, false);
@@ -4326,8 +4432,10 @@ BlockStateAsString(TBlockState blockState)
 			return "SUB BEGIN";
 		case TBLOCK_SUBINPROGRESS:
 			return "SUB INPROGRS";
-		case TBLOCK_SUBEND:
-			return "SUB END";
+		case TBLOCK_SUBRELEASE:
+			return "SUB RELEASE";
+		case TBLOCK_SUBCOMMIT:
+			return "SUB COMMIT";
 		case TBLOCK_SUBABORT:
 			return "SUB ABORT";
 		case TBLOCK_SUBABORT_END:
@@ -4398,19 +4506,17 @@ xactGetCommittedChildren(TransactionId **ptr)
  * actions for which the order of execution is critical.
  */
 static void
-xact_redo_commit(xl_xact_commit *xlrec, TransactionId xid, XLogRecPtr lsn)
+xact_redo_commit_internal(TransactionId xid, XLogRecPtr lsn,
+					TransactionId *sub_xids, int nsubxacts,
+					SharedInvalidationMessage *inval_msgs, int nmsgs,
+					RelFileNode *xnodes, int nrels,
+					Oid dbId, Oid tsId,
+					uint32 xinfo)
 {
-	TransactionId *sub_xids;
-	SharedInvalidationMessage *inval_msgs;
 	TransactionId max_xid;
 	int			i;
 
-	/* subxid array follows relfilenodes */
-	sub_xids = (TransactionId *) &(xlrec->xnodes[xlrec->nrels]);
-	/* invalidation messages array follows subxids */
-	inval_msgs = (SharedInvalidationMessage *) &(sub_xids[xlrec->nsubxacts]);
-
-	max_xid = TransactionIdLatest(xid, xlrec->nsubxacts, sub_xids);
+	max_xid = TransactionIdLatest(xid, nsubxacts, sub_xids);
 
 	/*
 	 * Make sure nextXid is beyond any XID mentioned in the record.
@@ -4433,7 +4539,7 @@ xact_redo_commit(xl_xact_commit *xlrec, TransactionId xid, XLogRecPtr lsn)
 		/*
 		 * Mark the transaction committed in pg_clog.
 		 */
-		TransactionIdCommitTree(xid, xlrec->nsubxacts, sub_xids);
+		TransactionIdCommitTree(xid, nsubxacts, sub_xids);
 	}
 	else
 	{
@@ -4457,41 +4563,41 @@ xact_redo_commit(xl_xact_commit *xlrec, TransactionId xid, XLogRecPtr lsn)
 		 * bits set on changes made by transactions that haven't yet
 		 * recovered. It's unlikely but it's good to be safe.
 		 */
-		TransactionIdAsyncCommitTree(xid, xlrec->nsubxacts, sub_xids, lsn);
+		TransactionIdAsyncCommitTree(xid, nsubxacts, sub_xids, lsn);
 
 		/*
 		 * We must mark clog before we update the ProcArray.
 		 */
-		ExpireTreeKnownAssignedTransactionIds(xid, xlrec->nsubxacts, sub_xids, max_xid);
+		ExpireTreeKnownAssignedTransactionIds(xid, nsubxacts, sub_xids, max_xid);
 
 		/*
 		 * Send any cache invalidations attached to the commit. We must
 		 * maintain the same order of invalidation then release locks as
 		 * occurs in CommitTransaction().
 		 */
-		ProcessCommittedInvalidationMessages(inval_msgs, xlrec->nmsgs,
-								  XactCompletionRelcacheInitFileInval(xlrec),
-											 xlrec->dbId, xlrec->tsId);
+		ProcessCommittedInvalidationMessages(inval_msgs, nmsgs,
+								  XactCompletionRelcacheInitFileInval(xinfo),
+											 dbId, tsId);
 
 		/*
 		 * Release locks, if any. We do this for both two phase and normal one
 		 * phase transactions. In effect we are ignoring the prepare phase and
 		 * just going straight to lock release.
 		 */
-		StandbyReleaseLockTree(xid, xlrec->nsubxacts, sub_xids);
+		StandbyReleaseLockTree(xid, nsubxacts, sub_xids);
 	}
 
 	/* Make sure files supposed to be dropped are dropped */
-	for (i = 0; i < xlrec->nrels; i++)
+	for (i = 0; i < nrels; i++)
 	{
-		SMgrRelation srel = smgropen(xlrec->xnodes[i], InvalidBackendId);
+		SMgrRelation srel = smgropen(xnodes[i], InvalidBackendId);
 		ForkNumber	fork;
 
 		for (fork = 0; fork <= MAX_FORKNUM; fork++)
 		{
 			if (smgrexists(srel, fork))
 			{
-				XLogDropRelation(xlrec->xnodes[i], fork);
+				XLogDropRelation(xnodes[i], fork);
 				smgrdounlink(srel, fork, true);
 			}
 		}
@@ -4510,8 +4616,46 @@ xact_redo_commit(xl_xact_commit *xlrec, TransactionId xid, XLogRecPtr lsn)
 	 * to reduce that problem window, for any user that requested
 	 * ForceSyncCommit().
 	 */
-	if (XactCompletionForceSyncCommit(xlrec))
+	if (XactCompletionForceSyncCommit(xinfo))
 		XLogFlush(lsn);
+
+}
+/*
+ * Utility function to call xact_redo_commit_internal after breaking down xlrec
+ */
+static void
+xact_redo_commit(xl_xact_commit *xlrec,
+							TransactionId xid, XLogRecPtr lsn)
+{
+	TransactionId *subxacts;
+	SharedInvalidationMessage *inval_msgs;
+
+	/* subxid array follows relfilenodes */
+	subxacts = (TransactionId *) &(xlrec->xnodes[xlrec->nrels]);
+	/* invalidation messages array follows subxids */
+	inval_msgs = (SharedInvalidationMessage *) &(subxacts[xlrec->nsubxacts]);
+
+	xact_redo_commit_internal(xid, lsn, subxacts, xlrec->nsubxacts,
+								inval_msgs, xlrec->nmsgs,
+								xlrec->xnodes, xlrec->nrels,
+								xlrec->dbId,
+								xlrec->tsId,
+								xlrec->xinfo);
+}
+
+/*
+ * Utility function to call xact_redo_commit_internal  for compact form of message.
+ */
+static void
+xact_redo_commit_compact(xl_xact_commit_compact *xlrec,
+							TransactionId xid, XLogRecPtr lsn)
+{
+	xact_redo_commit_internal(xid, lsn, xlrec->subxacts, xlrec->nsubxacts,
+								NULL, 0,		/* inval msgs */
+								NULL, 0,		/* relfilenodes */
+								InvalidOid,		/* dbId */
+								InvalidOid,		/* tsId */
+								0);				/* xinfo */
 }
 
 /*
@@ -4612,7 +4756,13 @@ xact_redo(XLogRecPtr lsn, XLogRecord *record)
 	/* Backup blocks are not used in xact records */
 	Assert(!(record->xl_info & XLR_BKP_BLOCK_MASK));
 
-	if (info == XLOG_XACT_COMMIT)
+	if (info == XLOG_XACT_COMMIT_COMPACT)
+	{
+		xl_xact_commit_compact *xlrec = (xl_xact_commit_compact *) XLogRecGetData(record);
+
+		xact_redo_commit_compact(xlrec, record->xl_xid, lsn);
+	}
+	else if (info == XLOG_XACT_COMMIT)
 	{
 		xl_xact_commit *xlrec = (xl_xact_commit *) XLogRecGetData(record);
 
@@ -4660,9 +4810,9 @@ static void
 xact_desc_commit(StringInfo buf, xl_xact_commit *xlrec)
 {
 	int			i;
-	TransactionId *xacts;
+	TransactionId *subxacts;
 
-	xacts = (TransactionId *) &xlrec->xnodes[xlrec->nrels];
+	subxacts = (TransactionId *) &xlrec->xnodes[xlrec->nrels];
 
 	appendStringInfoString(buf, timestamptz_to_str(xlrec->xact_time));
 
@@ -4681,15 +4831,15 @@ xact_desc_commit(StringInfo buf, xl_xact_commit *xlrec)
 	{
 		appendStringInfo(buf, "; subxacts:");
 		for (i = 0; i < xlrec->nsubxacts; i++)
-			appendStringInfo(buf, " %u", xacts[i]);
+			appendStringInfo(buf, " %u", subxacts[i]);
 	}
 	if (xlrec->nmsgs > 0)
 	{
 		SharedInvalidationMessage *msgs;
 
-		msgs = (SharedInvalidationMessage *) &xacts[xlrec->nsubxacts];
+		msgs = (SharedInvalidationMessage *) &subxacts[xlrec->nsubxacts];
 
-		if (XactCompletionRelcacheInitFileInval(xlrec))
+		if (XactCompletionRelcacheInitFileInval(xlrec->xinfo))
 			appendStringInfo(buf, "; relcache init file inval dbid %u tsid %u",
 							 xlrec->dbId, xlrec->tsId);
 
@@ -4712,6 +4862,21 @@ xact_desc_commit(StringInfo buf, xl_xact_commit *xlrec)
 			else
 				appendStringInfo(buf, " unknown id %d", msg->id);
 		}
+	}
+}
+
+static void
+xact_desc_commit_compact(StringInfo buf, xl_xact_commit_compact *xlrec)
+{
+	int			i;
+
+	appendStringInfoString(buf, timestamptz_to_str(xlrec->xact_time));
+
+	if (xlrec->nsubxacts > 0)
+	{
+		appendStringInfo(buf, "; subxacts:");
+		for (i = 0; i < xlrec->nsubxacts; i++)
+			appendStringInfo(buf, " %u", xlrec->subxacts[i]);
 	}
 }
 
@@ -4759,7 +4924,14 @@ xact_desc(StringInfo buf, uint8 xl_info, char *rec)
 {
 	uint8		info = xl_info & ~XLR_INFO_MASK;
 
-	if (info == XLOG_XACT_COMMIT)
+	if (info == XLOG_XACT_COMMIT_COMPACT)
+	{
+		xl_xact_commit_compact *xlrec = (xl_xact_commit_compact *) rec;
+
+		appendStringInfo(buf, "commit: ");
+		xact_desc_commit_compact(buf, xlrec);
+	}
+	else if (info == XLOG_XACT_COMMIT)
 	{
 		xl_xact_commit *xlrec = (xl_xact_commit *) rec;
 

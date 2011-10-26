@@ -424,28 +424,8 @@ PQsetvalue(PGresult *res, int tup_num, int field_num, char *value, int len)
 	if (tup_num < 0 || tup_num > res->ntups)
 		return FALSE;
 
-	/* need to grow the tuple table? */
-	if (res->ntups >= res->tupArrSize)
-	{
-		int			n = res->tupArrSize ? res->tupArrSize * 2 : 128;
-		PGresAttValue **tups;
-
-		if (res->tuples)
-			tups = (PGresAttValue **) realloc(res->tuples, n * sizeof(PGresAttValue *));
-		else
-			tups = (PGresAttValue **) malloc(n * sizeof(PGresAttValue *));
-
-		if (!tups)
-			return FALSE;
-
-		memset(tups + res->tupArrSize, 0,
-			   (n - res->tupArrSize) * sizeof(PGresAttValue *));
-		res->tuples = tups;
-		res->tupArrSize = n;
-	}
-
 	/* need to allocate a new tuple? */
-	if (tup_num == res->ntups && !res->tuples[tup_num])
+	if (tup_num == res->ntups)
 	{
 		PGresAttValue *tup;
 		int			i;
@@ -464,8 +444,9 @@ PQsetvalue(PGresult *res, int tup_num, int field_num, char *value, int len)
 			tup[i].value = res->null_field;
 		}
 
-		res->tuples[tup_num] = tup;
-		res->ntups++;
+		/* add it to the array */
+		if (!pqAddTuple(res, tup))
+			return FALSE;
 	}
 
 	attval = &res->tuples[tup_num][field_num];
@@ -1787,8 +1768,8 @@ PQexecStart(PGconn *conn)
 		{
 			/* We don't allow PQexec during COPY BOTH */
 			printfPQExpBuffer(&conn->errorMessage,
-			 libpq_gettext("PQexec not allowed during COPY BOTH\n"));
-			return false;			
+					 libpq_gettext("PQexec not allowed during COPY BOTH\n"));
+			return false;
 		}
 		/* check for loss of connection, too */
 		if (conn->status == CONNECTION_BAD)
@@ -1813,8 +1794,8 @@ PQexecFinish(PGconn *conn)
 	 * than one --- but merge error messages if we get more than one error
 	 * result.
 	 *
-	 * We have to stop if we see copy in/out/both, however. We will resume parsing
-	 * after application performs the data transfer.
+	 * We have to stop if we see copy in/out/both, however. We will resume
+	 * parsing after application performs the data transfer.
 	 *
 	 * Also stop if the connection is lost (else we'll loop infinitely).
 	 */
@@ -2405,7 +2386,7 @@ PQresultStatus(const PGresult *res)
 char *
 PQresStatus(ExecStatusType status)
 {
-	if (status < 0 || status >= sizeof pgresStatus / sizeof pgresStatus[0])
+	if ((unsigned int) status >= sizeof pgresStatus / sizeof pgresStatus[0])
 		return libpq_gettext("invalid ExecStatusType code");
 	return pgresStatus[status];
 }
@@ -2869,7 +2850,7 @@ PQparamtype(const PGresult *res, int param_num)
 
 /* PQsetnonblocking:
  *	sets the PGconn's database connection non-blocking if the arg is TRUE
- *	or makes it non-blocking if the arg is FALSE, this will not protect
+ *	or makes it blocking if the arg is FALSE, this will not protect
  *	you from PQexec(), you'll only be safe when using the non-blocking API.
  *	Needs to be called only on a connected database connection.
  */
@@ -3464,11 +3445,11 @@ PQunescapeBytea(const unsigned char *strtext, size_t *retbuflen)
 							(ISOCTDIGIT(strtext[i + 1])) &&
 							(ISOCTDIGIT(strtext[i + 2])))
 						{
-							int byte;
+							int			byte;
 
 							byte = OCTVAL(strtext[i++]);
-							byte = (byte <<3) +OCTVAL(strtext[i++]);
-							byte = (byte <<3) +OCTVAL(strtext[i++]);
+							byte = (byte << 3) + OCTVAL(strtext[i++]);
+							byte = (byte << 3) + OCTVAL(strtext[i++]);
 							buffer[j++] = byte;
 						}
 					}

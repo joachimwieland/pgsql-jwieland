@@ -168,11 +168,22 @@
 
        <variablelist>
         <varlistentry>
+         <term><literal>c</></term>
+         <term><literal>custom</></term>
+         <listitem>
+          <para>
+           The archive is in the custom format of
+           <application>pg_dump</application>.
+          </para>
+         </listitem>
+        </varlistentry>
+
+        <varlistentry>
          <term><literal>d</></term>
          <term><literal>directory</></term>
          <listitem>
           <para>
-           The archive is a <command>directory</command> archive.
+           The archive is a directory archive.
           </para>
          </listitem>
         </varlistentry>
@@ -186,19 +197,7 @@
           </para>
          </listitem>
         </varlistentry>
-
-        <varlistentry>
-         <term><literal>c</></term>
-         <term><literal>custom</></term>
-         <listitem>
-          <para>
-           The archive is in the custom format of
-           <application>pg_dump</application>.
-          </para>
-         </listitem>
-        </varlistentry>
-       </variablelist>
-       </para>
+       </variablelist></para>
       </listitem>
      </varlistentry>
 
@@ -286,8 +285,7 @@
         if filtering switches such as <option>-n</> or <option>-t</> are
         used with <option>-L</>, they will further restrict the items restored.
        </para>
-       <para>
-        <replaceable class="PARAMETER">list-file</> is normally created by
+       <para><replaceable class="PARAMETER">list-file</> is normally created by
         editing the output of a previous <option>-l</> operation.
         Lines can be moved or removed, and can also
         be commented out by placing a semicolon (<literal>;</literal>) at the
@@ -324,27 +322,6 @@
         (or the same user that owns all of the objects in the script).
         With <option>-O</option>, any user name can be used for the
         initial connection, and this user will own all the created objects.
-       </para>
-      </listitem>
-     </varlistentry>
-
-     <varlistentry>
-      <term><option>--no-tablespaces</option></term>
-      <listitem>
-       <para>
-        Do not output commands to select tablespaces.
-        With this option, all objects will be created in whichever
-        tablespace is the default during restore.
-       </para>
-      </listitem>
-     </varlistentry>
-
-     <varlistentry>
-      <term><option>--no-security-label</option></term>
-      <listitem>
-       <para>
-        Do not output commands to restore security labels,
-        even if the archive contains them.
        </para>
       </listitem>
      </varlistentry>
@@ -449,6 +426,20 @@
      </varlistentry>
 
      <varlistentry>
+      <term><option>-1</option></term>
+      <term><option>--single-transaction</option></term>
+      <listitem>
+       <para>
+        Execute the restore as a single transaction (that is, wrap the
+        emitted commands in <command>BEGIN</>/<command>COMMIT</>).  This
+        ensures that either all the commands complete successfully, or no
+        changes are applied. This option implies
+        <option>--exit-on-error</>.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
       <term><option>--disable-triggers</></term>
       <listitem>
        <para>
@@ -466,19 +457,6 @@
         should also specify a superuser name with <option>-S</>, or
         preferably run <application>pg_restore</application> as a
         <productname>PostgreSQL</> superuser.
-       </para>
-      </listitem>
-     </varlistentry>
-
-     <varlistentry>
-      <term><option>--use-set-session-authorization</option></term>
-      <listitem>
-       <para>
-        Output SQL-standard <command>SET SESSION AUTHORIZATION</> commands
-        instead of <command>ALTER OWNER</> commands to determine object
-        ownership.  This makes the dump more standards-compatible, but
-        depending on the history of the objects in the dump, might not restore
-        properly.
        </para>
       </listitem>
      </varlistentry>
@@ -506,15 +484,35 @@
      </varlistentry>
 
      <varlistentry>
-      <term><option>-1</option></term>
-      <term><option>--single-transaction</option></term>
+      <term><option>--no-security-labels</option></term>
       <listitem>
        <para>
-        Execute the restore as a single transaction (that is, wrap the
-        emitted commands in <command>BEGIN</>/<command>COMMIT</>).  This
-        ensures that either all the commands complete successfully, or no
-        changes are applied. This option implies
-        <option>--exit-on-error</>.
+        Do not output commands to restore security labels,
+        even if the archive contains them.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><option>--no-tablespaces</option></term>
+      <listitem>
+       <para>
+        Do not output commands to select tablespaces.
+        With this option, all objects will be created in whichever
+        tablespace is the default during restore.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><option>--use-set-session-authorization</option></term>
+      <listitem>
+       <para>
+        Output SQL-standard <command>SET SESSION AUTHORIZATION</> commands
+        instead of <command>ALTER OWNER</> commands to determine object
+        ownership.  This makes the dump more standards-compatible, but
+        depending on the history of the objects in the dump, might not restore
+        properly.
        </para>
       </listitem>
      </varlistentry>
@@ -707,8 +705,7 @@ CREATE DATABASE foo WITH TEMPLATE template0;
     </listitem>
 
     <listitem>
-     <para>
-      <application>pg_restore</application> cannot restore large objects
+     <para><application>pg_restore</application> cannot restore large objects
       selectively;  for instance, only those for a specific table.  If
       an archive contains large objects, then all large objects will be
       restored, or none of them if they are excluded via <option>-L</option>,
@@ -821,8 +818,7 @@ CREATE DATABASE foo WITH TEMPLATE template0;
    items 10 and 6, in that order:
 <screen>
 <prompt>$</prompt> <userinput>pg_restore -L db.list db.dump</userinput>
-</screen>
-  </para>
+</screen></para>
 
  </refsect1>
 

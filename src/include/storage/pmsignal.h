@@ -29,6 +29,7 @@ typedef enum
 	PMSIGNAL_START_AUTOVAC_LAUNCHER,	/* start an autovacuum launcher */
 	PMSIGNAL_START_AUTOVAC_WORKER,		/* start an autovacuum worker */
 	PMSIGNAL_START_WALRECEIVER, /* start a walreceiver */
+	PMSIGNAL_ADVANCE_STATE_MACHINE,		/* advance postmaster's state machine */
 
 	NUM_PMSIGNALS				/* Must be last value of enum! */
 } PMSignalReason;
@@ -49,6 +50,6 @@ extern bool IsPostmasterChildWalSender(int slot);
 extern void MarkPostmasterChildActive(void);
 extern void MarkPostmasterChildInactive(void);
 extern void MarkPostmasterChildWalSender(void);
-extern bool PostmasterIsAlive(bool amDirectChild);
+extern bool PostmasterIsAlive(void);
 
 #endif   /* PMSIGNAL_H */

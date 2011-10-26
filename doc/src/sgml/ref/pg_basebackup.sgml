@@ -59,10 +59,9 @@ PostgreSQL documentation
   </para>
 
   <para>
-   Only one backup can be concurrently active in
-   <productname>PostgreSQL</productname>, meaning that only one instance of
-   <application>pg_basebackup</application> can run at the same time
-   against a single database cluster.
+   There can be multiple <command>pg_basebackup</command>s running at the same time, but it is
+   better from a performance point of view to take only one backup, and copy
+   the result.
   </para>
  </refsect1>
 
@@ -128,7 +127,7 @@ PostgreSQL documentation
             Write the output as tar files in the target directory. The main
             data directory will be written to a file named
             <filename>base.tar</filename>, and all other tablespaces will
-            be named after the tablespace oid.
+            be named after the tablespace OID.
             </para>
            <para>
             If the value <literal>-</literal> (dash) is specified as
@@ -139,7 +138,43 @@ PostgreSQL documentation
            </para>
            </listitem>
          </varlistentry>
-        </variablelist>
+        </variablelist></para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><option>-x</option></term>
+      <term><option>--xlog</option></term>
+      <listitem>
+       <para>
+        Includes the required transaction log files (WAL files) in the
+        backup. This will include all transaction logs generated during
+        the backup. If this option is specified, it is possible to start
+        a postmaster directly in the extracted directory without the need
+        to consult the log archive, thus making this a completely standalone
+        backup.
+       </para>
+       <note>
+        <para>
+         The transaction log files are collected at the end of the backup.
+         Therefore, it is necessary for the
+         <xref linkend="guc-wal-keep-segments"> parameter to be set high
+         enough that the log is not removed before the end of the backup.
+         If the log has been rotated when it's time to transfer it, the
+         backup will fail and be unusable.
+        </para>
+       </note>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><option>-z</option></term>
+      <term><option>--gzip</option></term>
+      <listitem>
+       <para>
+        Enables gzip compression of tar file output, with the default
+        compression level. Compression is only available when using
+        the tar format.
        </para>
       </listitem>
      </varlistentry>
@@ -149,9 +184,10 @@ PostgreSQL documentation
       <term><option>--compress=<replaceable class="parameter">level</replaceable></option></term>
       <listitem>
        <para>
-        Enables gzip compression of tar file output. Compression is only
-        available when generating tar files, and is not available when sending
-        output to standard output.
+        Enables gzip compression of tar file output, and specifies the
+        compression level (1 through 9, 9 being best
+        compression). Compression is only available when using the tar
+        format.
        </para>
       </listitem>
      </varlistentry>
@@ -164,7 +200,7 @@ PostgreSQL documentation
     <variablelist>
      <varlistentry>
       <term><option>-c <replaceable class="parameter">fast|spread</replaceable></option></term>
-      <term><option>--checkpoint <replaceable class="parameter">fast|spread</replaceable></option></term>
+      <term><option>--checkpoint=<replaceable class="parameter">fast|spread</replaceable></option></term>
       <listitem>
        <para>
         Sets checkpoint mode to fast or spread (default).
@@ -191,7 +227,10 @@ PostgreSQL documentation
         Enables progress reporting. Turning this on will deliver an approximate
         progress report during the backup. Since the database may change during
         the backup, this is only an approximation and may not end at exactly
-        <literal>100%</literal>.
+        <literal>100%</literal>. In particular, when WAL log is included in the
+        backup, the total amount of data cannot be estimated in advance, and
+        in this case the estimated target size will increase once it passes the
+        total estimate without WAL.
        </para>
        <para>
         When this is enabled, the backup will start by enumerating the size of
@@ -208,7 +247,7 @@ PostgreSQL documentation
       <listitem>
        <para>
         Enables verbose mode. Will output some extra steps during startup and
-        shutdown, as well as show the exact filename that is currently being
+        shutdown, as well as show the exact file name that is currently being
         processed if progress reporting is also enabled.
        </para>
       </listitem>
@@ -361,28 +400,28 @@ PostgreSQL documentation
    To create a base backup of the server at <literal>mydbserver</literal>
    and store it in the local directory
    <filename>/usr/local/pgsql/data</filename>:
-   <screen>
-    <prompt>$</prompt> <userinput>pg_basebackup -h mydbserver -D /usr/local/pgsql/data</userinput>
-   </screen>
+<screen>
+<prompt>$</prompt> <userinput>pg_basebackup -h mydbserver -D /usr/local/pgsql/data</userinput>
+</screen>
   </para>
 
   <para>
-   To create a backup of the local server with one maximum compressed
+   To create a backup of the local server with one compressed
    tar file for each tablespace, and store it in the directory
    <filename>backup</filename>, showing a progress report while running:
-   <screen>
-    <prompt>$</prompt> <userinput>pg_basebackup -D backup -Ft -Z9 -P</userinput>
-   </screen>
+<screen>
+<prompt>$</prompt> <userinput>pg_basebackup -D backup -Ft -z -P</userinput>
+</screen>
   </para>
 
   <para>
    To create a backup of a single-tablespace local database and compress
    this with <productname>bzip2</productname>:
-   <screen>
-    <prompt>$</prompt> <userinput>pg_basebackup -D - -Ft | bzip2 > backup.tar.bz2</userinput>
-   </screen>
-   (this command will fail if there are multiple tablespaces in the
-   database)
+<screen>
+<prompt>$</prompt> <userinput>pg_basebackup -D - -Ft | bzip2 &gt; backup.tar.bz2</userinput>
+</screen>
+   (This command will fail if there are multiple tablespaces in the
+   database.)
   </para>
  </refsect1>
 

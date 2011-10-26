@@ -13,7 +13,6 @@
  */
 #include "postgres.h"
 
-#include "access/heapam.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
@@ -24,6 +23,7 @@
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/rel.h"
 #include "utils/syscache.h"
 #include "utils/typcache.h"
 
@@ -411,6 +411,7 @@ resolve_polymorphic_tupdesc(TupleDesc tupdesc, oidvector *declared_args,
 	bool		have_anyenum = false;
 	Oid			anyelement_type = InvalidOid;
 	Oid			anyarray_type = InvalidOid;
+	Oid			anycollation;
 	int			i;
 
 	/* See if there are any polymorphic outputs; quick out if not */
@@ -487,6 +488,24 @@ resolve_polymorphic_tupdesc(TupleDesc tupdesc, oidvector *declared_args,
 	if (have_anyenum && !type_is_enum(anyelement_type))
 		return false;
 
+	/*
+	 * Identify the collation to use for polymorphic OUT parameters. (It'll
+	 * necessarily be the same for both anyelement and anyarray.)
+	 */
+	anycollation = get_typcollation(OidIsValid(anyelement_type) ? anyelement_type : anyarray_type);
+	if (OidIsValid(anycollation))
+	{
+		/*
+		 * The types are collatable, so consider whether to use a nondefault
+		 * collation.  We do so if we can identify the input collation used
+		 * for the function.
+		 */
+		Oid			inputcollation = exprInputCollation(call_expr);
+
+		if (OidIsValid(inputcollation))
+			anycollation = inputcollation;
+	}
+
 	/* And finally replace the tuple column types as needed */
 	for (i = 0; i < natts; i++)
 	{
@@ -500,6 +519,7 @@ resolve_polymorphic_tupdesc(TupleDesc tupdesc, oidvector *declared_args,
 								   anyelement_type,
 								   -1,
 								   0);
+				TupleDescInitEntryCollation(tupdesc, i + 1, anycollation);
 				break;
 			case ANYARRAYOID:
 				TupleDescInitEntry(tupdesc, i + 1,
@@ -507,6 +527,7 @@ resolve_polymorphic_tupdesc(TupleDesc tupdesc, oidvector *declared_args,
 								   anyarray_type,
 								   -1,
 								   0);
+				TupleDescInitEntryCollation(tupdesc, i + 1, anycollation);
 				break;
 			default:
 				break;

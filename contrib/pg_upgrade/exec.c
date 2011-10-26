@@ -7,6 +7,8 @@
  *	contrib/pg_upgrade/exec.c
  */
 
+#include "postgres.h"
+
 #include "pg_upgrade.h"
 
 #include <fcntl.h>
@@ -15,8 +17,10 @@
 
 static void check_data_dir(const char *pg_data);
 static void check_bin_dir(ClusterInfo *cluster);
-static int	check_exec(const char *dir, const char *cmdName);
-static const char *validate_exec(const char *path);
+static void validate_exec(const char *dir, const char *cmdName);
+#ifdef WIN32
+static int win32_check_directory_write_permissions(void);
+#endif
 
 
 /*
@@ -47,7 +51,7 @@ exec_prog(bool throw_error, const char *fmt,...)
 	if (result != 0)
 	{
 		pg_log(throw_error ? PG_FATAL : PG_INFO,
-			   "\nThere were problems executing %s\n", cmd);
+			   "There were problems executing \"%s\"\n", cmd);
 		return 1;
 	}
 
@@ -71,9 +75,10 @@ is_server_running(const char *datadir)
 
 	if ((fd = open(path, O_RDONLY, 0)) < 0)
 	{
-		if (errno != ENOENT)
-			pg_log(PG_FATAL, "\ncould not open file \"%s\" for reading\n",
-				   path);
+		/* ENOTDIR means we will throw a more useful error later */
+		if (errno != ENOENT && errno != ENOTDIR)
+			pg_log(PG_FATAL, "could not open file \"%s\" for reading: %s\n",
+				   path, getErrorText(errno));
 
 		return false;
 	}
@@ -94,22 +99,49 @@ is_server_running(const char *datadir)
 void
 verify_directories(void)
 {
-	prep_status("Checking old data directory (%s)", old_cluster.pgdata);
-	check_data_dir(old_cluster.pgdata);
-	check_ok();
 
-	prep_status("Checking old bin directory (%s)", old_cluster.bindir);
+	prep_status("Checking current, bin, and data directories");
+
+#ifndef WIN32
+	if (access(".", R_OK | W_OK | X_OK) != 0)
+#else
+	if (win32_check_directory_write_permissions() != 0)
+#endif
+		pg_log(PG_FATAL,
+		  "You must have read and write access in the current directory.\n");
+
 	check_bin_dir(&old_cluster);
-	check_ok();
-
-	prep_status("Checking new data directory (%s)", new_cluster.pgdata);
+	check_data_dir(old_cluster.pgdata);
+	check_bin_dir(&new_cluster);
 	check_data_dir(new_cluster.pgdata);
 	check_ok();
-
-	prep_status("Checking new bin directory (%s)", new_cluster.bindir);
-	check_bin_dir(&new_cluster);
-	check_ok();
 }
+
+
+#ifdef WIN32
+/*
+ * win32_check_directory_write_permissions()
+ *
+ *	access() on WIN32 can't check directory permissions, so we have to
+ *	optionally create, then delete a file to check.
+ *		http://msdn.microsoft.com/en-us/library/1w06ktdy%28v=vs.80%29.aspx
+ */
+static int
+win32_check_directory_write_permissions(void)
+{
+	int fd;
+
+	/*
+	 *	We open a file we would normally create anyway.  We do this even in
+	 *	'check' mode, which isn't ideal, but this is the best we can do.
+	 */	
+	if ((fd = open(GLOBALS_DUMP_FILE, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR)) < 0)
+		return -1;
+	close(fd);
+
+	return unlink(GLOBALS_DUMP_FILE);
+}
+#endif
 
 
 /*
@@ -126,7 +158,9 @@ check_data_dir(const char *pg_data)
 {
 	char		subDirName[MAXPGPATH];
 	int			subdirnum;
-	const char *requiredSubdirs[] = {"base", "global", "pg_clog",
+
+	/* start check with top-most directory */
+	const char *requiredSubdirs[] = {"", "base", "global", "pg_clog",
 		"pg_multixact", "pg_subtrans", "pg_tblspc", "pg_twophase",
 	"pg_xlog"};
 
@@ -136,15 +170,17 @@ check_data_dir(const char *pg_data)
 	{
 		struct stat statBuf;
 
-		snprintf(subDirName, sizeof(subDirName), "%s/%s", pg_data,
+		snprintf(subDirName, sizeof(subDirName), "%s%s%s", pg_data,
+			/* Win32 can't stat() a directory with a trailing slash. */
+				 *requiredSubdirs[subdirnum] ? "/" : "",
 				 requiredSubdirs[subdirnum]);
 
 		if (stat(subDirName, &statBuf) != 0)
-			report_status(PG_FATAL, "check for %s failed:  %s",
-						  requiredSubdirs[subdirnum], getErrorText(errno));
+			report_status(PG_FATAL, "check for \"%s\" failed: %s\n",
+						  subDirName, getErrorText(errno));
 		else if (!S_ISDIR(statBuf.st_mode))
-			report_status(PG_FATAL, "%s is not a directory",
-						  requiredSubdirs[subdirnum]);
+			report_status(PG_FATAL, "%s is not a directory\n",
+						  subDirName);
 	}
 }
 
@@ -160,42 +196,26 @@ check_data_dir(const char *pg_data)
 static void
 check_bin_dir(ClusterInfo *cluster)
 {
-	check_exec(cluster->bindir, "postgres");
-	check_exec(cluster->bindir, "pg_ctl");
-	check_exec(cluster->bindir, "pg_resetxlog");
+	struct stat statBuf;
+
+	/* check bindir */
+	if (stat(cluster->bindir, &statBuf) != 0)
+		report_status(PG_FATAL, "check for \"%s\" failed: %s\n",
+					  cluster->bindir, getErrorText(errno));
+	else if (!S_ISDIR(statBuf.st_mode))
+		report_status(PG_FATAL, "%s is not a directory\n",
+					  cluster->bindir);
+
+	validate_exec(cluster->bindir, "postgres");
+	validate_exec(cluster->bindir, "pg_ctl");
+	validate_exec(cluster->bindir, "pg_resetxlog");
 	if (cluster == &new_cluster)
 	{
 		/* these are only needed in the new cluster */
-		check_exec(cluster->bindir, "pg_config");
-		check_exec(cluster->bindir, "psql");
-		check_exec(cluster->bindir, "pg_dumpall");
+		validate_exec(cluster->bindir, "pg_config");
+		validate_exec(cluster->bindir, "psql");
+		validate_exec(cluster->bindir, "pg_dumpall");
 	}
-}
-
-
-/*
- * check_exec()
- *
- *	Checks whether either of the two command names (cmdName and alternative)
- *	appears to be an executable (in the given directory).  If dir/cmdName is
- *	an executable, this function returns 1. If dir/alternative is an
- *	executable, this function returns 2.  If neither of the given names is
- *	a valid executable, this function returns 0 to indicated failure.
- */
-static int
-check_exec(const char *dir, const char *cmdName)
-{
-	char		path[MAXPGPATH];
-	const char *errMsg;
-
-	snprintf(path, sizeof(path), "%s/%s", dir, cmdName);
-
-	if ((errMsg = validate_exec(path)) == NULL)
-		return 1;				/* 1 -> first alternative OK */
-	else
-		pg_log(PG_FATAL, "check for %s failed - %s\n", cmdName, errMsg);
-
-	return 0;					/* 0 -> neither alternative is acceptable */
 }
 
 
@@ -203,36 +223,31 @@ check_exec(const char *dir, const char *cmdName)
  * validate_exec()
  *
  * validate "path" as an executable file
- * returns 0 if the file is found and no error is encountered.
- *		  -1 if the regular file "path" does not exist or cannot be executed.
- *		  -2 if the file is otherwise valid but cannot be read.
  */
-static const char *
-validate_exec(const char *path)
+static void
+validate_exec(const char *dir, const char *cmdName)
 {
+	char		path[MAXPGPATH];
 	struct stat buf;
 
-#ifdef WIN32
-	/* Win32 requires a .exe suffix for stat() */
-	char		path_exe[MAXPGPATH + sizeof(EXE_EXT) - 1];
+	snprintf(path, sizeof(path), "%s/%s", dir, cmdName);
 
-	if (strlen(path) >= strlen(EXE_EXT) &&
+#ifdef WIN32
+	/* Windows requires a .exe suffix for stat() */
+	if (strlen(path) <= strlen(EXE_EXT) ||
 		pg_strcasecmp(path + strlen(path) - strlen(EXE_EXT), EXE_EXT) != 0)
-	{
-		strcpy(path_exe, path);
-		strcat(path_exe, EXE_EXT);
-		path = path_exe;
-	}
+		strlcat(path, EXE_EXT, sizeof(path));
 #endif
 
 	/*
 	 * Ensure that the file exists and is a regular file.
 	 */
 	if (stat(path, &buf) < 0)
-		return getErrorText(errno);
-
-	if (!S_ISREG(buf.st_mode))
-		return "not an executable file";
+		pg_log(PG_FATAL, "check for \"%s\" failed: %s\n",
+			   path, getErrorText(errno));
+	else if (!S_ISREG(buf.st_mode))
+		pg_log(PG_FATAL, "check for \"%s\" failed: not an executable file\n",
+			   path);
 
 	/*
 	 * Ensure that the file is both executable and readable (required for
@@ -240,15 +255,17 @@ validate_exec(const char *path)
 	 */
 #ifndef WIN32
 	if (access(path, R_OK) != 0)
-		return "can't read file (permission denied)";
-	if (access(path, X_OK) != 0)
-		return "can't execute (permission denied)";
-	return NULL;
 #else
 	if ((buf.st_mode & S_IRUSR) == 0)
-		return "can't read file (permission denied)";
-	if ((buf.st_mode & S_IXUSR) == 0)
-		return "can't execute (permission denied)";
-	return NULL;
 #endif
+		pg_log(PG_FATAL, "check for \"%s\" failed: cannot read file (permission denied)\n",
+			   path);
+
+#ifndef WIN32
+	if (access(path, X_OK) != 0)
+#else
+	if ((buf.st_mode & S_IXUSR) == 0)
+#endif
+		pg_log(PG_FATAL, "check for \"%s\" failed: cannot execute (permission denied)\n",
+			   path);
 }

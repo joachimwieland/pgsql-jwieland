@@ -25,6 +25,7 @@
 #include "executor/executor.h"
 #include "executor/nodeLockRows.h"
 #include "storage/bufmgr.h"
+#include "utils/rel.h"
 #include "utils/tqual.h"
 
 
@@ -291,7 +292,7 @@ ExecInitLockRows(LockRows *node, EState *estate, int eflags)
 
 	/*
 	 * Locate the ExecRowMark(s) that this node is responsible for, and
-	 * construct ExecAuxRowMarks for them.  (InitPlan should already have
+	 * construct ExecAuxRowMarks for them.	(InitPlan should already have
 	 * built the global list of ExecRowMarks.)
 	 */
 	lrstate->lr_arowMarks = NIL;

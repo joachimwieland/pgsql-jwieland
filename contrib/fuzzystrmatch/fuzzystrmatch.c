@@ -40,7 +40,6 @@
 
 #include <ctype.h>
 
-#include "fmgr.h"
 #include "mb/pg_wchar.h"
 #include "utils/builtins.h"
 
@@ -168,7 +167,7 @@ getcode(char c)
 #define NOGHTOF(c)	(getcode(c) & 16)	/* BDH */
 
 /* Faster than memcmp(), for this use case. */
-static bool inline
+static inline bool
 rest_of_char_same(const char *s1, const char *s2, int len)
 {
 	while (len > 0)

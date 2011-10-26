@@ -87,10 +87,11 @@ PostgreSQL documentation
 
      <varlistentry>
       <term><option>-D <replaceable class="parameter">tablespace</replaceable></></term>
-      <term><option>--tablespace <replaceable class="parameter">tablespace</replaceable></></term>
+      <term><option>--tablespace=<replaceable class="parameter">tablespace</replaceable></></term>
       <listitem>
        <para>
-        Specifies the default tablespace for the database.
+        Specifies the default tablespace for the database. (This name
+        is processed as a double-quoted identifier.)
        </para>
       </listitem>
      </varlistentry>
@@ -107,37 +108,8 @@ PostgreSQL documentation
      </varlistentry>
 
      <varlistentry>
-      <term><option>-l <replaceable class="parameter">locale</replaceable></></term>
-      <term><option>--locale <replaceable class="parameter">locale</replaceable></></term>
-      <listitem>
-       <para>
-        Specifies the locale to be used in this database.  This is equivalent
-        to specifying both <option>--lc-collate</option> and <option>--lc-ctype</option>.
-       </para>
-      </listitem>
-     </varlistentry>
-
-     <varlistentry>
-      <term><option>--lc-collate <replaceable class="parameter">locale</replaceable></></term>
-      <listitem>
-       <para>
-        Specifies the LC_COLLATE setting to be used in this database.
-       </para>
-      </listitem>
-     </varlistentry>
-
-     <varlistentry>
-      <term><option>--lc-ctype <replaceable class="parameter">locale</replaceable></></term>
-      <listitem>
-       <para>
-        Specifies the LC_CTYPE setting to be used in this database.
-       </para>
-      </listitem>
-     </varlistentry>
-
-     <varlistentry>
       <term><option>-E <replaceable class="parameter">encoding</replaceable></></term>
-      <term><option>--encoding <replaceable class="parameter">encoding</replaceable></></term>
+      <term><option>--encoding=<replaceable class="parameter">encoding</replaceable></></term>
       <listitem>
        <para>
         Specifies the character encoding scheme to be used in this
@@ -149,21 +121,52 @@ PostgreSQL documentation
      </varlistentry>
 
      <varlistentry>
+      <term><option>-l <replaceable class="parameter">locale</replaceable></></term>
+      <term><option>--locale=<replaceable class="parameter">locale</replaceable></></term>
+      <listitem>
+       <para>
+        Specifies the locale to be used in this database.  This is equivalent
+        to specifying both <option>--lc-collate</option> and <option>--lc-ctype</option>.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><option>--lc-collate=<replaceable class="parameter">locale</replaceable></></term>
+      <listitem>
+       <para>
+        Specifies the LC_COLLATE setting to be used in this database.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><option>--lc-ctype=<replaceable class="parameter">locale</replaceable></></term>
+      <listitem>
+       <para>
+        Specifies the LC_CTYPE setting to be used in this database.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
       <term><option>-O <replaceable class="parameter">owner</replaceable></></term>
-      <term><option>--owner <replaceable class="parameter">owner</replaceable></></term>
+      <term><option>--owner=<replaceable class="parameter">owner</replaceable></></term>
       <listitem>
        <para>
         Specifies the database user who will own the new database.
+        (This name is processed as a double-quoted identifier.)
        </para>
       </listitem>
      </varlistentry>
 
      <varlistentry>
       <term><option>-T <replaceable class="parameter">template</replaceable></></term>
-      <term><option>--template <replaceable class="parameter">template</replaceable></></term>
+      <term><option>--template=<replaceable class="parameter">template</replaceable></></term>
       <listitem>
        <para>
-        Specifies the template database from which to build this database.
+        Specifies the template database from which to build this
+        database.  (This name is processed as a double-quoted identifier.)
        </para>
       </listitem>
      </varlistentry>
@@ -207,7 +210,7 @@ PostgreSQL documentation
     <variablelist>
      <varlistentry>
       <term><option>-h <replaceable class="parameter">host</replaceable></></term>
-      <term><option>--host <replaceable class="parameter">host</replaceable></></term>
+      <term><option>--host=<replaceable class="parameter">host</replaceable></></term>
       <listitem>
        <para>
         Specifies the host name of the machine on which the
@@ -219,7 +222,7 @@ PostgreSQL documentation
 
      <varlistentry>
       <term><option>-p <replaceable class="parameter">port</replaceable></></term>
-      <term><option>--port <replaceable class="parameter">port</replaceable></></term>
+      <term><option>--port=<replaceable class="parameter">port</replaceable></></term>
       <listitem>
        <para>
         Specifies the TCP port or the local Unix domain socket file
@@ -230,7 +233,7 @@ PostgreSQL documentation
 
      <varlistentry>
       <term><option>-U <replaceable class="parameter">username</replaceable></></term>
-      <term><option>--username <replaceable class="parameter">username</replaceable></></term>
+      <term><option>--username=<replaceable class="parameter">username</replaceable></></term>
       <listitem>
        <para>
         User name to connect as.
@@ -352,8 +355,7 @@ PostgreSQL documentation
 <screen>
 <prompt>$ </prompt><userinput>createdb -p 5000 -h eden -E LATIN1 -e demo</userinput>
 <computeroutput>CREATE DATABASE demo ENCODING 'LATIN1';</computeroutput>
-</screen>
-   </para>
+</screen></para>
  </refsect1>
 
 

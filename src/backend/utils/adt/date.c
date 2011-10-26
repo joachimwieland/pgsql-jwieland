@@ -27,6 +27,7 @@
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/date.h"
+#include "utils/datetime.h"
 #include "utils/nabstime.h"
 
 /*
@@ -472,7 +473,7 @@ date2timestamptz(DateADT dateVal)
 double
 date2timestamp_no_overflow(DateADT dateVal)
 {
-	double	result;
+	double		result;
 
 	if (DATE_IS_NOBEGIN(dateVal))
 		result = -DBL_MAX;
@@ -2612,7 +2613,7 @@ timetz_zone(PG_FUNCTION_ARGS)
 	type = DecodeSpecial(0, lowzone, &val);
 
 	if (type == TZ || type == DTZ)
-		tz = val * 60;
+		tz = val * MINS_PER_HOUR;
 	else
 	{
 		tzp = pg_tzset(tzname);

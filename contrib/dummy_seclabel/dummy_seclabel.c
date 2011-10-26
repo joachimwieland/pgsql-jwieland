@@ -14,11 +14,12 @@
 
 #include "commands/seclabel.h"
 #include "miscadmin.h"
+#include "utils/rel.h"
 
 PG_MODULE_MAGIC;
 
 /* Entrypoint of the module */
-void _PG_init(void);
+void		_PG_init(void);
 
 static void
 dummy_object_relabel(const ObjectAddress *object, const char *seclabel)

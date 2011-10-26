@@ -3,6 +3,10 @@
  * execGrouping.c
  *	  executor utility routines for grouping, hashing, and aggregation
  *
+ * Note: we currently assume that equality and hashing functions are not
+ * collation-sensitive, so the code in this file has no support for passing
+ * collation settings through from callers.  That may have to change someday.
+ *
  * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
@@ -15,10 +19,9 @@
 #include "postgres.h"
 
 #include "executor/executor.h"
-#include "parser/parse_oper.h"
+#include "miscadmin.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
-#include "utils/syscache.h"
 
 
 static TupleHashTable CurTupleHashTable = NULL;
@@ -272,7 +275,7 @@ TupleHashTable
 BuildTupleHashTable(int numCols, AttrNumber *keyColIdx,
 					FmgrInfo *eqfunctions,
 					FmgrInfo *hashfunctions,
-					int nbuckets, Size entrysize,
+					long nbuckets, Size entrysize,
 					MemoryContext tablecxt, MemoryContext tempcxt)
 {
 	TupleHashTable hashtable;
@@ -280,6 +283,9 @@ BuildTupleHashTable(int numCols, AttrNumber *keyColIdx,
 
 	Assert(nbuckets > 0);
 	Assert(entrysize >= sizeof(TupleHashEntryData));
+
+	/* Limit initial table size request to not more than work_mem */
+	nbuckets = Min(nbuckets, (long) ((work_mem * 1024L) / entrysize));
 
 	hashtable = (TupleHashTable) MemoryContextAlloc(tablecxt,
 												 sizeof(TupleHashTableData));
@@ -302,7 +308,7 @@ BuildTupleHashTable(int numCols, AttrNumber *keyColIdx,
 	hash_ctl.hash = TupleHashTableHash;
 	hash_ctl.match = TupleHashTableMatch;
 	hash_ctl.hcxt = tablecxt;
-	hashtable->hashtab = hash_create("TupleHashTable", (long) nbuckets,
+	hashtable->hashtab = hash_create("TupleHashTable", nbuckets,
 									 &hash_ctl,
 					HASH_ELEM | HASH_FUNCTION | HASH_COMPARE | HASH_CONTEXT);
 

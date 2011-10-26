@@ -24,7 +24,7 @@
 
 #include "executor/nodeFunctionscan.h"
 #include "funcapi.h"
-#include "utils/builtins.h"
+#include "nodes/nodeFuncs.h"
 
 
 static TupleTableSlot *FunctionNext(FunctionScanState *node);
@@ -185,12 +185,16 @@ ExecInitFunctionScan(FunctionScan *node, EState *estate, int eflags)
 						   funcrettype,
 						   -1,
 						   0);
+		TupleDescInitEntryCollation(tupdesc,
+									(AttrNumber) 1,
+									exprCollation(node->funcexpr));
 	}
 	else if (functypclass == TYPEFUNC_RECORD)
 	{
 		tupdesc = BuildDescFromLists(node->funccolnames,
 									 node->funccoltypes,
-									 node->funccoltypmods);
+									 node->funccoltypmods,
+									 node->funccolcollations);
 	}
 	else
 	{

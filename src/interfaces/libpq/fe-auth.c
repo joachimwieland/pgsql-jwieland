@@ -27,11 +27,9 @@
 #else
 #include <unistd.h>
 #include <fcntl.h>
-#include <sys/types.h>
 #include <sys/param.h>			/* for MAXHOSTNAMELEN on most */
 #include <sys/socket.h>
-#if defined(HAVE_STRUCT_CMSGCRED) || defined(HAVE_STRUCT_FCRED) || defined(HAVE_STRUCT_SOCKCRED)
-#include <sys/uio.h>
+#ifdef HAVE_SYS_UCRED_H
 #include <sys/ucred.h>
 #endif
 #ifndef  MAXHOSTNAMELEN
@@ -246,7 +244,7 @@ pg_krb5_sendauth(PGconn *conn)
 	}
 
 	retval = krb5_sendauth(info.pg_krb5_context, &auth_context,
-					  (krb5_pointer) & conn->sock, (char *) conn->krbsrvname,
+					   (krb5_pointer) &conn->sock, (char *) conn->krbsrvname,
 						   info.pg_krb5_client, server,
 						   AP_OPTS_MUTUAL_REQUIRED,
 						   NULL, 0,		/* no creds, use ccache instead */
@@ -320,15 +318,14 @@ static void
 pg_GSS_error_int(PQExpBuffer str, const char *mprefix,
 				 OM_uint32 stat, int type)
 {
-	OM_uint32	lmaj_s,
-				lmin_s;
+	OM_uint32	lmin_s;
 	gss_buffer_desc lmsg;
 	OM_uint32	msg_ctx = 0;
 
 	do
 	{
-		lmaj_s = gss_display_status(&lmin_s, stat, type,
-									GSS_C_NO_OID, &msg_ctx, &lmsg);
+		gss_display_status(&lmin_s, stat, type,
+						   GSS_C_NO_OID, &msg_ctx, &lmsg);
 		appendPQExpBuffer(str, "%s: %s\n", mprefix, (char *) lmsg.value);
 		gss_release_buffer(&lmin_s, &lmsg);
 	} while (msg_ctx);
@@ -680,26 +677,25 @@ pg_SSPI_startup(PGconn *conn, int use_negotiate)
 /*
  * Respond to AUTH_REQ_SCM_CREDS challenge.
  *
- * Note: current backends will not use this challenge if HAVE_GETPEEREID
- * or SO_PEERCRED is defined, but pre-7.4 backends might, so compile the
- * code anyway.
+ * Note: this is dead code as of Postgres 9.1, because current backends will
+ * never send this challenge.  But we must keep it as long as libpq needs to
+ * interoperate with pre-9.1 servers.  It is believed to be needed only on
+ * Debian/kFreeBSD (ie, FreeBSD kernel with Linux userland, so that the
+ * getpeereid() function isn't provided by libc).
  */
 static int
 pg_local_sendauth(PGconn *conn)
 {
-#if defined(HAVE_STRUCT_CMSGCRED) || defined(HAVE_STRUCT_FCRED) || \
-	(defined(HAVE_STRUCT_SOCKCRED) && defined(LOCAL_CREDS))
+#ifdef HAVE_STRUCT_CMSGCRED
 	char		buf;
 	struct iovec iov;
 	struct msghdr msg;
-
-#ifdef HAVE_STRUCT_CMSGCRED
-	/* Prevent padding */
-	char		cmsgmem[sizeof(struct cmsghdr) + sizeof(struct cmsgcred)];
-
-	/* Point to start of first structure */
-	struct cmsghdr *cmsg = (struct cmsghdr *) cmsgmem;
-#endif
+	struct cmsghdr *cmsg;
+	union
+	{
+		struct cmsghdr hdr;
+		unsigned char buf[CMSG_SPACE(sizeof(struct cmsgcred))];
+	}			cmsgbuf;
 
 	/*
 	 * The backend doesn't care what we send here, but it wants exactly one
@@ -713,15 +709,14 @@ pg_local_sendauth(PGconn *conn)
 	msg.msg_iov = &iov;
 	msg.msg_iovlen = 1;
 
-#ifdef HAVE_STRUCT_CMSGCRED
-	/* Create control header, FreeBSD */
-	msg.msg_control = cmsg;
-	msg.msg_controllen = sizeof(cmsgmem);
-	memset(cmsg, 0, sizeof(cmsgmem));
-	cmsg->cmsg_len = sizeof(cmsgmem);
+	/* We must set up a message that will be filled in by kernel */
+	memset(&cmsgbuf, 0, sizeof(cmsgbuf));
+	msg.msg_control = &cmsgbuf.buf;
+	msg.msg_controllen = sizeof(cmsgbuf.buf);
+	cmsg = CMSG_FIRSTHDR(&msg);
+	cmsg->cmsg_len = CMSG_LEN(sizeof(struct cmsgcred));
 	cmsg->cmsg_level = SOL_SOCKET;
 	cmsg->cmsg_type = SCM_CREDS;
-#endif
 
 	if (sendmsg(conn->sock, &msg, 0) == -1)
 	{
@@ -892,14 +887,14 @@ pg_fe_sendauth(AuthRequest areq, PGconn *conn)
 				pgunlock_thread();
 			}
 			break;
-#else /* defined(ENABLE_GSS) || defined(ENABLE_SSPI) */
+#else							/* defined(ENABLE_GSS) || defined(ENABLE_SSPI) */
 			/* No GSSAPI *or* SSPI support */
 		case AUTH_REQ_GSS:
 		case AUTH_REQ_GSS_CONT:
 			printfPQExpBuffer(&conn->errorMessage,
 					 libpq_gettext("GSSAPI authentication not supported\n"));
 			return STATUS_ERROR;
-#endif /* defined(ENABLE_GSS) || defined(ENABLE_SSPI) */
+#endif   /* defined(ENABLE_GSS) || defined(ENABLE_SSPI) */
 
 #ifdef ENABLE_SSPI
 		case AUTH_REQ_SSPI:
@@ -919,19 +914,20 @@ pg_fe_sendauth(AuthRequest areq, PGconn *conn)
 			pgunlock_thread();
 			break;
 #else
+
 			/*
 			 * No SSPI support. However, if we have GSSAPI but not SSPI
 			 * support, AUTH_REQ_SSPI will have been handled in the codepath
-			 * for AUTH_REQ_GSSAPI above, so don't duplicate the case label
-			 * in that case.
+			 * for AUTH_REQ_GSSAPI above, so don't duplicate the case label in
+			 * that case.
 			 */
 #if !defined(ENABLE_GSS)
 		case AUTH_REQ_SSPI:
 			printfPQExpBuffer(&conn->errorMessage,
 					   libpq_gettext("SSPI authentication not supported\n"));
 			return STATUS_ERROR;
-#endif /* !define(ENABLE_GSSAPI) */
-#endif /* ENABLE_SSPI */
+#endif   /* !define(ENABLE_GSSAPI) */
+#endif   /* ENABLE_SSPI */
 
 
 		case AUTH_REQ_CRYPT:

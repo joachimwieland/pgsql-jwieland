@@ -288,9 +288,9 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 					 errmsg("function %s does not exist",
 							func_signature_string(funcname, nargs, argnames,
 												  actual_arg_types)),
-			errhint("No aggregate function matches the given name and argument types. "
-					"Perhaps you misplaced ORDER BY; ORDER BY must appear "
-					"after all regular arguments of the aggregate."),
+					 errhint("No aggregate function matches the given name and argument types. "
+					  "Perhaps you misplaced ORDER BY; ORDER BY must appear "
+							 "after all regular arguments of the aggregate."),
 					 parser_errposition(pstate, location)));
 		}
 		else
@@ -367,6 +367,7 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 					 errmsg("could not find array type for data type %s",
 							format_type_be(newa->element_typeid)),
 				  parser_errposition(pstate, exprLocation((Node *) vargs))));
+		/* array_collid will be set by parse_collate.c */
 		newa->multidims = false;
 		newa->location = exprLocation((Node *) vargs);
 
@@ -382,6 +383,7 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 		funcexpr->funcresulttype = rettype;
 		funcexpr->funcretset = retset;
 		funcexpr->funcformat = COERCE_EXPLICIT_CALL;
+		/* funccollid and inputcollid will be set by parse_collate.c */
 		funcexpr->args = fargs;
 		funcexpr->location = location;
 
@@ -394,6 +396,7 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 
 		aggref->aggfnoid = funcid;
 		aggref->aggtype = rettype;
+		/* aggcollid and inputcollid will be set by parse_collate.c */
 		/* args, aggorder, aggdistinct will be set by transformAggregateCall */
 		aggref->aggstar = agg_star;
 		/* agglevelsup will be set by transformAggregateCall */
@@ -449,6 +452,7 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 
 		wfunc->winfnoid = funcid;
 		wfunc->wintype = rettype;
+		/* wincollid and inputcollid will be set by parse_collate.c */
 		wfunc->args = fargs;
 		/* winref will be set by transformWindowFuncCall */
 		wfunc->winstar = agg_star;
@@ -1030,7 +1034,7 @@ func_get_detail(List *funcname,
 						case COERCION_PATH_COERCEVIAIO:
 							if ((sourceType == RECORDOID ||
 								 ISCOMPLEX(sourceType)) &&
-								TypeCategory(targetType) == TYPCATEGORY_STRING)
+							  TypeCategory(targetType) == TYPCATEGORY_STRING)
 								iscoercion = false;
 							else
 								iscoercion = true;
@@ -1380,6 +1384,8 @@ ParseComplexProjection(ParseState *pstate, char *funcname, Node *first_arg,
 			fselect->fieldnum = i + 1;
 			fselect->resulttype = att->atttypid;
 			fselect->resulttypmod = att->atttypmod;
+			/* save attribute's collation for parse_collate.c */
+			fselect->resultcollid = att->attcollation;
 			return (Node *) fselect;
 		}
 	}

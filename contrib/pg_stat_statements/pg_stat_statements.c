@@ -23,8 +23,6 @@
 #include <unistd.h>
 
 #include "access/hash.h"
-#include "catalog/pg_type.h"
-#include "executor/executor.h"
 #include "executor/instrument.h"
 #include "funcapi.h"
 #include "mb/pg_wchar.h"
@@ -35,8 +33,6 @@
 #include "storage/spin.h"
 #include "tcop/utility.h"
 #include "utils/builtins.h"
-#include "utils/hsearch.h"
-#include "utils/guc.h"
 
 
 PG_MODULE_MAGIC;
@@ -122,6 +118,7 @@ static int	nested_level = 0;
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 static ExecutorStart_hook_type prev_ExecutorStart = NULL;
 static ExecutorRun_hook_type prev_ExecutorRun = NULL;
+static ExecutorFinish_hook_type prev_ExecutorFinish = NULL;
 static ExecutorEnd_hook_type prev_ExecutorEnd = NULL;
 static ProcessUtility_hook_type prev_ProcessUtility = NULL;
 
@@ -136,7 +133,7 @@ typedef enum
 	PGSS_TRACK_NONE,			/* track no statements */
 	PGSS_TRACK_TOP,				/* only top level statements */
 	PGSS_TRACK_ALL				/* all statements, including nested ones */
-} PGSSTrackLevel;
+}	PGSSTrackLevel;
 
 static const struct config_enum_entry track_options[] =
 {
@@ -173,6 +170,7 @@ static void pgss_ExecutorStart(QueryDesc *queryDesc, int eflags);
 static void pgss_ExecutorRun(QueryDesc *queryDesc,
 				 ScanDirection direction,
 				 long count);
+static void pgss_ExecutorFinish(QueryDesc *queryDesc);
 static void pgss_ExecutorEnd(QueryDesc *queryDesc);
 static void pgss_ProcessUtility(Node *parsetree,
 			  const char *queryString, ParamListInfo params, bool isTopLevel,
@@ -217,6 +215,7 @@ _PG_init(void)
 							PGC_POSTMASTER,
 							0,
 							NULL,
+							NULL,
 							NULL);
 
 	DefineCustomEnumVariable("pg_stat_statements.track",
@@ -228,6 +227,7 @@ _PG_init(void)
 							 PGC_SUSET,
 							 0,
 							 NULL,
+							 NULL,
 							 NULL);
 
 	DefineCustomBoolVariable("pg_stat_statements.track_utility",
@@ -238,6 +238,7 @@ _PG_init(void)
 							 PGC_SUSET,
 							 0,
 							 NULL,
+							 NULL,
 							 NULL);
 
 	DefineCustomBoolVariable("pg_stat_statements.save",
@@ -247,6 +248,7 @@ _PG_init(void)
 							 true,
 							 PGC_SIGHUP,
 							 0,
+							 NULL,
 							 NULL,
 							 NULL);
 
@@ -269,6 +271,8 @@ _PG_init(void)
 	ExecutorStart_hook = pgss_ExecutorStart;
 	prev_ExecutorRun = ExecutorRun_hook;
 	ExecutorRun_hook = pgss_ExecutorRun;
+	prev_ExecutorFinish = ExecutorFinish_hook;
+	ExecutorFinish_hook = pgss_ExecutorFinish;
 	prev_ExecutorEnd = ExecutorEnd_hook;
 	ExecutorEnd_hook = pgss_ExecutorEnd;
 	prev_ProcessUtility = ProcessUtility_hook;
@@ -285,6 +289,7 @@ _PG_fini(void)
 	shmem_startup_hook = prev_shmem_startup_hook;
 	ExecutorStart_hook = prev_ExecutorStart;
 	ExecutorRun_hook = prev_ExecutorRun;
+	ExecutorFinish_hook = prev_ExecutorFinish;
 	ExecutorEnd_hook = prev_ExecutorEnd;
 	ProcessUtility_hook = prev_ProcessUtility;
 }
@@ -539,6 +544,29 @@ pgss_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, long count)
 			prev_ExecutorRun(queryDesc, direction, count);
 		else
 			standard_ExecutorRun(queryDesc, direction, count);
+		nested_level--;
+	}
+	PG_CATCH();
+	{
+		nested_level--;
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+}
+
+/*
+ * ExecutorFinish hook: all we need do is track nesting depth
+ */
+static void
+pgss_ExecutorFinish(QueryDesc *queryDesc)
+{
+	nested_level++;
+	PG_TRY();
+	{
+		if (prev_ExecutorFinish)
+			prev_ExecutorFinish(queryDesc);
+		else
+			standard_ExecutorFinish(queryDesc);
 		nested_level--;
 	}
 	PG_CATCH();
@@ -945,8 +973,8 @@ entry_alloc(pgssHashKey *key)
 static int
 entry_cmp(const void *lhs, const void *rhs)
 {
-	double		l_usage = (*(const pgssEntry **) lhs)->counters.usage;
-	double		r_usage = (*(const pgssEntry **) rhs)->counters.usage;
+	double		l_usage = (*(pgssEntry * const *) lhs)->counters.usage;
+	double		r_usage = (*(pgssEntry * const *) rhs)->counters.usage;
 
 	if (l_usage < r_usage)
 		return -1;

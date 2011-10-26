@@ -14,7 +14,7 @@
  *	  These routines allow the parser/planner/executor to perform
  *	  rapid lookups on the contents of the system catalogs.
  *
- *	  see utils/syscache.h for a list of the cache id's
+ *	  see utils/syscache.h for a list of the cache IDs
  *
  *-------------------------------------------------------------------------
  */
@@ -28,6 +28,7 @@
 #include "catalog/pg_auth_members.h"
 #include "catalog/pg_authid.h"
 #include "catalog/pg_cast.h"
+#include "catalog/pg_collation.h"
 #include "catalog/pg_constraint.h"
 #include "catalog/pg_conversion.h"
 #include "catalog/pg_database.h"
@@ -267,6 +268,28 @@ static const struct cachedesc cacheinfo[] = {
 		},
 		64
 	},
+	{CollationRelationId,		/* COLLNAMEENCNSP */
+		CollationNameEncNspIndexId,
+		3,
+		{
+			Anum_pg_collation_collname,
+			Anum_pg_collation_collencoding,
+			Anum_pg_collation_collnamespace,
+			0
+		},
+		64
+	},
+	{CollationRelationId,		/* COLLOID */
+		CollationOidIndexId,
+		1,
+		{
+			ObjectIdAttributeNumber,
+			0,
+			0,
+			0
+		},
+		64
+	},
 	{ConversionRelationId,		/* CONDEFAULT */
 		ConversionDefaultIndexId,
 		4,
@@ -399,7 +422,7 @@ static const struct cachedesc cacheinfo[] = {
 		},
 		32
 	},
-	{ForeignTableRelationId,		/* FOREIGNTABLEREL */
+	{ForeignTableRelationId,	/* FOREIGNTABLEREL */
 		ForeignTableRelidIndexId,
 		1,
 		{
@@ -819,7 +842,7 @@ SearchSysCache(int cacheId,
 {
 	if (cacheId < 0 || cacheId >= SysCacheSize ||
 		!PointerIsValid(SysCache[cacheId]))
-		elog(ERROR, "invalid cache id: %d", cacheId);
+		elog(ERROR, "invalid cache ID: %d", cacheId);
 
 	return SearchCatCache(SysCache[cacheId], key1, key2, key3, key4);
 }
@@ -1003,7 +1026,7 @@ SysCacheGetAttr(int cacheId, HeapTuple tup,
 	 */
 	if (cacheId < 0 || cacheId >= SysCacheSize ||
 		!PointerIsValid(SysCache[cacheId]))
-		elog(ERROR, "invalid cache id: %d", cacheId);
+		elog(ERROR, "invalid cache ID: %d", cacheId);
 	if (!PointerIsValid(SysCache[cacheId]->cc_tupdesc))
 	{
 		InitCatCachePhase2(SysCache[cacheId], false);
@@ -1024,7 +1047,7 @@ SearchSysCacheList(int cacheId, int nkeys,
 {
 	if (cacheId < 0 || cacheId >= SysCacheSize ||
 		!PointerIsValid(SysCache[cacheId]))
-		elog(ERROR, "invalid cache id: %d", cacheId);
+		elog(ERROR, "invalid cache ID: %d", cacheId);
 
 	return SearchCatCacheList(SysCache[cacheId], nkeys,
 							  key1, key2, key3, key4);

@@ -130,6 +130,9 @@ typedef struct AggStatePerAggData
 	FmgrInfo	transfn;
 	FmgrInfo	finalfn;
 
+	/* Input collation derived for aggregate */
+	Oid			aggCollation;
+
 	/* number of sorting columns */
 	int			numSortCols;
 
@@ -140,6 +143,7 @@ typedef struct AggStatePerAggData
 	/* deconstructed sorting information (arrays of length numSortCols) */
 	AttrNumber *sortColIdx;
 	Oid		   *sortOperators;
+	Oid		   *sortCollations;
 	bool	   *sortNullsFirst;
 
 	/*
@@ -198,7 +202,7 @@ typedef struct AggStatePerAggData
 	 */
 
 	Tuplesortstate *sortstate;	/* sort object, if DISTINCT or ORDER BY */
-} AggStatePerAggData;
+}	AggStatePerAggData;
 
 /*
  * AggStatePerGroupData - per-aggregate-per-group working state
@@ -245,7 +249,7 @@ typedef struct AggHashEntryData
 	TupleHashEntryData shared;	/* common header for hash table entries */
 	/* per-aggregate transition status array - must be last! */
 	AggStatePerGroupData pergroup[1];	/* VARIABLE LENGTH ARRAY */
-} AggHashEntryData;				/* VARIABLE LENGTH STRUCT */
+}	AggHashEntryData;	/* VARIABLE LENGTH STRUCT */
 
 
 static void initialize_aggregates(AggState *aggstate,
@@ -315,12 +319,14 @@ initialize_aggregates(AggState *aggstate,
 				(peraggstate->numInputs == 1) ?
 				tuplesort_begin_datum(peraggstate->evaldesc->attrs[0]->atttypid,
 									  peraggstate->sortOperators[0],
+									  peraggstate->sortCollations[0],
 									  peraggstate->sortNullsFirst[0],
 									  work_mem, false) :
 				tuplesort_begin_heap(peraggstate->evaldesc,
 									 peraggstate->numSortCols,
 									 peraggstate->sortColIdx,
 									 peraggstate->sortOperators,
+									 peraggstate->sortCollations,
 									 peraggstate->sortNullsFirst,
 									 work_mem, false);
 		}
@@ -427,6 +433,7 @@ advance_transition_function(AggState *aggstate,
 	 */
 	InitFunctionCallInfoData(*fcinfo, &(peraggstate->transfn),
 							 numArguments + 1,
+							 peraggstate->aggCollation,
 							 (void *) aggstate, NULL);
 	fcinfo->arg[0] = pergroupstate->transValue;
 	fcinfo->argnull[0] = pergroupstate->transValueIsNull;
@@ -594,6 +601,8 @@ process_ordered_aggregate_single(AggState *aggstate,
 
 		/*
 		 * If DISTINCT mode, and not distinct from prior, skip it.
+		 *
+		 * Note: we assume equality functions don't care about collation.
 		 */
 		if (isDistinct &&
 			haveOldVal &&
@@ -734,6 +743,7 @@ finalize_aggregate(AggState *aggstate,
 		FunctionCallInfoData fcinfo;
 
 		InitFunctionCallInfoData(fcinfo, &(peraggstate->finalfn), 1,
+								 peraggstate->aggCollation,
 								 (void *) aggstate, NULL);
 		fcinfo.arg[0] = pergroupstate->transValue;
 		fcinfo.argnull[0] = pergroupstate->transValueIsNull;
@@ -796,8 +806,8 @@ find_unaggregated_cols_walker(Node *node, Bitmapset **colnos)
 	{
 		Var		   *var = (Var *) node;
 
-		/* setrefs.c should have set the varno to OUTER */
-		Assert(var->varno == OUTER);
+		/* setrefs.c should have set the varno to OUTER_VAR */
+		Assert(var->varno == OUTER_VAR);
 		Assert(var->varlevelsup == 0);
 		*colnos = bms_add_member(*colnos, var->varattno);
 		return false;
@@ -824,7 +834,7 @@ build_hash_table(AggState *aggstate)
 	Assert(node->numGroups > 0);
 
 	entrysize = sizeof(AggHashEntryData) +
-		(aggstate->numaggs - 1) *sizeof(AggStatePerGroupData);
+		(aggstate->numaggs - 1) * sizeof(AggStatePerGroupData);
 
 	aggstate->hashtable = BuildTupleHashTable(node->numCols,
 											  node->grpColIdx,
@@ -896,7 +906,7 @@ hash_agg_entry_size(int numAggs)
 
 	/* This must match build_hash_table */
 	entrysize = sizeof(AggHashEntryData) +
-		(numAggs - 1) *sizeof(AggStatePerGroupData);
+		(numAggs - 1) * sizeof(AggStatePerGroupData);
 	entrysize = MAXALIGN(entrysize);
 	/* Account for hashtable overhead (assuming fill factor = 1) */
 	entrysize += 3 * sizeof(void *);
@@ -1194,6 +1204,8 @@ agg_retrieve_direct(AggState *aggstate)
 				return result;
 			}
 		}
+		else
+			InstrCountFiltered1(aggstate, 1);
 	}
 
 	/* No more groups */
@@ -1344,6 +1356,8 @@ agg_retrieve_hash_table(AggState *aggstate)
 				return result;
 			}
 		}
+		else
+			InstrCountFiltered1(aggstate, 1);
 	}
 
 	/* No more groups */
@@ -1666,19 +1680,22 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 								numArguments,
 								aggtranstype,
 								aggref->aggtype,
+								aggref->inputcollid,
 								transfn_oid,
 								finalfn_oid,
 								&transfnexpr,
 								&finalfnexpr);
 
 		fmgr_info(transfn_oid, &peraggstate->transfn);
-		peraggstate->transfn.fn_expr = (Node *) transfnexpr;
+		fmgr_info_set_expr((Node *) transfnexpr, &peraggstate->transfn);
 
 		if (OidIsValid(finalfn_oid))
 		{
 			fmgr_info(finalfn_oid, &peraggstate->finalfn);
-			peraggstate->finalfn.fn_expr = (Node *) finalfnexpr;
+			fmgr_info_set_expr((Node *) finalfnexpr, &peraggstate->finalfn);
 		}
+
+		peraggstate->aggCollation = aggref->inputcollid;
 
 		get_typlenbyval(aggref->aggtype,
 						&peraggstate->resulttypeLen,
@@ -1786,6 +1803,8 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 				(AttrNumber *) palloc(numSortCols * sizeof(AttrNumber));
 			peraggstate->sortOperators =
 				(Oid *) palloc(numSortCols * sizeof(Oid));
+			peraggstate->sortCollations =
+				(Oid *) palloc(numSortCols * sizeof(Oid));
 			peraggstate->sortNullsFirst =
 				(bool *) palloc(numSortCols * sizeof(bool));
 
@@ -1801,6 +1820,7 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 
 				peraggstate->sortColIdx[i] = tle->resno;
 				peraggstate->sortOperators[i] = sortcl->sortop;
+				peraggstate->sortCollations[i] = exprCollation((Node *) tle->expr);
 				peraggstate->sortNullsFirst[i] = sortcl->nulls_first;
 				i++;
 			}

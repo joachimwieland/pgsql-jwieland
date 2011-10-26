@@ -19,12 +19,15 @@
 #include "storage/buf.h"
 #include "utils/relcache.h"
 
-extern void visibilitymap_clear(Relation rel, BlockNumber heapBlk);
+extern void visibilitymap_clear(Relation rel, BlockNumber heapBlk,
+					Buffer vmbuf);
 extern void visibilitymap_pin(Relation rel, BlockNumber heapBlk,
 				  Buffer *vmbuf);
+extern bool visibilitymap_pin_ok(BlockNumber heapBlk, Buffer vmbuf);
 extern void visibilitymap_set(Relation rel, BlockNumber heapBlk,
-				  XLogRecPtr recptr, Buffer *vmbuf);
+				  XLogRecPtr recptr, Buffer vmbuf);
 extern bool visibilitymap_test(Relation rel, BlockNumber heapBlk, Buffer *vmbuf);
-extern void visibilitymap_truncate(Relation rel, BlockNumber heapblk);
+extern BlockNumber visibilitymap_count(Relation rel);
+extern void visibilitymap_truncate(Relation rel, BlockNumber nheapblocks);
 
 #endif   /* VISIBILITYMAP_H */

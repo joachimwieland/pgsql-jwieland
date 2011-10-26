@@ -19,12 +19,8 @@
 #include "postgres.h"
 
 #include "access/xact.h"
-#include "fmgr.h"
 #include "commands/trigger.h"
 #include "executor/spi.h"
-#include "lib/stringinfo.h"
-#include "nodes/bitmapset.h"
-#include "utils/tuplestore.h"
 
 /**********************************************************************
  * Definitions
@@ -90,6 +86,7 @@ enum PLpgSQL_stmt_types
 	PLPGSQL_STMT_FORI,
 	PLPGSQL_STMT_FORS,
 	PLPGSQL_STMT_FORC,
+	PLPGSQL_STMT_FOREACH_A,
 	PLPGSQL_STMT_EXIT,
 	PLPGSQL_STMT_RETURN,
 	PLPGSQL_STMT_RETURN_NEXT,
@@ -119,13 +116,18 @@ enum
 };
 
 /* ----------
- * GET DIAGNOSTICS system attrs
+ * GET DIAGNOSTICS information items
  * ----------
  */
 enum
 {
 	PLPGSQL_GETDIAG_ROW_COUNT,
-	PLPGSQL_GETDIAG_RESULT_OID
+	PLPGSQL_GETDIAG_RESULT_OID,
+	PLPGSQL_GETDIAG_ERROR_CONTEXT,
+	PLPGSQL_GETDIAG_ERROR_DETAIL,
+	PLPGSQL_GETDIAG_ERROR_HINT,
+	PLPGSQL_GETDIAG_RETURNED_SQLSTATE,
+	PLPGSQL_GETDIAG_MESSAGE_TEXT
 };
 
 /* --------
@@ -166,6 +168,7 @@ typedef struct
 	bool		typbyval;
 	Oid			typrelid;
 	Oid			typioparam;
+	Oid			collation;		/* from pg_type, but can be overridden */
 	FmgrInfo	typinput;		/* lookup info for typinput function */
 	int32		atttypmod;		/* typmod (taken from someplace else) */
 } PLpgSQL_type;
@@ -296,6 +299,16 @@ typedef struct
 	int			dno;
 	PLpgSQL_expr *subscript;
 	int			arrayparentno;	/* dno of parent array variable */
+	/* Remaining fields are cached info about the array variable's type */
+	Oid			parenttypoid;	/* type of array variable; 0 if not yet set */
+	int32		parenttypmod;	/* typmod of array variable */
+	Oid			arraytypoid;	/* OID of actual array type */
+	int32		arraytypmod;	/* typmod of array (and its elements too) */
+	int16		arraytyplen;	/* typlen of array type */
+	Oid			elemtypoid;		/* OID of array element type */
+	int16		elemtyplen;		/* typlen of element type */
+	bool		elemtypbyval;	/* element type is pass-by-value? */
+	char		elemtypalign;	/* typalign of element type */
 } PLpgSQL_arrayelem;
 
 
@@ -374,6 +387,7 @@ typedef struct
 {								/* Get Diagnostics statement		*/
 	int			cmd_type;
 	int			lineno;
+	bool		is_stacked;		/* STACKED or CURRENT diagnostics area? */
 	List	   *diag_items;		/* List of PLpgSQL_diag_item */
 } PLpgSQL_stmt_getdiag;
 
@@ -492,6 +506,18 @@ typedef struct
 	PLpgSQL_expr *query;
 	List	   *params;			/* USING expressions */
 } PLpgSQL_stmt_dynfors;
+
+
+typedef struct
+{								/* FOREACH item in array loop */
+	int			cmd_type;
+	int			lineno;
+	char	   *label;
+	int			varno;			/* loop target variable */
+	int			slice;			/* slice dimension, or 0 */
+	PLpgSQL_expr *expr;			/* array expression */
+	List	   *body;			/* List of statements */
+} PLpgSQL_stmt_foreach_a;
 
 
 typedef struct
@@ -621,11 +647,18 @@ typedef struct PLpgSQL_func_hashkey
 
 	/*
 	 * For a trigger function, the OID of the relation triggered on is part of
-	 * the hashkey --- we want to compile the trigger separately for each
+	 * the hash key --- we want to compile the trigger separately for each
 	 * relation it is used with, in case the rowtype is different.	Zero if
 	 * not called as a trigger.
 	 */
 	Oid			trigrelOid;
+
+	/*
+	 * We must include the input collation as part of the hash key too,
+	 * because we have to generate different plans (with different Param
+	 * collations) for different collation settings.
+	 */
+	Oid			inputCollation;
 
 	/*
 	 * We include actual argument types in the hash key to support polymorphic
@@ -642,6 +675,7 @@ typedef struct PLpgSQL_function
 	TransactionId fn_xmin;
 	ItemPointerData fn_tid;
 	bool		fn_is_trigger;
+	Oid			fn_input_collation;
 	PLpgSQL_func_hashkey *fn_hashkey;	/* back-link to hashtable key */
 	MemoryContext fn_cxt;
 
@@ -847,7 +881,8 @@ extern PLpgSQL_type *plpgsql_parse_wordtype(char *ident);
 extern PLpgSQL_type *plpgsql_parse_cwordtype(List *idents);
 extern PLpgSQL_type *plpgsql_parse_wordrowtype(char *ident);
 extern PLpgSQL_type *plpgsql_parse_cwordrowtype(List *idents);
-extern PLpgSQL_type *plpgsql_build_datatype(Oid typeOid, int32 typmod);
+extern PLpgSQL_type *plpgsql_build_datatype(Oid typeOid, int32 typmod,
+					   Oid collation);
 extern PLpgSQL_variable *plpgsql_build_variable(const char *refname, int lineno,
 					   PLpgSQL_type *dtype,
 					   bool add2namespace);
@@ -882,8 +917,9 @@ extern void plpgsql_subxact_cb(SubXactEvent event, SubTransactionId mySubid,
 				   SubTransactionId parentSubid, void *arg);
 extern Oid exec_get_datum_type(PLpgSQL_execstate *estate,
 					PLpgSQL_datum *datum);
-extern Oid exec_get_rec_fieldtype(PLpgSQL_rec *rec, const char *fieldname,
-					   int *fieldno);
+extern void exec_get_datum_type_info(PLpgSQL_execstate *estate,
+						 PLpgSQL_datum *datum,
+						 Oid *typeid, int32 *typmod, Oid *collation);
 
 /* ----------
  * Functions for namespace handling in pl_funcs.c
@@ -905,6 +941,8 @@ extern PLpgSQL_nsitem *plpgsql_ns_lookup_label(PLpgSQL_nsitem *ns_cur,
  * ----------
  */
 extern const char *plpgsql_stmt_typename(PLpgSQL_stmt *stmt);
+extern const char *plpgsql_getdiag_kindname(int kind);
+extern void plpgsql_free_function_memory(PLpgSQL_function *func);
 extern void plpgsql_dumptree(PLpgSQL_function *func);
 
 /* ----------

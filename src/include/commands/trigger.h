@@ -112,10 +112,10 @@ extern Oid CreateTrigger(CreateTrigStmt *stmt, const char *queryString,
 			  Oid constraintOid, Oid indexOid,
 			  bool isInternal);
 
-extern void DropTrigger(Oid relid, const char *trigname,
+extern void DropTrigger(RangeVar *relation, const char *trigname,
 			DropBehavior behavior, bool missing_ok);
 extern void RemoveTriggerById(Oid trigOid);
-extern Oid get_trigger_oid(Oid relid, const char *name, bool missing_ok);
+extern Oid	get_trigger_oid(Oid relid, const char *name, bool missing_ok);
 
 extern void renametrig(Oid relid, const char *oldname, const char *newname);
 
@@ -132,16 +132,16 @@ extern void ExecBSInsertTriggers(EState *estate,
 					 ResultRelInfo *relinfo);
 extern void ExecASInsertTriggers(EState *estate,
 					 ResultRelInfo *relinfo);
-extern HeapTuple ExecBRInsertTriggers(EState *estate,
+extern TupleTableSlot *ExecBRInsertTriggers(EState *estate,
 					 ResultRelInfo *relinfo,
-					 HeapTuple trigtuple);
+					 TupleTableSlot *slot);
 extern void ExecARInsertTriggers(EState *estate,
 					 ResultRelInfo *relinfo,
 					 HeapTuple trigtuple,
 					 List *recheckIndexes);
-extern HeapTuple ExecIRInsertTriggers(EState *estate,
+extern TupleTableSlot *ExecIRInsertTriggers(EState *estate,
 					 ResultRelInfo *relinfo,
-					 HeapTuple trigtuple);
+					 TupleTableSlot *slot);
 extern void ExecBSDeleteTriggers(EState *estate,
 					 ResultRelInfo *relinfo);
 extern void ExecASDeleteTriggers(EState *estate,
@@ -160,20 +160,20 @@ extern void ExecBSUpdateTriggers(EState *estate,
 					 ResultRelInfo *relinfo);
 extern void ExecASUpdateTriggers(EState *estate,
 					 ResultRelInfo *relinfo);
-extern HeapTuple ExecBRUpdateTriggers(EState *estate,
+extern TupleTableSlot *ExecBRUpdateTriggers(EState *estate,
 					 EPQState *epqstate,
 					 ResultRelInfo *relinfo,
 					 ItemPointer tupleid,
-					 HeapTuple newtuple);
+					 TupleTableSlot *slot);
 extern void ExecARUpdateTriggers(EState *estate,
 					 ResultRelInfo *relinfo,
 					 ItemPointer tupleid,
 					 HeapTuple newtuple,
 					 List *recheckIndexes);
-extern HeapTuple ExecIRUpdateTriggers(EState *estate,
+extern TupleTableSlot *ExecIRUpdateTriggers(EState *estate,
 					 ResultRelInfo *relinfo,
-					 HeapTuple oldtuple,
-					 HeapTuple newtuple);
+					 HeapTuple trigtuple,
+					 TupleTableSlot *slot);
 extern void ExecBSTruncateTriggers(EState *estate,
 					   ResultRelInfo *relinfo);
 extern void ExecASTruncateTriggers(EState *estate,

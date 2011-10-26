@@ -18,7 +18,6 @@
  */
 
 #include "postgres.h"
-#include "lib/stringinfo.h"
 #include "storage/fsm_internals.h"
 #include "utils/builtins.h"
 #include "miscadmin.h"
@@ -35,7 +34,6 @@ Datum
 fsm_page_contents(PG_FUNCTION_ARGS)
 {
 	bytea	   *raw_page = PG_GETARG_BYTEA_P(0);
-	int			raw_page_size;
 	StringInfoData sinfo;
 	FSMPage		fsmpage;
 	int			i;
@@ -45,7 +43,6 @@ fsm_page_contents(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 				 (errmsg("must be superuser to use raw page functions"))));
 
-	raw_page_size = VARSIZE(raw_page) - VARHDRSZ;
 	fsmpage = (FSMPage) PageGetContents(VARDATA(raw_page));
 
 	initStringInfo(&sinfo);

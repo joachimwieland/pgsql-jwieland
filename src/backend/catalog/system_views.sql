@@ -153,6 +153,19 @@ CREATE VIEW pg_locks AS
 CREATE VIEW pg_cursors AS
     SELECT * FROM pg_cursor() AS C;
 
+CREATE VIEW pg_available_extensions AS
+    SELECT E.name, E.default_version, X.extversion AS installed_version,
+           E.comment
+      FROM pg_available_extensions() AS E
+           LEFT JOIN pg_extension AS X ON E.name = X.extname;
+
+CREATE VIEW pg_available_extension_versions AS
+    SELECT E.name, E.version, (X.extname IS NOT NULL) AS installed,
+           E.superuser, E.relocatable, E.schema, E.requires, E.comment
+      FROM pg_available_extension_versions() AS E
+           LEFT JOIN pg_extension AS X
+             ON E.name = X.extname AND E.version = X.extversion;
+
 CREATE VIEW pg_prepared_xacts AS
     SELECT P.transaction, P.gid, P.prepared,
            U.rolname AS owner, D.datname AS database
@@ -270,7 +283,37 @@ FROM
 	pg_seclabel l
 	JOIN pg_namespace nsp ON l.classoid = nsp.tableoid AND l.objoid = nsp.oid
 WHERE
-	l.objsubid = 0;
+	l.objsubid = 0
+UNION ALL
+SELECT
+	l.objoid, l.classoid, 0::int4 AS objsubid,
+	'database'::text AS objtype,
+	NULL::oid AS objnamespace,
+	quote_ident(dat.datname) AS objname,
+	l.provider, l.label
+FROM
+	pg_shseclabel l
+	JOIN pg_database dat ON l.classoid = dat.tableoid AND l.objoid = dat.oid
+UNION ALL
+SELECT
+	l.objoid, l.classoid, 0::int4 AS objsubid,
+	'tablespace'::text AS objtype,
+	NULL::oid AS objnamespace,
+	quote_ident(spc.spcname) AS objname,
+	l.provider, l.label
+FROM
+	pg_shseclabel l
+	JOIN pg_tablespace spc ON l.classoid = spc.tableoid AND l.objoid = spc.oid
+UNION ALL
+SELECT
+	l.objoid, l.classoid, 0::int4 AS objsubid,
+	'role'::text AS objtype,
+	NULL::oid AS objnamespace,
+	quote_ident(rol.rolname) AS objname,
+	l.provider, l.label
+FROM
+	pg_shseclabel l
+	JOIN pg_authid rol ON l.classoid = rol.tableoid AND l.objoid = rol.oid;
 
 CREATE VIEW pg_settings AS
     SELECT * FROM pg_show_all_settings() AS A;
@@ -482,6 +525,7 @@ CREATE VIEW pg_stat_activity AS
             U.rolname AS usename,
             S.application_name,
             S.client_addr,
+            S.client_hostname,
             S.client_port,
             S.backend_start,
             S.xact_start,
@@ -499,10 +543,16 @@ CREATE VIEW pg_stat_replication AS
             U.rolname AS usename,
             S.application_name,
             S.client_addr,
+            S.client_hostname,
             S.client_port,
             S.backend_start,
             W.state,
-            W.sent_location
+            W.sent_location,
+            W.write_location,
+            W.flush_location,
+            W.replay_location,
+            W.sync_priority,
+            W.sync_state
     FROM pg_stat_get_activity(NULL) AS S, pg_authid U,
             pg_stat_get_wal_senders() AS W
     WHERE S.usesysid = U.oid AND
@@ -523,7 +573,8 @@ CREATE VIEW pg_stat_database AS
             pg_stat_get_db_tuples_inserted(D.oid) AS tup_inserted,
             pg_stat_get_db_tuples_updated(D.oid) AS tup_updated,
             pg_stat_get_db_tuples_deleted(D.oid) AS tup_deleted,
-            pg_stat_get_db_conflict_all(D.oid) AS conflicts
+            pg_stat_get_db_conflict_all(D.oid) AS conflicts,
+            pg_stat_get_db_stat_reset_time(D.oid) AS stats_reset
     FROM pg_database D;
 
 CREATE VIEW pg_stat_database_conflicts AS
@@ -570,7 +621,8 @@ CREATE VIEW pg_stat_bgwriter AS
         pg_stat_get_bgwriter_maxwritten_clean() AS maxwritten_clean,
         pg_stat_get_buf_written_backend() AS buffers_backend,
         pg_stat_get_buf_fsync_backend() AS buffers_backend_fsync,
-        pg_stat_get_buf_alloc() AS buffers_alloc;
+        pg_stat_get_buf_alloc() AS buffers_alloc,
+        pg_stat_get_bgwriter_stat_reset_time() AS stats_reset;
 
 CREATE VIEW pg_user_mappings AS
     SELECT

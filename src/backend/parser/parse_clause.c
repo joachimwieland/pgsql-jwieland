@@ -23,11 +23,11 @@
 #include "nodes/nodeFuncs.h"
 #include "optimizer/clauses.h"
 #include "optimizer/tlist.h"
-#include "optimizer/var.h"
 #include "parser/analyze.h"
 #include "parser/parsetree.h"
 #include "parser/parse_clause.h"
 #include "parser/parse_coerce.h"
+#include "parser/parse_collate.h"
 #include "parser/parse_expr.h"
 #include "parser/parse_oper.h"
 #include "parser/parse_relation.h"
@@ -458,7 +458,7 @@ transformCTEReference(ParseState *pstate, RangeVar *r,
 {
 	RangeTblEntry *rte;
 
-	rte = addRangeTableEntryForCTE(pstate, cte, levelsup, r->alias, true);
+	rte = addRangeTableEntryForCTE(pstate, cte, levelsup, r, true);
 
 	return rte;
 }
@@ -558,6 +558,11 @@ transformRangeFunction(ParseState *pstate, RangeFunction *r)
 	funcexpr = transformExpr(pstate, r->funccallnode);
 
 	/*
+	 * We must assign collations now so that we can fill funccolcollations.
+	 */
+	assign_expr_collations(pstate, funcexpr);
+
+	/*
 	 * The function parameters cannot make use of any variables from other
 	 * FROM items.	(Compare to transformRangeSubselect(); the coding is
 	 * different though because we didn't parse as a sub-select with its own
@@ -613,7 +618,8 @@ transformRangeFunction(ParseState *pstate, RangeFunction *r)
 
 		tupdesc = BuildDescFromLists(rte->eref->colnames,
 									 rte->funccoltypes,
-									 rte->funccoltypmods);
+									 rte->funccoltypmods,
+									 rte->funccolcollations);
 		CheckAttributeNamesTypes(tupdesc, RELKIND_COMPOSITE_TYPE, false);
 	}
 
@@ -1071,6 +1077,7 @@ buildMergedJoinVar(ParseState *pstate, JoinType jointype,
 	else if (l_colvar->vartypmod != outcoltypmod)
 		l_node = (Node *) makeRelabelType((Expr *) l_colvar,
 										  outcoltype, outcoltypmod,
+										  InvalidOid,	/* fixed below */
 										  COERCE_IMPLICIT_CAST);
 	else
 		l_node = (Node *) l_colvar;
@@ -1082,6 +1089,7 @@ buildMergedJoinVar(ParseState *pstate, JoinType jointype,
 	else if (r_colvar->vartypmod != outcoltypmod)
 		r_node = (Node *) makeRelabelType((Expr *) r_colvar,
 										  outcoltype, outcoltypmod,
+										  InvalidOid,	/* fixed below */
 										  COERCE_IMPLICIT_CAST);
 	else
 		r_node = (Node *) r_colvar;
@@ -1120,6 +1128,7 @@ buildMergedJoinVar(ParseState *pstate, JoinType jointype,
 				CoalesceExpr *c = makeNode(CoalesceExpr);
 
 				c->coalescetype = outcoltype;
+				/* coalescecollid will get set below */
 				c->args = list_make2(l_node, r_node);
 				c->location = -1;
 				res_node = (Node *) c;
@@ -1130,6 +1139,13 @@ buildMergedJoinVar(ParseState *pstate, JoinType jointype,
 			res_node = NULL;	/* keep compiler quiet */
 			break;
 	}
+
+	/*
+	 * Apply assign_expr_collations to fix up the collation info in the
+	 * coercion and CoalesceExpr nodes, if we made any.  This must be done now
+	 * so that the join node's alias vars show correct collation info.
+	 */
+	assign_expr_collations(pstate, res_node);
 
 	return res_node;
 }
@@ -2260,4 +2276,26 @@ transformFrameOffset(ParseState *pstate, int frameOptions, Node *clause)
 	checkExprIsVarFree(pstate, node, constructName);
 
 	return node;
+}
+
+/*
+ * relabel_to_typmod
+ *		Add a RelabelType node that changes just the typmod, and remove all
+ *		now-superfluous RelabelType nodes beneath it.
+ */
+Node *
+relabel_to_typmod(Node *expr, int32 typmod)
+{
+	Oid			type = exprType(expr);
+	Oid			coll = exprCollation(expr);
+
+	/*
+	 * Strip any existing RelabelType, then add one. This is to preserve the
+	 * invariant of no redundant RelabelTypes.
+	 */
+	while (IsA(expr, RelabelType))
+		expr = (Node *) ((RelabelType *) expr)->arg;
+
+	return (Node *) makeRelabelType((Expr *) expr, type, typmod, coll,
+									COERCE_DONTCARE);
 }

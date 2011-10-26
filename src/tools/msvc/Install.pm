@@ -56,8 +56,11 @@ sub Install
     my $majorver = DetermineMajorVersion();
     print "Installing version $majorver for $conf in $target\n";
 
-    EnsureDirectories($target, 'bin','lib','share','share/timezonesets','share/contrib','doc',
-        'doc/contrib', 'symbols', 'share/tsearch_data');
+    EnsureDirectories(
+        $target, 'bin', 'lib', 'share',
+        'share/timezonesets','share/extension', 'share/contrib','doc',
+        'doc/extension', 'doc/contrib','symbols', 'share/tsearch_data'
+    );
 
     CopySolutionOutput($conf, $target);
     lcopy($target . '/lib/libpq.dll', $target . '/bin/libpq.dll');
@@ -110,6 +113,22 @@ sub Install
     );
     CopyContribFiles($config,$target);
     CopyIncludeFiles($target);
+
+    my $pl_extension_files = [];
+    my @pldirs = ('src/pl/plpgsql/src');
+    push @pldirs,"src/pl/plperl" if $config->{perl};
+    push @pldirs,"src/pl/plpython" if $config->{python};
+    push @pldirs,"src/pl/tcl" if $config->{tcl};
+    File::Find::find(
+        {
+            wanted =>sub {
+                /^(.*--.*\.sql|.*\.control)\z/s
+                  &&push(@$pl_extension_files, $File::Find::name);
+              }
+        },
+        @pldirs
+    );
+    CopySetOfFiles('PL Extension files', $pl_extension_files,$target . '/share/extension/');
 
     GenerateNLSFiles($target,$config->{nls},$majorver) if ($config->{nls});
 
@@ -316,7 +335,28 @@ sub CopyContribFiles
 
         my $mf = read_file("contrib/$d/Makefile");
         $mf =~ s{\\s*[\r\n]+}{}mg;
+
+        # Note: we currently don't support setting MODULEDIR in the makefile
+        my $moduledir = 'contrib';
+
         my $flist = '';
+        if ($mf =~ /^EXTENSION\s*=\s*(.*)$/m) {$flist .= $1}
+        if ($flist ne '')
+        {
+            $moduledir = 'extension';
+            $flist = ParseAndCleanRule($flist, $mf);
+
+            foreach my $f (split /\s+/,$flist)
+            {
+                lcopy(
+                    'contrib/' . $d . '/' . $f . '.control',
+                    $target . '/share/extension/' . $f . '.control'
+                )|| croak("Could not copy file $f.control in contrib $d");
+                print '.';
+            }
+        }
+
+        $flist = '';
         if ($mf =~ /^DATA_built\s*=\s*(.*)$/m) {$flist .= $1}
         if ($mf =~ /^DATA\s*=\s*(.*)$/m) {$flist .= " $1"}
         $flist =~ s/^\s*//; # Remove leading spaces if we had only DATA_built
@@ -325,12 +365,10 @@ sub CopyContribFiles
         {
             $flist = ParseAndCleanRule($flist, $mf);
 
-            # Special case for contrib/spi
-            $flist = "autoinc.sql insert_username.sql moddatetime.sql refint.sql timetravel.sql"
-              if ($d eq 'spi');
             foreach my $f (split /\s+/,$flist)
             {
-                lcopy('contrib/' . $d . '/' . $f,$target . '/share/contrib/' . basename($f))
+                lcopy('contrib/' . $d . '/' . $f,
+                    $target . '/share/' . $moduledir . '/' . basename($f))
                   || croak("Could not copy file $f in contrib $d");
                 print '.';
             }
@@ -362,7 +400,7 @@ sub CopyContribFiles
               if ($d eq 'spi');
             foreach my $f (split /\s+/,$flist)
             {
-                lcopy('contrib/' . $d . '/' . $f, $target . '/doc/contrib/' . $f)
+                lcopy('contrib/' . $d . '/' . $f,$target . '/doc/' . $moduledir . '/' . $f)
                   || croak("Could not copy file $f in contrib $d");
                 print '.';
             }
@@ -432,21 +470,23 @@ sub CopyIncludeFiles
         $target . '/include/server/',
         'src/include/', 'pg_config.h', 'pg_config_os.h'
     );
-    CopyFiles('Grammar header', $target . '/include/server/parser/',
-	      'src/backend/parser/', 'gram.h');
+    CopyFiles('Grammar header', $target . '/include/server/parser/','src/backend/parser/',
+        'gram.h');
     CopySetOfFiles('',[ glob("src\\include\\*.h") ],$target . '/include/server/');
     my $D;
     opendir($D, 'src/include') || croak "Could not opendir on src/include!\n";
 
+    # some xcopy progs don't like mixed slash style paths
+    (my $ctarget = $target) =~ s!/!\\!g;
     while (my $d = readdir($D))
     {
         next if ($d =~ /^\./);
         next if ($d eq '.git');
         next if ($d eq 'CVS');
-        next unless (-d 'src/include/' . $d);
+        next unless (-d "src/include/$d");
 
-        EnsureDirectories($target . '/include/server', $d);
-        system("xcopy /s /i /q /r /y src\\include\\$d\\*.h \"$target\\include\\server\\$d\\\"")
+        EnsureDirectories("$target/include/server/$d");
+        system(qq{xcopy /s /i /q /r /y src\\include\\$d\\*.h "$ctarget\\include\\server\\$d\\"})
           && croak("Failed to copy include directory $d\n");
     }
     closedir($D);

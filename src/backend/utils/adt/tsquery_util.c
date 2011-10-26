@@ -14,7 +14,6 @@
 
 #include "postgres.h"
 
-#include "tsearch/ts_type.h"
 #include "tsearch/ts_utils.h"
 #include "miscadmin.h"
 
@@ -336,7 +335,7 @@ QTN2QT(QTNode *in)
 	cntsize(in, &sumlen, &nnode);
 	len = COMPUTESIZE(nnode, sumlen);
 
-	out = (TSQuery) palloc(len);
+	out = (TSQuery) palloc0(len);
 	SET_VARSIZE(out, len);
 	out->size = nnode;
 

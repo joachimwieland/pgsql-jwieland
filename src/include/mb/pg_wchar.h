@@ -19,8 +19,6 @@
 #ifndef PG_WCHAR_H
 #define PG_WCHAR_H
 
-#include <sys/types.h>
-
 /*
  * The pg_wchar type
  */
@@ -392,12 +390,8 @@ extern int	pg_mbcharcliplen(const char *mbstr, int len, int imit);
 extern int	pg_encoding_max_length(int encoding);
 extern int	pg_database_encoding_max_length(void);
 
-#ifdef USE_WIDE_UPPER_LOWER
-extern size_t wchar2char(char *to, const wchar_t *from, size_t tolen);
-extern size_t char2wchar(wchar_t *to, size_t tolen, const char *from, size_t fromlen);
-#endif
-
-extern int	SetClientEncoding(int encoding, bool doit);
+extern int	PrepareClientEncoding(int encoding);
+extern int	SetClientEncoding(int encoding);
 extern void InitializeClientEncoding(void);
 extern int	pg_get_client_encoding(void);
 extern const char *pg_get_client_encoding_name(void);
@@ -420,6 +414,8 @@ extern unsigned char *pg_do_encoding_conversion(unsigned char *src, int len,
 
 extern char *pg_client_to_server(const char *s, int len);
 extern char *pg_server_to_client(const char *s, int len);
+extern char *pg_any_to_server(const char *s, int len, int encoding);
+extern char *pg_server_to_any(const char *s, int len, int encoding);
 
 extern unsigned short BIG5toCNS(unsigned short big5, unsigned char *lc);
 extern unsigned short CNStoBIG5(unsigned short cns, unsigned char lc);

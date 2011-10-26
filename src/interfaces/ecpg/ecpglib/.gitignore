@@ -1,5 +1,4 @@
-/libecpgdll.def
-/libecpgddll.def
+/ecpglib.def
 /blibecpgdll.def
 /exports.list
 

@@ -45,8 +45,6 @@ typedef enum
 
 extern int	log_statement;
 
-extern List *pg_parse_and_rewrite(const char *query_string,
-					 Oid *paramTypes, int numParams);
 extern List *pg_parse_query(const char *query_string);
 extern List *pg_analyze_and_rewrite(Node *parsetree, const char *query_string,
 					   Oid *paramTypes, int numParams);
@@ -59,7 +57,8 @@ extern PlannedStmt *pg_plan_query(Query *querytree, int cursorOptions,
 extern List *pg_plan_queries(List *querytrees, int cursorOptions,
 				ParamListInfo boundParams);
 
-extern bool assign_max_stack_depth(int newval, bool doit, GucSource source);
+extern bool check_max_stack_depth(int *newval, void **extra, GucSource source);
+extern void assign_max_stack_depth(int newval, void *extra);
 
 extern void die(SIGNAL_ARGS);
 extern void quickdie(SIGNAL_ARGS);

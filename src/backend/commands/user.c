@@ -24,6 +24,7 @@
 #include "catalog/pg_db_role_setting.h"
 #include "commands/comment.h"
 #include "commands/dbcommands.h"
+#include "commands/seclabel.h"
 #include "commands/user.h"
 #include "libpq/md5.h"
 #include "miscadmin.h"
@@ -31,8 +32,8 @@
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
-#include "utils/lsyscache.h"
 #include "utils/syscache.h"
+#include "utils/timestamp.h"
 #include "utils/tqual.h"
 
 /* Potentially set by contrib/pg_upgrade_support functions */
@@ -58,20 +59,7 @@ static void DelRoleMems(const char *rolename, Oid roleid,
 static bool
 have_createrole_privilege(void)
 {
-	bool		result = false;
-	HeapTuple	utup;
-
-	/* Superusers can always do everything */
-	if (superuser())
-		return true;
-
-	utup = SearchSysCache1(AUTHOID, ObjectIdGetDatum(GetUserId()));
-	if (HeapTupleIsValid(utup))
-	{
-		result = ((Form_pg_authid) GETSTRUCT(utup))->rolcreaterole;
-		ReleaseSysCache(utup);
-	}
-	return result;
+	return has_createrole_privilege(GetUserId());
 }
 
 
@@ -97,7 +85,7 @@ CreateRole(CreateRoleStmt *stmt)
 	bool		createrole = false;		/* Can this user create roles? */
 	bool		createdb = false;		/* Can the user create databases? */
 	bool		canlogin = false;		/* Can this user login? */
-	bool		isreplication = false; /* Is this a replication role? */
+	bool		isreplication = false;	/* Is this a replication role? */
 	int			connlimit = -1; /* maximum connections allowed */
 	List	   *addroleto = NIL;	/* roles to make this a member of */
 	List	   *rolemembers = NIL;		/* roles to be members of this role */
@@ -111,7 +99,7 @@ CreateRole(CreateRoleStmt *stmt)
 	DefElem    *dcreaterole = NULL;
 	DefElem    *dcreatedb = NULL;
 	DefElem    *dcanlogin = NULL;
-	DefElem	   *disreplication = NULL;
+	DefElem    *disreplication = NULL;
 	DefElem    *dconnlimit = NULL;
 	DefElem    *daddroleto = NULL;
 	DefElem    *drolemembers = NULL;
@@ -253,11 +241,12 @@ CreateRole(CreateRoleStmt *stmt)
 	if (dissuper)
 	{
 		issuper = intVal(dissuper->arg) != 0;
+
 		/*
-		 * Superusers get replication by default, but only if
-		 * NOREPLICATION wasn't explicitly mentioned
+		 * Superusers get replication by default, but only if NOREPLICATION
+		 * wasn't explicitly mentioned
 		 */
-		if (!(disreplication && intVal(disreplication->arg) == 0))
+		if (issuper && !(disreplication && intVal(disreplication->arg) == 0))
 			isreplication = 1;
 	}
 	if (dinherit)
@@ -300,7 +289,7 @@ CreateRole(CreateRoleStmt *stmt)
 		if (!superuser())
 			ereport(ERROR,
 					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-					 errmsg("must be superuser to create replication users")));
+				   errmsg("must be superuser to create replication users")));
 	}
 	else
 	{
@@ -397,10 +386,10 @@ CreateRole(CreateRoleStmt *stmt)
 	tuple = heap_form_tuple(pg_authid_dsc, new_record, new_record_nulls);
 
 	/*
-	 * pg_largeobject_metadata contains pg_authid.oid's, so we
-	 * use the binary-upgrade override, if specified.
+	 * pg_largeobject_metadata contains pg_authid.oid's, so we use the
+	 * binary-upgrade override, if specified.
 	 */
-	if (OidIsValid(binary_upgrade_next_pg_authid_oid))
+	if (IsBinaryUpgrade && OidIsValid(binary_upgrade_next_pg_authid_oid))
 	{
 		HeapTupleSetOid(tuple, binary_upgrade_next_pg_authid_oid);
 		binary_upgrade_next_pg_authid_oid = InvalidOid;
@@ -480,7 +469,7 @@ AlterRole(AlterRoleStmt *stmt)
 	int			createrole = -1;	/* Can this user create roles? */
 	int			createdb = -1;	/* Can the user create databases? */
 	int			canlogin = -1;	/* Can this user login? */
-	int			isreplication = -1; /* Is this a replication role? */
+	int			isreplication = -1;		/* Is this a replication role? */
 	int			connlimit = -1; /* maximum connections allowed */
 	List	   *rolemembers = NIL;		/* roles to be added/removed */
 	char	   *validUntil = NULL;		/* time the login is valid until */
@@ -492,7 +481,7 @@ AlterRole(AlterRoleStmt *stmt)
 	DefElem    *dcreaterole = NULL;
 	DefElem    *dcreatedb = NULL;
 	DefElem    *dcanlogin = NULL;
-	DefElem	   *disreplication = NULL;
+	DefElem    *disreplication = NULL;
 	DefElem    *dconnlimit = NULL;
 	DefElem    *drolemembers = NULL;
 	DefElem    *dvalidUntil = NULL;
@@ -965,7 +954,7 @@ DropRole(DropRoleStmt *stmt)
 					(errcode(ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST),
 					 errmsg("role \"%s\" cannot be dropped because some objects depend on it",
 							role),
-					 errdetail("%s", detail),
+					 errdetail_internal("%s", detail),
 					 errdetail_log("%s", detail_log)));
 
 		/*
@@ -1012,9 +1001,10 @@ DropRole(DropRoleStmt *stmt)
 		systable_endscan(sscan);
 
 		/*
-		 * Remove any comments on this role.
+		 * Remove any comments or security labels on this role.
 		 */
 		DeleteSharedComments(roleid, AuthIdRelationId);
+		DeleteSharedSecurityLabel(roleid, AuthIdRelationId);
 
 		/*
 		 * Remove settings for this role.

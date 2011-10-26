@@ -64,6 +64,7 @@ typedef enum
 	RESTART_COMMAND,
 	RELOAD_COMMAND,
 	STATUS_COMMAND,
+	PROMOTE_COMMAND,
 	KILL_COMMAND,
 	REGISTER_COMMAND,
 	UNREGISTER_COMMAND,
@@ -80,6 +81,7 @@ static ShutdownMode shutdown_mode = SMART_MODE;
 static int	sig = SIGTERM;		/* default */
 static CtlCommand ctl_command = NO_COMMAND;
 static char *pg_data = NULL;
+static char *pg_config = NULL;
 static char *pgdata_opt = NULL;
 static char *post_opts = NULL;
 static const char *progname;
@@ -96,6 +98,7 @@ static char postopts_file[MAXPGPATH];
 static char pid_file[MAXPGPATH];
 static char backup_file[MAXPGPATH];
 static char recovery_file[MAXPGPATH];
+static char promote_file[MAXPGPATH];
 
 #if defined(WIN32) || defined(__CYGWIN__)
 static DWORD pgctl_start_type = SERVICE_AUTO_START;
@@ -113,7 +116,7 @@ static void
 write_stderr(const char *fmt,...)
 /* This extension allows gcc to check the format string for consistency with
    the supplied arguments. */
-__attribute__((format(printf, 1, 2)));
+__attribute__((format(PG_PRINTF_ATTRIBUTE, 1, 2)));
 static void *pg_malloc(size_t size);
 static char *xstrdup(const char *s);
 static void do_advice(void);
@@ -126,8 +129,10 @@ static void do_stop(void);
 static void do_restart(void);
 static void do_reload(void);
 static void do_status(void);
+static void do_promote(void);
 static void do_kill(pgpid_t pid);
 static void print_msg(const char *msg);
+static void adjust_data_dir(void);
 
 #if defined(WIN32) || defined(__CYGWIN__)
 static bool pgwin32_IsInstalled(SC_HANDLE);
@@ -159,6 +164,9 @@ static void
 write_eventlog(int level, const char *line)
 {
 	static HANDLE evtHandle = INVALID_HANDLE_VALUE;
+
+	if (silent_mode && level == EVENTLOG_INFORMATION_TYPE)
+		return;
 
 	if (evtHandle == INVALID_HANDLE_VALUE)
 	{
@@ -363,6 +371,10 @@ start_postmaster(void)
 	/*
 	 * Since there might be quotes to handle here, it is easier simply to pass
 	 * everything to a shell to process them.
+	 *
+	 * XXX it would be better to fork and exec so that we would know the child
+	 * postmaster's PID directly; then test_postmaster_connection could use
+	 * the PID without having to rely on reading it back from the pidfile.
 	 */
 	if (log_file != NULL)
 		snprintf(cmd, MAXPGPATH, SYSTEMQUOTE "\"%s\" %s%s < \"%s\" >> \"%s\" 2>&1 &" SYSTEMQUOTE,
@@ -408,12 +420,18 @@ start_postmaster(void)
 static PGPing
 test_postmaster_connection(bool do_checkpoint)
 {
-	PGPing		ret = PQPING_OK;	/* assume success for wait == zero */
+	PGPing		ret = PQPING_NO_RESPONSE;
+	bool		found_stale_pidfile = false;
+	pgpid_t		pm_pid = 0;
 	char		connstr[MAXPGPATH * 2 + 256];
 	int			i;
 
+	/* if requested wait time is zero, return "still starting up" code */
+	if (wait_seconds <= 0)
+		return PQPING_REJECT;
+
 	connstr[0] = '\0';
-	
+
 	for (i = 0; i < wait_seconds; i++)
 	{
 		/* Do we need a connection string? */
@@ -430,7 +448,7 @@ test_postmaster_connection(bool do_checkpoint)
 			 *		6	9.1+ server, shared memory not created
 			 *		7	9.1+ server, shared memory created
 			 *
-			 * This code does not support pre-9.1 servers.  On Unix machines
+			 * This code does not support pre-9.1 servers.	On Unix machines
 			 * we could consider extracting the port number from the shmem
 			 * key, but that (a) is not robust, and (b) doesn't help with
 			 * finding out the socket directory.  And it wouldn't work anyway
@@ -451,7 +469,7 @@ test_postmaster_connection(bool do_checkpoint)
 				if (optlines[3] == NULL)
 				{
 					/* File is exactly three lines, must be pre-9.1 */
-					write_stderr(_("%s: -w option is not supported when starting a pre-9.1 server\n"),
+					write_stderr(_("\n%s: -w option is not supported when starting a pre-9.1 server\n"),
 								 progname);
 					return PQPING_NO_ATTEMPT;
 				}
@@ -459,70 +477,86 @@ test_postmaster_connection(bool do_checkpoint)
 						 optlines[5] != NULL)
 				{
 					/* File is complete enough for us, parse it */
-					time_t	pmstart;
-					int		portnum;
-					char   *sockdir;
-					char   *hostaddr;
-					char	host_str[MAXPGPATH];
+					long		pmpid;
+					time_t		pmstart;
 
 					/*
-					 * Easy cross-check that we are looking at the right data
-					 * directory: is the postmaster older than this execution
-					 * of pg_ctl?  Subtract 2 seconds to allow for possible
-					 * clock skew between pg_ctl and the postmaster.
+					 * Make sanity checks.	If it's for a standalone backend
+					 * (negative PID), or the recorded start time is before
+					 * pg_ctl started, then either we are looking at the wrong
+					 * data directory, or this is a pre-existing pidfile that
+					 * hasn't (yet?) been overwritten by our child postmaster.
+					 * Allow 2 seconds slop for possible cross-process clock
+					 * skew.
 					 */
+					pmpid = atol(optlines[LOCK_FILE_LINE_PID - 1]);
 					pmstart = atol(optlines[LOCK_FILE_LINE_START_TIME - 1]);
-					if (pmstart < start_time - 2)
+					if (pmpid <= 0 || pmstart < start_time - 2)
 					{
-						write_stderr(_("%s: this data directory is running a pre-existing postmaster\n"),
-									 progname);
-						return PQPING_NO_ATTEMPT;
+						/*
+						 * Set flag to report stale pidfile if it doesn't get
+						 * overwritten before we give up waiting.
+						 */
+						found_stale_pidfile = true;
 					}
-
-					/*
-					 * OK, extract port number and host string to use.
-					 * Prefer using Unix socket if available.
-					 */
-					portnum = atoi(optlines[LOCK_FILE_LINE_PORT - 1]);
-
-					sockdir = optlines[LOCK_FILE_LINE_SOCKET_DIR - 1];
-					hostaddr = optlines[LOCK_FILE_LINE_LISTEN_ADDR - 1];
-
-					/*
-					 * While unix_socket_directory can accept relative
-					 * directories, libpq's host parameter must have a leading
-					 * slash to indicate a socket directory.  So, ignore
-					 * sockdir if it's relative, and try to use TCP instead.
-					 */
-					if (sockdir[0] == '/')
-						strlcpy(host_str, sockdir, sizeof(host_str));
 					else
-						strlcpy(host_str, hostaddr, sizeof(host_str));
-
-					/* remove trailing newline */
-					if (strchr(host_str, '\n') != NULL)
-						*strchr(host_str, '\n') = '\0';
-
-					/* Fail if we couldn't get either sockdir or host addr */
-					if (host_str[0] == '\0')
 					{
-						write_stderr(_("%s: -w option cannot use a relative socket directory specification\n"),
-									 progname);
-						return PQPING_NO_ATTEMPT;
+						/*
+						 * OK, seems to be a valid pidfile from our child.
+						 */
+						int			portnum;
+						char	   *sockdir;
+						char	   *hostaddr;
+						char		host_str[MAXPGPATH];
+
+						found_stale_pidfile = false;
+						pm_pid = (pgpid_t) pmpid;
+
+						/*
+						 * Extract port number and host string to use. Prefer
+						 * using Unix socket if available.
+						 */
+						portnum = atoi(optlines[LOCK_FILE_LINE_PORT - 1]);
+						sockdir = optlines[LOCK_FILE_LINE_SOCKET_DIR - 1];
+						hostaddr = optlines[LOCK_FILE_LINE_LISTEN_ADDR - 1];
+
+						/*
+						 * While unix_socket_directory can accept relative
+						 * directories, libpq's host parameter must have a
+						 * leading slash to indicate a socket directory.  So,
+						 * ignore sockdir if it's relative, and try to use TCP
+						 * instead.
+						 */
+						if (sockdir[0] == '/')
+							strlcpy(host_str, sockdir, sizeof(host_str));
+						else
+							strlcpy(host_str, hostaddr, sizeof(host_str));
+
+						/* remove trailing newline */
+						if (strchr(host_str, '\n') != NULL)
+							*strchr(host_str, '\n') = '\0';
+
+						/* Fail if couldn't get either sockdir or host addr */
+						if (host_str[0] == '\0')
+						{
+							write_stderr(_("\n%s: -w option cannot use a relative socket directory specification\n"),
+										 progname);
+							return PQPING_NO_ATTEMPT;
+						}
+
+						/* If postmaster is listening on "*", use localhost */
+						if (strcmp(host_str, "*") == 0)
+							strcpy(host_str, "localhost");
+
+						/*
+						 * We need to set connect_timeout otherwise on Windows
+						 * the Service Control Manager (SCM) will probably
+						 * timeout first.
+						 */
+						snprintf(connstr, sizeof(connstr),
+						"dbname=postgres port=%d host='%s' connect_timeout=5",
+								 portnum, host_str);
 					}
-
-					/* If postmaster is listening on "*", use "localhost" */
-					if (strcmp(host_str, "*") == 0)
-						strcpy(host_str, "localhost");
-
-					/*
-					 * We need to set connect_timeout otherwise on Windows the
-					 * Service Control Manager (SCM) will probably timeout
-					 * first.
-					 */
-					snprintf(connstr, sizeof(connstr),
-							 "dbname=postgres port=%d host='%s' connect_timeout=5",
-							 portnum, host_str);
 				}
 			}
 		}
@@ -535,16 +569,48 @@ test_postmaster_connection(bool do_checkpoint)
 				break;
 		}
 
+		/*
+		 * The postmaster should create postmaster.pid very soon after being
+		 * started.  If it's not there after we've waited 5 or more seconds,
+		 * assume startup failed and give up waiting.  (Note this covers both
+		 * cases where the pidfile was never created, and where it was created
+		 * and then removed during postmaster exit.)  Also, if there *is* a
+		 * file there but it appears stale, issue a suitable warning and give
+		 * up waiting.
+		 */
+		if (i >= 5)
+		{
+			struct stat statbuf;
+
+			if (stat(pid_file, &statbuf) != 0)
+				return PQPING_NO_RESPONSE;
+
+			if (found_stale_pidfile)
+			{
+				write_stderr(_("\n%s: this data directory appears to be running a pre-existing postmaster\n"),
+							 progname);
+				return PQPING_NO_RESPONSE;
+			}
+		}
+
+		/*
+		 * If we've been able to identify the child postmaster's PID, check
+		 * the process is still alive.	This covers cases where the postmaster
+		 * successfully created the pidfile but then crashed without removing
+		 * it.
+		 */
+		if (pm_pid > 0 && !postmaster_is_alive((pid_t) pm_pid))
+			return PQPING_NO_RESPONSE;
+
 		/* No response, or startup still in process; wait */
 #if defined(WIN32)
 		if (do_checkpoint)
 		{
 			/*
-			 * Increment the wait hint by 6 secs (connection timeout +
-			 * sleep) We must do this to indicate to the SCM that our
-			 * startup time is changing, otherwise it'll usually send a
-			 * stop signal after 20 seconds, despite incrementing the
-			 * checkpoint counter.
+			 * Increment the wait hint by 6 secs (connection timeout + sleep)
+			 * We must do this to indicate to the SCM that our startup time is
+			 * changing, otherwise it'll usually send a stop signal after 20
+			 * seconds, despite incrementing the checkpoint counter.
 			 */
 			status.dwWaitHint += 6000;
 			status.dwCheckPoint++;
@@ -554,7 +620,7 @@ test_postmaster_connection(bool do_checkpoint)
 #endif
 			print_msg(".");
 
-		pg_usleep(1000000); /* 1 sec */
+		pg_usleep(1000000);		/* 1 sec */
 	}
 
 	/* return result of last call to PQping */
@@ -696,7 +762,6 @@ do_init(void)
 static void
 do_start(void)
 {
-	pgpid_t		pid;
 	pgpid_t		old_pid = 0;
 	int			exitcode;
 
@@ -744,19 +809,6 @@ do_start(void)
 		write_stderr(_("%s: could not start server: exit code was %d\n"),
 					 progname, exitcode);
 		exit(1);
-	}
-
-	if (old_pid != 0)
-	{
-		pg_usleep(1000000);
-		pid = get_pgpid();
-		if (pid == old_pid)
-		{
-			write_stderr(_("%s: could not start server\n"
-						   "Examine the log output.\n"),
-						 progname);
-			exit(1);
-		}
 	}
 
 	if (do_wait)
@@ -831,8 +883,8 @@ do_stop(void)
 	else
 	{
 		/*
-		 * If backup_label exists, an online backup is running. Warn the
-		 * user that smart shutdown will wait for it to finish. However, if
+		 * If backup_label exists, an online backup is running. Warn the user
+		 * that smart shutdown will wait for it to finish. However, if
 		 * recovery.conf is also present, we're recovering from an online
 		 * backup instead of performing one.
 		 */
@@ -862,6 +914,9 @@ do_stop(void)
 			print_msg(_(" failed\n"));
 
 			write_stderr(_("%s: server does not shut down\n"), progname);
+			if (shutdown_mode == SMART_MODE)
+				write_stderr(_("HINT: The \"-m fast\" option immediately disconnects sessions rather than\n"
+						  "waiting for session-initiated disconnection.\n"));
 			exit(1);
 		}
 		print_msg(_(" done\n"));
@@ -916,8 +971,8 @@ do_restart(void)
 		}
 
 		/*
-		 * If backup_label exists, an online backup is running. Warn the
-		 * user that smart shutdown will wait for it to finish. However, if
+		 * If backup_label exists, an online backup is running. Warn the user
+		 * that smart shutdown will wait for it to finish. However, if
 		 * recovery.conf is also present, we're recovering from an online
 		 * backup instead of performing one.
 		 */
@@ -949,6 +1004,9 @@ do_restart(void)
 			print_msg(_(" failed\n"));
 
 			write_stderr(_("%s: server does not shut down\n"), progname);
+			if (shutdown_mode == SMART_MODE)
+				write_stderr(_("HINT: The \"-m fast\" option immediately disconnects sessions rather than\n"
+						  "waiting for session-initiated disconnection.\n"));
 			exit(1);
 		}
 
@@ -964,7 +1022,6 @@ do_restart(void)
 
 	do_start();
 }
-
 
 static void
 do_reload(void)
@@ -997,6 +1054,72 @@ do_reload(void)
 
 	print_msg(_("server signaled\n"));
 }
+
+
+/*
+ * promote
+ */
+
+static void
+do_promote(void)
+{
+	FILE	   *prmfile;
+	pgpid_t		pid;
+	struct stat statbuf;
+
+	pid = get_pgpid();
+
+	if (pid == 0)				/* no pid file */
+	{
+		write_stderr(_("%s: PID file \"%s\" does not exist\n"), progname, pid_file);
+		write_stderr(_("Is server running?\n"));
+		exit(1);
+	}
+	else if (pid < 0)			/* standalone backend, not postmaster */
+	{
+		pid = -pid;
+		write_stderr(_("%s: cannot promote server; "
+					   "single-user server is running (PID: %ld)\n"),
+					 progname, pid);
+		exit(1);
+	}
+
+	/* If recovery.conf doesn't exist, the server is not in standby mode */
+	if (stat(recovery_file, &statbuf) != 0)
+	{
+		write_stderr(_("%s: cannot promote server; "
+					   "server is not in standby mode\n"),
+					 progname);
+		exit(1);
+	}
+
+	if ((prmfile = fopen(promote_file, "w")) == NULL)
+	{
+		write_stderr(_("%s: could not create promote signal file \"%s\": %s\n"),
+					 progname, promote_file, strerror(errno));
+		exit(1);
+	}
+	if (fclose(prmfile))
+	{
+		write_stderr(_("%s: could not write promote signal file \"%s\": %s\n"),
+					 progname, promote_file, strerror(errno));
+		exit(1);
+	}
+
+	sig = SIGUSR1;
+	if (kill((pid_t) pid, sig) != 0)
+	{
+		write_stderr(_("%s: could not send promote signal (PID: %ld): %s\n"),
+					 progname, pid, strerror(errno));
+		if (unlink(promote_file) != 0)
+			write_stderr(_("%s: could not remove promote signal file \"%s\": %s\n"),
+						 progname, promote_file, strerror(errno));
+		exit(1);
+	}
+
+	print_msg(_("server promoting\n"));
+}
+
 
 /*
  *	utility routines
@@ -1032,9 +1155,11 @@ do_status(void)
 	pgpid_t		pid;
 
 	pid = get_pgpid();
-	if (pid != 0)				/* 0 means no pid file */
+	/* Is there a pid file? */
+	if (pid != 0)
 	{
-		if (pid < 0)			/* standalone backend */
+		/* standalone backend? */
+		if (pid < 0)
 		{
 			pid = -pid;
 			if (postmaster_is_alive((pid_t) pid))
@@ -1045,7 +1170,7 @@ do_status(void)
 			}
 		}
 		else
-			/* postmaster */
+		/* must be a postmaster */
 		{
 			if (postmaster_is_alive((pid_t) pid))
 			{
@@ -1063,7 +1188,11 @@ do_status(void)
 		}
 	}
 	printf(_("%s: no server running\n"), progname);
-	exit(1);
+	/*
+	 * The Linux Standard Base Core Specification 3.1 says this should return '3'
+	 * http://refspecs.freestandards.org/LSB_3.1.1/LSB-Core-generic/LSB-Core-generic/iniscrptact.html
+	 */
+	exit(3);
 }
 
 
@@ -1144,10 +1273,10 @@ pgwin32_CommandLine(bool registration)
 		strcat(cmdLine, "\"");
 	}
 
-	if (pg_data)
+	if (pg_config)
 	{
 		strcat(cmdLine, " -D \"");
-		strcat(cmdLine, pg_data);
+		strcat(cmdLine, pg_config);
 		strcat(cmdLine, "\"");
 	}
 
@@ -1157,6 +1286,9 @@ pgwin32_CommandLine(bool registration)
 	if (registration && wait_seconds != DEFAULT_WAIT)
 		/* concatenate */
 		sprintf(cmdLine + strlen(cmdLine), " -t %d", wait_seconds);
+
+	if (registration && silent_mode)
+		strcat(cmdLine, " -s");
 
 	if (post_opts)
 	{
@@ -1190,13 +1322,13 @@ pgwin32_doRegister(void)
 	}
 
 	if ((hService = CreateService(hSCM, register_servicename, register_servicename,
-								  SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS,
+							   SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS,
 								  pgctl_start_type, SERVICE_ERROR_NORMAL,
 								  pgwin32_CommandLine(true),
 	   NULL, NULL, "RPCSS\0", register_username, register_password)) == NULL)
 	{
 		CloseServiceHandle(hSCM);
-		write_stderr(_("%s: could not register service \"%s\": error code %d\n"), progname, register_servicename, (int) GetLastError());
+		write_stderr(_("%s: could not register service \"%s\": error code %lu\n"), progname, register_servicename, GetLastError());
 		exit(1);
 	}
 	CloseServiceHandle(hService);
@@ -1224,14 +1356,14 @@ pgwin32_doUnregister(void)
 	if ((hService = OpenService(hSCM, register_servicename, DELETE)) == NULL)
 	{
 		CloseServiceHandle(hSCM);
-		write_stderr(_("%s: could not open service \"%s\": error code %d\n"), progname, register_servicename, (int) GetLastError());
+		write_stderr(_("%s: could not open service \"%s\": error code %lu\n"), progname, register_servicename, GetLastError());
 		exit(1);
 	}
 	if (!DeleteService(hService))
 	{
 		CloseServiceHandle(hService);
 		CloseServiceHandle(hSCM);
-		write_stderr(_("%s: could not unregister service \"%s\": error code %d\n"), progname, register_servicename, (int) GetLastError());
+		write_stderr(_("%s: could not unregister service \"%s\": error code %lu\n"), progname, register_servicename, GetLastError());
 		exit(1);
 	}
 	CloseServiceHandle(hService);
@@ -1320,7 +1452,7 @@ pgwin32_ServiceMain(DWORD argc, LPTSTR *argv)
 		write_eventlog(EVENTLOG_INFORMATION_TYPE, _("Waiting for server startup...\n"));
 		if (test_postmaster_connection(true) != PQPING_OK)
 		{
-			write_eventlog(EVENTLOG_INFORMATION_TYPE, _("Timed out waiting for server startup\n"));
+			write_eventlog(EVENTLOG_ERROR_TYPE, _("Timed out waiting for server startup\n"));
 			pgwin32_SetServiceStatus(SERVICE_STOPPED);
 			return;
 		}
@@ -1374,7 +1506,7 @@ pgwin32_doRunAsService(void)
 
 	if (StartServiceCtrlDispatcher(st) == 0)
 	{
-		write_stderr(_("%s: could not start service \"%s\": error code %d\n"), progname, register_servicename, (int) GetLastError());
+		write_stderr(_("%s: could not start service \"%s\": error code %lu\n"), progname, register_servicename, GetLastError());
 		exit(1);
 	}
 }
@@ -1393,8 +1525,10 @@ typedef BOOL (WINAPI * __SetInformationJobObject) (HANDLE, JOBOBJECTINFOCLASS, L
 typedef BOOL (WINAPI * __AssignProcessToJobObject) (HANDLE, HANDLE);
 typedef BOOL (WINAPI * __QueryInformationJobObject) (HANDLE, JOBOBJECTINFOCLASS, LPVOID, DWORD, LPDWORD);
 
-/* Windows API define missing from MingW headers */
+/* Windows API define missing from some versions of MingW headers */
+#ifndef  DISABLE_MAX_PRIVILEGE
 #define DISABLE_MAX_PRIVILEGE	0x1
+#endif
 
 /*
  * Create a restricted token, a job object sandbox, and execute the specified
@@ -1444,7 +1578,7 @@ CreateRestrictedProcess(char *cmd, PROCESS_INFORMATION *processInfo, bool as_ser
 		 * NT4 doesn't have CreateRestrictedToken, so just call ordinary
 		 * CreateProcess
 		 */
-		write_stderr("WARNING: cannot create restricted tokens on this platform\n");
+		write_stderr(_("%s: WARNING: cannot create restricted tokens on this platform\n"), progname);
 		if (Advapi32Handle != NULL)
 			FreeLibrary(Advapi32Handle);
 		return CreateProcess(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, processInfo);
@@ -1453,7 +1587,7 @@ CreateRestrictedProcess(char *cmd, PROCESS_INFORMATION *processInfo, bool as_ser
 	/* Open the current token to use as a base for the restricted one */
 	if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &origToken))
 	{
-		write_stderr("Failed to open process token: %lu\n", GetLastError());
+		write_stderr(_("%s: could not open process token: error code %lu\n"), progname, GetLastError());
 		return 0;
 	}
 
@@ -1466,7 +1600,7 @@ CreateRestrictedProcess(char *cmd, PROCESS_INFORMATION *processInfo, bool as_ser
 	SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_POWER_USERS, 0, 0, 0, 0, 0,
 								  0, &dropSids[1].Sid))
 	{
-		write_stderr("Failed to allocate SIDs: %lu\n", GetLastError());
+		write_stderr(_("%s: could not allocate SIDs: error code %lu\n"), progname, GetLastError());
 		return 0;
 	}
 
@@ -1485,7 +1619,7 @@ CreateRestrictedProcess(char *cmd, PROCESS_INFORMATION *processInfo, bool as_ser
 
 	if (!b)
 	{
-		write_stderr("Failed to create restricted token: %lu\n", GetLastError());
+		write_stderr(_("%s: could not create restricted token: error code %lu\n"), progname, GetLastError());
 		return 0;
 	}
 
@@ -1523,7 +1657,7 @@ CreateRestrictedProcess(char *cmd, PROCESS_INFORMATION *processInfo, bool as_ser
 			 * Log error if we can't get version, or if we're on WinXP/2003 or
 			 * newer
 			 */
-			write_stderr("WARNING: could not locate all job object functions in system API\n");
+			write_stderr(_("%s: WARNING: could not locate all job object functions in system API\n"), progname);
 	}
 	else
 	{
@@ -1617,8 +1751,7 @@ do_advice(void)
 static void
 do_help(void)
 {
-	printf(_("%s is a utility to start, stop, restart, reload configuration files,\n"
-			 "report the status of a PostgreSQL server, or signal a PostgreSQL process.\n\n"), progname);
+	printf(_("%s is a utility to initialize, start, stop, or control a PostgreSQL server.\n\n"), progname);
 	printf(_("Usage:\n"));
 	printf(_("  %s init[db]               [-D DATADIR] [-s] [-o \"OPTIONS\"]\n"), progname);
 	printf(_("  %s start   [-w] [-t SECS] [-D DATADIR] [-s] [-l FILENAME] [-o \"OPTIONS\"]\n"), progname);
@@ -1627,10 +1760,11 @@ do_help(void)
 			 "                 [-o \"OPTIONS\"]\n"), progname);
 	printf(_("  %s reload  [-D DATADIR] [-s]\n"), progname);
 	printf(_("  %s status  [-D DATADIR]\n"), progname);
+	printf(_("  %s promote [-D DATADIR] [-s]\n"), progname);
 	printf(_("  %s kill    SIGNALNAME PID\n"), progname);
 #if defined(WIN32) || defined(__CYGWIN__)
 	printf(_("  %s register   [-N SERVICENAME] [-U USERNAME] [-P PASSWORD] [-D DATADIR]\n"
-		 "                    [-S START-TYPE] [-w] [-t SECS] [-o \"OPTIONS\"]\n"), progname);
+			 "                    [-S START-TYPE] [-w] [-t SECS] [-o \"OPTIONS\"]\n"), progname);
 	printf(_("  %s unregister [-N SERVICENAME]\n"), progname);
 #endif
 
@@ -1759,6 +1893,61 @@ set_starttype(char *starttypeopt)
 	}
 }
 #endif
+
+/*
+ * adjust_data_dir
+ *
+ * If a configuration-only directory was specified, find the real data dir.
+ */
+void
+adjust_data_dir(void)
+{
+	char		cmd[MAXPGPATH], filename[MAXPGPATH], *my_exec_path;
+	FILE	   *fd;
+
+	/* If there is no postgresql.conf, it can't be a config-only dir */
+	snprintf(filename, sizeof(filename), "%s/postgresql.conf", pg_config);
+	if ((fd = fopen(filename, "r")) == NULL)
+		return;
+	fclose(fd);
+
+	/* If PG_VERSION exists, it can't be a config-only dir */
+	snprintf(filename, sizeof(filename), "%s/PG_VERSION", pg_config);
+	if ((fd = fopen(filename, "r")) != NULL)
+	{
+		fclose(fd);
+		return;
+	}
+
+	/* Must be a configuration directory, so find the data directory */
+
+	/* we use a private my_exec_path to avoid interfering with later uses */
+	if (exec_path == NULL)
+		my_exec_path = find_other_exec_or_die(argv0, "postgres", PG_BACKEND_VERSIONSTR);
+	else
+		my_exec_path = xstrdup(exec_path);
+
+	snprintf(cmd, MAXPGPATH, SYSTEMQUOTE "\"%s\" %s%s -C data_directory" SYSTEMQUOTE,
+			 my_exec_path, pgdata_opt ? pgdata_opt : "", post_opts ?
+			 post_opts : "");
+
+	fd = popen(cmd, "r");
+	if (fd == NULL || fgets(filename, sizeof(filename), fd) == NULL)
+	{
+		write_stderr(_("%s: cannot find the data directory using %s\n"), progname, my_exec_path);
+		exit(1);
+	}
+	pclose(fd);
+	free(my_exec_path);
+
+	/* Remove trailing newline */
+	if (strchr(filename, '\n') != NULL)
+		*strchr(filename, '\n') = '\0';
+
+	free(pg_data);
+	pg_data = xstrdup(filename);
+	canonicalize_path(pg_data);
+}
 
 
 int
@@ -1954,6 +2143,8 @@ main(int argc, char **argv)
 				ctl_command = RELOAD_COMMAND;
 			else if (strcmp(argv[optind], "status") == 0)
 				ctl_command = STATUS_COMMAND;
+			else if (strcmp(argv[optind], "promote") == 0)
+				ctl_command = PROMOTE_COMMAND;
 			else if (strcmp(argv[optind], "kill") == 0)
 			{
 				if (argc - optind < 3)
@@ -1992,14 +2183,17 @@ main(int argc, char **argv)
 	}
 
 	/* Note we put any -D switch into the env var above */
-	pg_data = getenv("PGDATA");
-	if (pg_data)
+	pg_config = getenv("PGDATA");
+	if (pg_config)
 	{
-		pg_data = xstrdup(pg_data);
-		canonicalize_path(pg_data);
+		pg_config = xstrdup(pg_config);
+		canonicalize_path(pg_config);
+		pg_data = xstrdup(pg_config);
 	}
 
-	if (pg_data == NULL &&
+	adjust_data_dir();
+	
+	if (pg_config == NULL &&
 		ctl_command != KILL_COMMAND && ctl_command != UNREGISTER_COMMAND)
 	{
 		write_stderr(_("%s: no database directory specified and environment variable PGDATA unset\n"),
@@ -2036,6 +2230,7 @@ main(int argc, char **argv)
 		snprintf(pid_file, MAXPGPATH, "%s/postmaster.pid", pg_data);
 		snprintf(backup_file, MAXPGPATH, "%s/backup_label", pg_data);
 		snprintf(recovery_file, MAXPGPATH, "%s/recovery.conf", pg_data);
+		snprintf(promote_file, MAXPGPATH, "%s/promote", pg_data);
 	}
 
 	switch (ctl_command)
@@ -2057,6 +2252,9 @@ main(int argc, char **argv)
 			break;
 		case RELOAD_COMMAND:
 			do_reload();
+			break;
+		case PROMOTE_COMMAND:
+			do_promote();
 			break;
 		case KILL_COMMAND:
 			do_kill(killproc);

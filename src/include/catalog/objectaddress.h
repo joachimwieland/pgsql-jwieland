@@ -15,7 +15,7 @@
 
 #include "nodes/parsenodes.h"
 #include "storage/lock.h"
-#include "utils/rel.h"
+#include "utils/relcache.h"
 
 /*
  * An ObjectAddress represents a database object of any type.
@@ -27,7 +27,14 @@ typedef struct ObjectAddress
 	int32		objectSubId;	/* Subitem within object (eg column), or 0 */
 } ObjectAddress;
 
-ObjectAddress get_object_address(ObjectType objtype, List *objname,
-				   List *objargs, Relation *relp, LOCKMODE lockmode);
+extern ObjectAddress get_object_address(ObjectType objtype, List *objname,
+										List *objargs, Relation *relp,
+										LOCKMODE lockmode, bool missing_ok);
+
+extern void check_object_ownership(Oid roleid,
+					   ObjectType objtype, ObjectAddress address,
+					   List *objname, List *objargs, Relation relation);
+
+extern Oid	get_object_namespace(const ObjectAddress *address);
 
 #endif   /* PARSE_OBJECT_H */

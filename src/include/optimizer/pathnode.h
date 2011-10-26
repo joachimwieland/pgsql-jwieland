@@ -34,6 +34,7 @@ extern IndexPath *create_index_path(PlannerInfo *root,
 				  List *indexorderbys,
 				  List *pathkeys,
 				  ScanDirection indexscandir,
+				  bool indexonly,
 				  RelOptInfo *outer_rel);
 extern BitmapHeapPath *create_bitmap_heap_path(PlannerInfo *root,
 						RelOptInfo *rel,
@@ -49,9 +50,9 @@ extern TidPath *create_tidscan_path(PlannerInfo *root, RelOptInfo *rel,
 					List *tidquals);
 extern AppendPath *create_append_path(RelOptInfo *rel, List *subpaths);
 extern MergeAppendPath *create_merge_append_path(PlannerInfo *root,
-												 RelOptInfo *rel,
-												 List *subpaths,
-												 List *pathkeys);
+						 RelOptInfo *rel,
+						 List *subpaths,
+						 List *pathkeys);
 extern ResultPath *create_result_path(List *quals);
 extern MaterialPath *create_material_path(RelOptInfo *rel, Path *subpath);
 extern UniquePath *create_unique_path(PlannerInfo *root, RelOptInfo *rel,
@@ -61,6 +62,7 @@ extern Path *create_functionscan_path(PlannerInfo *root, RelOptInfo *rel);
 extern Path *create_valuesscan_path(PlannerInfo *root, RelOptInfo *rel);
 extern Path *create_ctescan_path(PlannerInfo *root, RelOptInfo *rel);
 extern Path *create_worktablescan_path(PlannerInfo *root, RelOptInfo *rel);
+extern ForeignPath *create_foreignscan_path(PlannerInfo *root, RelOptInfo *rel);
 
 extern NestPath *create_nestloop_path(PlannerInfo *root,
 					 RelOptInfo *joinrel,
@@ -95,6 +97,7 @@ extern HashPath *create_hashjoin_path(PlannerInfo *root,
 /*
  * prototypes for relnode.c
  */
+extern void setup_simple_rel_arrays(PlannerInfo *root);
 extern RelOptInfo *build_simple_rel(PlannerInfo *root, int relid,
 				 RelOptKind reloptkind);
 extern RelOptInfo *find_base_rel(PlannerInfo *root, int relid);

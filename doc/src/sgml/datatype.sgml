@@ -199,6 +199,12 @@
       </row>
 
       <row>
+       <entry><type>smallserial</type></entry>
+       <entry><type>serial2</type></entry>
+       <entry>autoincrementing two-byte integer</entry>
+      </row>
+
+      <row>
        <entry><type>serial</type></entry>
        <entry><type>serial4</type></entry>
        <entry>autoincrementing four-byte integer</entry>
@@ -346,13 +352,13 @@
         <entry><type>decimal</></entry>
         <entry>variable</entry>
         <entry>user-specified precision, exact</entry>
-        <entry>no limit</entry>
+        <entry>up to 131072 digits before the decimal point; up to 16383 digits after the decimal point</entry>
        </row>
        <row>
         <entry><type>numeric</></entry>
         <entry>variable</entry>
         <entry>user-specified precision, exact</entry>
-        <entry>no limit</entry>
+        <entry>up to 131072 digits before the decimal point; up to 16383 digits after the decimal point</entry>
        </row>
 
        <row>
@@ -366,6 +372,13 @@
         <entry>8 bytes</entry>
         <entry>variable-precision, inexact</entry>
         <entry>15 decimal digits precision</entry>
+       </row>
+
+       <row>
+        <entry><type>smallserial</type></entry>
+        <entry>2 bytes</entry>
+        <entry>small autoincrementing integer</entry>
+        <entry>1 to 32767</entry>
        </row>
 
        <row>
@@ -476,8 +489,8 @@
     </indexterm>
 
     <para>
-     The type <type>numeric</type> can store numbers with up to 1000
-     digits of precision and perform calculations exactly. It is
+     The type <type>numeric</type> can store numbers with a
+     very large number of digits and perform calculations exactly. It is
      especially recommended for storing monetary amounts and other
      quantities where exactness is required. However, arithmetic on
      <type>numeric</type> values is very slow compared to the integer
@@ -524,6 +537,15 @@ NUMERIC
      about portability, always specify the precision and scale
      explicitly.)
     </para>
+
+    <note>
+     <para>
+      The maximum allowed precision when explicitly specified in the
+      type declaration is 1000; <type>NUMERIC</type> without a specified
+      precision is subject to the limits described in <xref
+      linkend="datatype-numeric-table">.
+     </para>
+    </note>
 
     <para>
      If the scale of a value to be stored is greater than the declared
@@ -734,11 +756,19 @@ NUMERIC
     <title>Serial Types</title>
 
     <indexterm zone="datatype-serial">
+     <primary>smallserial</primary>
+    </indexterm>
+
+    <indexterm zone="datatype-serial">
      <primary>serial</primary>
     </indexterm>
 
     <indexterm zone="datatype-serial">
      <primary>bigserial</primary>
+    </indexterm>
+
+    <indexterm zone="datatype-serial">
+     <primary>serial2</primary>
     </indexterm>
 
     <indexterm zone="datatype-serial">
@@ -760,8 +790,8 @@ NUMERIC
     </indexterm>
 
     <para>
-     The data types <type>serial</type> and <type>bigserial</type>
-     are not true types, but merely
+     The data types <type>smallserial</type>, <type>serial</type> and
+     <type>bigserial</type> are not true types, but merely
      a notational convenience for creating unique identifier columns
      (similar to the <literal>AUTO_INCREMENT</literal> property
      supported by some other databases). In the current
@@ -819,7 +849,9 @@ ALTER SEQUENCE <replaceable class="parameter">tablename</replaceable>_<replaceab
      the same way, except that they create a <type>bigint</type>
      column.  <type>bigserial</type> should be used if you anticipate
      the use of more than 2<superscript>31</> identifiers over the
-     lifetime of the table.
+     lifetime of the table. The type names <type>smallserial</type> and
+     <type>serial2</type> also work the same way, execpt that they
+     create a <type>smallint</type> column.
     </para>
 
     <para>
@@ -877,15 +909,22 @@ ALTER SEQUENCE <replaceable class="parameter">tablename</replaceable>_<replaceab
    </para>
 
    <para>
-    Values of the <type>numeric</type> data type can be cast to
-    <type>money</type>.  Other numeric types can be converted to
-    <type>money</type> by casting to <type>numeric</type> first, for example:
+    Values of the <type>numeric</type>, <type>int</type>, and
+    <type>bigint</type> data types can be cast to <type>money</type>.
+    Conversion from the <type>real</type> and <type>double precision</type>
+    data types can be done by casting to <type>numeric</type> first, for
+    example:
 <programlisting>
-SELECT 1234::numeric::money;
+SELECT '12.34'::float8::numeric::money;
 </programlisting>
+    However, this is not recommended.  Floating point numbers should not be
+    used to handle money due to the potential for rounding errors.
+   </para>
+
+   <para>
     A <type>money</type> value can be cast to <type>numeric</type> without
     loss of precision. Conversion to other types could potentially lose
-    precision, and it must be done in two stages, for example:
+    precision, and must also be done in two stages:
 <programlisting>
 SELECT '52093.89'::money::numeric::float8;
 </programlisting>
@@ -1018,7 +1057,9 @@ SELECT '52093.89'::money::numeric::float8;
     and they will be removed when converting a <type>character</type> value
     to one of the other string types.  Note that trailing spaces
     <emphasis>are</> semantically significant in
-    <type>character varying</type> and <type>text</type> values.
+    <type>character varying</type> and <type>text</type> values, and
+    when using pattern matching, e.g. <literal>LIKE</>,
+    regular expressions.
    </para>
 
    <para>
@@ -2245,7 +2286,7 @@ January 8 04:05:06 1999 PST
     but continue to be prone to arbitrary changes, particularly with
     respect to daylight-savings rules.
     <productname>PostgreSQL</productname> uses the widely-used
-    <literal>zoneinfo</> time zone database for information about
+    <literal>zoneinfo</> (Olson) time zone database for information about
     historical time zone rules.  For times in the future, the assumption
     is that the latest known rules for a given time zone will
     continue to be observed indefinitely far into the future.
@@ -2391,26 +2432,9 @@ January 8 04:05:06 1999 PST
      The <xref linkend="guc-timezone"> configuration parameter can
      be set in the file <filename>postgresql.conf</>, or in any of the
      other standard ways described in <xref linkend="runtime-config">.
-     There are also several special ways to set it:
+     There are also some special ways to set it:
 
      <itemizedlist>
-      <listitem>
-       <para>
-        If <varname>timezone</> is not specified in
-        <filename>postgresql.conf</> or as a server command-line option,
-        the server attempts to use the value of the <envar>TZ</envar>
-        environment variable as the default time zone.  If <envar>TZ</envar>
-        is not defined or is not any of the time zone names known to
-        <productname>PostgreSQL</productname>, the server attempts to
-        determine the operating system's default time zone by checking the
-        behavior of the C library function <literal>localtime()</>.  The
-        default time zone is selected as the closest match among
-        <productname>PostgreSQL</productname>'s known time zones.
-        (These rules are also used to choose the default value of
-        <xref linkend="guc-log-timezone">, if not specified.)
-       </para>
-      </listitem>
-
       <listitem>
        <para>
         The <acronym>SQL</acronym> command <command>SET TIME ZONE</command>
@@ -2766,9 +2790,9 @@ P <optional> <replaceable>years</>-<replaceable>months</>-<replaceable>days</> <
     <productname>PostgreSQL</productname> provides the
     standard <acronym>SQL</acronym> type <type>boolean</type>;
     see <xref linkend="datatype-boolean-table">.
-    The <type>boolean</type> type can have one of only two states:
-    <quote>true</quote> or <quote>false</quote>.  A third state,
-    <quote>unknown</quote>, is represented by the
+    The <type>boolean</type> type can have several states:
+    <quote>true</quote>, <quote>false</quote>, and a third state,
+    <quote>unknown</quote>, which is represented by the
     <acronym>SQL</acronym> null value.
    </para>
 
@@ -3847,7 +3871,25 @@ SELECT 'super:*'::tsquery;
  'super':*
 </programlisting>
      This query will match any word in a <type>tsvector</> that begins
-     with <quote>super</>.
+     with <quote>super</>.  Note that prefixes are first processed by
+     text search configurations, which means this comparison returns
+     true:
+<programlisting>
+SELECT to_tsvector( 'postgraduate' ) @@ to_tsquery( 'postgres:*' );
+ ?column? 
+----------
+ t
+(1 row)
+</programlisting>
+     because <literal>postgres</> gets stemmed to <literal>postgr</>:
+<programlisting>
+SELECT to_tsquery('postgres:*');
+ to_tsquery 
+------------
+ 'postgr':*
+(1 row)
+</programlisting>
+     which then matches <literal>postgraduate</>.
     </para>
 
     <para>
@@ -4414,6 +4456,10 @@ SELECT * FROM pg_attribute
    </indexterm>
 
    <indexterm zone="datatype-pseudo">
+    <primary>fdw_handler</primary>
+   </indexterm>
+
+   <indexterm zone="datatype-pseudo">
     <primary>cstring</primary>
    </indexterm>
 
@@ -4493,6 +4539,11 @@ SELECT * FROM pg_attribute
        <row>
         <entry><type>language_handler</></entry>
         <entry>A procedural language call handler is declared to return <type>language_handler</>.</entry>
+       </row>
+
+       <row>
+        <entry><type>fdw_handler</></entry>
+        <entry>A foreign-data wrapper handler is declared to return <type>fdw_handler</>.</entry>
        </row>
 
        <row>

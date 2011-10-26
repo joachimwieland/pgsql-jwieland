@@ -18,6 +18,8 @@ OH, me, I'm Terry Mackintosh <terry@terrym.com>
 #include "catalog/pg_type.h"
 #include "executor/spi.h"
 #include "commands/trigger.h"
+#include "utils/rel.h"
+#include "utils/timestamp.h"
 
 PG_MODULE_MAGIC;
 
@@ -84,7 +86,7 @@ moddatetime(PG_FUNCTION_ARGS)
 
 	/*
 	 * This is where we check to see if the field we are supposed to update
-	 * even exists.	The above function must return -1 if name not found?
+	 * even exists. The above function must return -1 if name not found?
 	 */
 	if (attnum < 0)
 		ereport(ERROR,

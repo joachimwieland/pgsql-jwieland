@@ -20,6 +20,8 @@
  */
 #include "postgres.h"
 
+#include <math.h>
+
 #include "access/clog.h"
 #include "access/genam.h"
 #include "access/heapam.h"
@@ -61,8 +63,8 @@ static BufferAccessStrategy vac_strategy;
 /* non-export function prototypes */
 static List *get_rel_oids(Oid relid, const RangeVar *vacrel);
 static void vac_truncate_clog(TransactionId frozenXID);
-static void vacuum_rel(Oid relid, VacuumStmt *vacstmt, bool do_toast,
-		   bool for_wraparound, bool *scanned_all);
+static bool vacuum_rel(Oid relid, VacuumStmt *vacstmt, bool do_toast,
+		   bool for_wraparound);
 
 
 /*
@@ -76,7 +78,7 @@ static void vacuum_rel(Oid relid, VacuumStmt *vacstmt, bool do_toast,
  * tables separately.
  *
  * for_wraparound is used by autovacuum to let us know when it's forcing
- * a vacuum for wraparound, which should not be auto-cancelled.
+ * a vacuum for wraparound, which should not be auto-canceled.
  *
  * bstrategy is normally given as NULL, but in autovacuum it can be passed
  * in to use the same buffer strategy object across multiple vacuum() calls.
@@ -92,8 +94,7 @@ vacuum(VacuumStmt *vacstmt, Oid relid, bool do_toast,
 	   BufferAccessStrategy bstrategy, bool for_wraparound, bool isTopLevel)
 {
 	const char *stmttype;
-	volatile bool all_rels,
-				in_outer_xact,
+	volatile bool in_outer_xact,
 				use_own_xacts;
 	List	   *relations;
 
@@ -152,9 +153,6 @@ vacuum(VacuumStmt *vacstmt, Oid relid, bool do_toast,
 		MemoryContextSwitchTo(old_context);
 	}
 	vac_strategy = bstrategy;
-
-	/* Remember whether we are processing everything in the DB */
-	all_rels = (!OidIsValid(relid) && vacstmt->relation == NULL);
 
 	/*
 	 * Build list of relations to process, unless caller gave us one. (If we
@@ -223,11 +221,12 @@ vacuum(VacuumStmt *vacstmt, Oid relid, bool do_toast,
 		foreach(cur, relations)
 		{
 			Oid			relid = lfirst_oid(cur);
-			bool		scanned_all = false;
 
 			if (vacstmt->options & VACOPT_VACUUM)
-				vacuum_rel(relid, vacstmt, do_toast, for_wraparound,
-						   &scanned_all);
+			{
+				if (!vacuum_rel(relid, vacstmt, do_toast, for_wraparound))
+					continue;
+			}
 
 			if (vacstmt->options & VACOPT_ANALYZE)
 			{
@@ -242,7 +241,7 @@ vacuum(VacuumStmt *vacstmt, Oid relid, bool do_toast,
 					PushActiveSnapshot(GetTransactionSnapshot());
 				}
 
-				analyze_rel(relid, vacstmt, vac_strategy, !scanned_all);
+				analyze_rel(relid, vacstmt, vac_strategy);
 
 				if (use_own_xacts)
 				{
@@ -319,7 +318,16 @@ get_rel_oids(Oid relid, const RangeVar *vacrel)
 		/* Process a specific relation */
 		Oid			relid;
 
-		relid = RangeVarGetRelid(vacrel, false);
+		/*
+		 * Since we don't take a lock here, the relation might be gone,
+		 * or the RangeVar might no longer refer to the OID we look up
+		 * here.  In the former case, VACUUM will do nothing; in the
+		 * latter case, it will process the OID we looked up here, rather
+		 * than the new one.  Neither is ideal, but there's little practical
+		 * alternative, since we're going to commit this transaction and
+		 * begin a new one between now and then.
+		 */
+		relid = RangeVarGetRelid(vacrel, NoLock, false, false);
 
 		/* Make a relation list entry for this guy */
 		oldcontext = MemoryContextSwitchTo(vac_context);
@@ -455,6 +463,81 @@ vacuum_set_xid_limits(int freeze_min_age,
 
 
 /*
+ * vac_estimate_reltuples() -- estimate the new value for pg_class.reltuples
+ *
+ *		If we scanned the whole relation then we should just use the count of
+ *		live tuples seen; but if we did not, we should not trust the count
+ *		unreservedly, especially not in VACUUM, which may have scanned a quite
+ *		nonrandom subset of the table.	When we have only partial information,
+ *		we take the old value of pg_class.reltuples as a measurement of the
+ *		tuple density in the unscanned pages.
+ *
+ *		This routine is shared by VACUUM and ANALYZE.
+ */
+double
+vac_estimate_reltuples(Relation relation, bool is_analyze,
+					   BlockNumber total_pages,
+					   BlockNumber scanned_pages,
+					   double scanned_tuples)
+{
+	BlockNumber old_rel_pages = relation->rd_rel->relpages;
+	double		old_rel_tuples = relation->rd_rel->reltuples;
+	double		old_density;
+	double		new_density;
+	double		multiplier;
+	double		updated_density;
+
+	/* If we did scan the whole table, just use the count as-is */
+	if (scanned_pages >= total_pages)
+		return scanned_tuples;
+
+	/*
+	 * If scanned_pages is zero but total_pages isn't, keep the existing value
+	 * of reltuples.  (Note: callers should avoid updating the pg_class
+	 * statistics in this situation, since no new information has been
+	 * provided.)
+	 */
+	if (scanned_pages == 0)
+		return old_rel_tuples;
+
+	/*
+	 * If old value of relpages is zero, old density is indeterminate; we
+	 * can't do much except scale up scanned_tuples to match total_pages.
+	 */
+	if (old_rel_pages == 0)
+		return floor((scanned_tuples / scanned_pages) * total_pages + 0.5);
+
+	/*
+	 * Okay, we've covered the corner cases.  The normal calculation is to
+	 * convert the old measurement to a density (tuples per page), then update
+	 * the density using an exponential-moving-average approach, and finally
+	 * compute reltuples as updated_density * total_pages.
+	 *
+	 * For ANALYZE, the moving average multiplier is just the fraction of the
+	 * table's pages we scanned.  This is equivalent to assuming that the
+	 * tuple density in the unscanned pages didn't change.  Of course, it
+	 * probably did, if the new density measurement is different. But over
+	 * repeated cycles, the value of reltuples will converge towards the
+	 * correct value, if repeated measurements show the same new density.
+	 *
+	 * For VACUUM, the situation is a bit different: we have looked at a
+	 * nonrandom sample of pages, but we know for certain that the pages we
+	 * didn't look at are precisely the ones that haven't changed lately.
+	 * Thus, there is a reasonable argument for doing exactly the same thing
+	 * as for the ANALYZE case, that is use the old density measurement as the
+	 * value for the unscanned pages.
+	 *
+	 * This logic could probably use further refinement.
+	 */
+	old_density = old_rel_tuples / old_rel_pages;
+	new_density = scanned_tuples / scanned_pages;
+	multiplier = (double) scanned_pages / (double) total_pages;
+	updated_density = old_density + (new_density - old_density) * multiplier;
+	return floor(updated_density * total_pages + 0.5);
+}
+
+
+/*
  *	vac_update_relstats() -- update statistics for one relation
  *
  *		Update the whole-relation statistics that are kept in its pg_class
@@ -481,11 +564,12 @@ vacuum_set_xid_limits(int freeze_min_age,
  *		somebody vacuuming pg_class might think they could delete a tuple
  *		marked with xmin = our xid.
  *
- *		This routine is shared by VACUUM and stand-alone ANALYZE.
+ *		This routine is shared by VACUUM and ANALYZE.
  */
 void
 vac_update_relstats(Relation relation,
 					BlockNumber num_pages, double num_tuples,
+					BlockNumber num_all_visible_pages,
 					bool hasindex, TransactionId frozenxid)
 {
 	Oid			relid = RelationGetRelid(relation);
@@ -516,6 +600,11 @@ vac_update_relstats(Relation relation,
 		pgcform->reltuples = (float4) num_tuples;
 		dirty = true;
 	}
+	if (pgcform->relallvisible != (int32) num_all_visible_pages)
+	{
+		pgcform->relallvisible = (int32) num_all_visible_pages;
+		dirty = true;
+	}
 	if (pgcform->relhasindex != hasindex)
 	{
 		pgcform->relhasindex = hasindex;
@@ -524,7 +613,7 @@ vac_update_relstats(Relation relation,
 
 	/*
 	 * If we have discovered that there are no indexes, then there's no
-	 * primary key either.  This could be done more thoroughly...
+	 * primary key either.	This could be done more thoroughly...
 	 */
 	if (pgcform->relhaspkey && !hasindex)
 	{
@@ -759,14 +848,10 @@ vac_truncate_clog(TransactionId frozenXID)
  *		many small transactions.  Otherwise, two-phase locking would require
  *		us to lock the entire database during one pass of the vacuum cleaner.
  *
- *		We'll return true in *scanned_all if the vacuum scanned all heap
- *		pages, and updated pg_class.
- *
  *		At entry and exit, we are not inside a transaction.
  */
-static void
-vacuum_rel(Oid relid, VacuumStmt *vacstmt, bool do_toast, bool for_wraparound,
-		   bool *scanned_all)
+static bool
+vacuum_rel(Oid relid, VacuumStmt *vacstmt, bool do_toast, bool for_wraparound)
 {
 	LOCKMODE	lmode;
 	Relation	onerel;
@@ -775,9 +860,6 @@ vacuum_rel(Oid relid, VacuumStmt *vacstmt, bool do_toast, bool for_wraparound,
 	Oid			save_userid;
 	int			save_sec_context;
 	int			save_nestlevel;
-
-	if (scanned_all)
-		*scanned_all = false;
 
 	/* Begin a transaction for vacuuming this relation */
 	StartTransactionCommand();
@@ -802,7 +884,7 @@ vacuum_rel(Oid relid, VacuumStmt *vacstmt, bool do_toast, bool for_wraparound,
 		 * here by violating transaction semantics.)
 		 *
 		 * We also set the VACUUM_FOR_WRAPAROUND flag, which is passed down by
-		 * autovacuum; it's used to avoid cancelling a vacuum that was invoked
+		 * autovacuum; it's used to avoid canceling a vacuum that was invoked
 		 * in an emergency.
 		 *
 		 * Note: these flags remain set until CommitTransaction or
@@ -835,14 +917,29 @@ vacuum_rel(Oid relid, VacuumStmt *vacstmt, bool do_toast, bool for_wraparound,
 	 *
 	 * There's a race condition here: the rel may have gone away since the
 	 * last time we saw it.  If so, we don't need to vacuum it.
+	 *
+	 * If we've been asked not to wait for the relation lock, acquire it first
+	 * in non-blocking mode, before calling try_relation_open().
 	 */
-	onerel = try_relation_open(relid, lmode);
+	if (!(vacstmt->options & VACOPT_NOWAIT))
+		onerel = try_relation_open(relid, lmode);
+	else if (ConditionalLockRelationOid(relid, lmode))
+		onerel = try_relation_open(relid, NoLock);
+	else
+	{
+		onerel = NULL;
+		if (IsAutoVacuumWorkerProcess() && Log_autovacuum_min_duration >= 0)
+			ereport(LOG,
+					(errcode(ERRCODE_LOCK_NOT_AVAILABLE),
+				   errmsg("skipping vacuum of \"%s\" --- lock not available",
+						  vacstmt->relation->relname)));
+	}
 
 	if (!onerel)
 	{
 		PopActiveSnapshot();
 		CommitTransactionCommand();
-		return;
+		return false;
 	}
 
 	/*
@@ -873,7 +970,7 @@ vacuum_rel(Oid relid, VacuumStmt *vacstmt, bool do_toast, bool for_wraparound,
 		relation_close(onerel, lmode);
 		PopActiveSnapshot();
 		CommitTransactionCommand();
-		return;
+		return false;
 	}
 
 	/*
@@ -890,7 +987,7 @@ vacuum_rel(Oid relid, VacuumStmt *vacstmt, bool do_toast, bool for_wraparound,
 		relation_close(onerel, lmode);
 		PopActiveSnapshot();
 		CommitTransactionCommand();
-		return;
+		return false;
 	}
 
 	/*
@@ -905,7 +1002,7 @@ vacuum_rel(Oid relid, VacuumStmt *vacstmt, bool do_toast, bool for_wraparound,
 		relation_close(onerel, lmode);
 		PopActiveSnapshot();
 		CommitTransactionCommand();
-		return;
+		return false;
 	}
 
 	/*
@@ -957,7 +1054,7 @@ vacuum_rel(Oid relid, VacuumStmt *vacstmt, bool do_toast, bool for_wraparound,
 					vacstmt->freeze_min_age, vacstmt->freeze_table_age);
 	}
 	else
-		lazy_vacuum_rel(onerel, vacstmt, vac_strategy, scanned_all);
+		lazy_vacuum_rel(onerel, vacstmt, vac_strategy);
 
 	/* Roll back any GUC changes executed by index functions */
 	AtEOXact_GUC(false, save_nestlevel);
@@ -983,12 +1080,15 @@ vacuum_rel(Oid relid, VacuumStmt *vacstmt, bool do_toast, bool for_wraparound,
 	 * totally unimportant for toast relations.
 	 */
 	if (toast_relid != InvalidOid)
-		vacuum_rel(toast_relid, vacstmt, false, for_wraparound, NULL);
+		vacuum_rel(toast_relid, vacstmt, false, for_wraparound);
 
 	/*
 	 * Now release the session-level lock on the master table.
 	 */
 	UnlockRelationIdForSession(&onerelid, lmode);
+
+	/* Report that we really did it. */
+	return true;
 }
 
 

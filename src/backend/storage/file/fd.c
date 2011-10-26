@@ -125,12 +125,8 @@ static int	max_safe_fds = 32;	/* default if not changed */
 /* these are the assigned bits in fdstate below: */
 #define FD_TEMPORARY		(1 << 0)	/* T = delete when closed */
 #define FD_XACT_TEMPORARY	(1 << 1)	/* T = delete at eoXact */
-
-/*
- * Flag to tell whether it's worth scanning VfdCache looking for temp files to
- * close
- */
-static bool have_xact_temporary_files = false;
+#define FD_XACT_TRANSIENT	(1 << 2)	/* T = close (not delete) at aoXact,
+										 * but keep VFD */
 
 typedef struct vfd
 {
@@ -141,6 +137,7 @@ typedef struct vfd
 	File		lruMoreRecently;	/* doubly linked recency-of-use list */
 	File		lruLessRecently;
 	off_t		seekPos;		/* current logical file position */
+	off_t		fileSize;		/* current size of file (0 if not temporary) */
 	char	   *fileName;		/* name of file, or NULL for unused VFD */
 	/* NB: fileName is malloc'd, and must be free'd when closing the VFD */
 	int			fileFlags;		/* open(2) flags for (re)opening the file */
@@ -159,6 +156,17 @@ static Size SizeVfdCache = 0;
  * Number of file descriptors known to be in use by VFD entries.
  */
 static int	nfile = 0;
+
+/* True if there are files to close/delete at end of transaction */
+static bool have_pending_fd_cleanup = false;
+
+/*
+ * Tracks the total size of all temporary files.  Note: when temp_file_limit
+ * is being enforced, this cannot overflow since the limit cannot be more
+ * than INT_MAX kilobytes.  When not enforcing, it could theoretically
+ * overflow, but we don't care.
+ */
+static uint64 temporary_files_size = 0;
 
 /*
  * List of stdio FILEs and <dirent.h> DIRs opened with AllocateFile
@@ -562,7 +570,7 @@ _dump_lru(void)
 		snprintf(buf + strlen(buf), sizeof(buf) - strlen(buf), "%d ", mru);
 	}
 	snprintf(buf + strlen(buf), sizeof(buf) - strlen(buf), "LEAST");
-	elog(LOG, buf);
+	elog(LOG, "%s", buf);
 }
 #endif   /* FDDEBUG */
 
@@ -591,6 +599,7 @@ LruDelete(File file)
 	Vfd		   *vfdP;
 
 	Assert(file != 0);
+	Assert(!FileIsNotOpen(file));
 
 	DO_DB(elog(LOG, "LruDelete %d (%s)",
 			   file, VfdCache[file].fileName));
@@ -887,6 +896,7 @@ PathNameOpenFile(FileName fileName, int fileFlags, int fileMode)
 	vfdP->fileFlags = fileFlags & ~(O_CREAT | O_TRUNC | O_EXCL);
 	vfdP->fileMode = fileMode;
 	vfdP->seekPos = 0;
+	vfdP->fileSize = 0;
 	vfdP->fdstate = 0x0;
 	vfdP->resowner = NULL;
 
@@ -953,7 +963,7 @@ OpenTemporaryFile(bool interXact)
 		VfdCache[file].resowner = CurrentResourceOwner;
 
 		/* ensure cleanup happens at eoxact */
-		have_xact_temporary_files = true;
+		have_pending_fd_cleanup = true;
 	}
 
 	return file;
@@ -1027,6 +1037,25 @@ OpenTemporaryFileInTablespace(Oid tblspcOid, bool rejectError)
 }
 
 /*
+ * Set the transient flag on a file
+ *
+ * This flag tells CleanupTempFiles to close the kernel-level file descriptor
+ * (but not the VFD itself) at end of transaction.
+ */
+void
+FileSetTransient(File file)
+{
+	Vfd		  *vfdP;
+
+	Assert(FileIsValid(file));
+
+	vfdP = &VfdCache[file];
+	vfdP->fdstate |= FD_XACT_TRANSIENT;
+
+	have_pending_fd_cleanup = true;
+}
+
+/*
  * close a file when done with it
  */
 void
@@ -1063,15 +1092,19 @@ FileClose(File file)
 		 * If we get an error, as could happen within the ereport/elog calls,
 		 * we'll come right back here during transaction abort.  Reset the
 		 * flag to ensure that we can't get into an infinite loop.  This code
-		 * is arranged to ensure that the worst-case consequence is failing
-		 * to emit log message(s), not failing to attempt the unlink.
+		 * is arranged to ensure that the worst-case consequence is failing to
+		 * emit log message(s), not failing to attempt the unlink.
 		 */
 		vfdP->fdstate &= ~FD_TEMPORARY;
+
+		/* Subtract its size from current usage (do first in case of error) */
+		temporary_files_size -= vfdP->fileSize;
+		vfdP->fileSize = 0;
 
 		if (log_temp_files >= 0)
 		{
 			struct stat filestats;
-			int		stat_errno;
+			int			stat_errno;
 
 			/* first try the stat() */
 			if (stat(vfdP->fileName, &filestats))
@@ -1223,6 +1256,31 @@ FileWrite(File file, char *buffer, int amount)
 	if (returnCode < 0)
 		return returnCode;
 
+	/*
+	 * If enforcing temp_file_limit and it's a temp file, check to see if the
+	 * write would overrun temp_file_limit, and throw error if so.  Note: it's
+	 * really a modularity violation to throw error here; we should set errno
+	 * and return -1.  However, there's no way to report a suitable error
+	 * message if we do that.  All current callers would just throw error
+	 * immediately anyway, so this is safe at present.
+	 */
+	if (temp_file_limit >= 0 && (VfdCache[file].fdstate & FD_TEMPORARY))
+	{
+		off_t	newPos = VfdCache[file].seekPos + amount;
+
+		if (newPos > VfdCache[file].fileSize)
+		{
+			uint64	newTotal = temporary_files_size;
+
+			newTotal += newPos - VfdCache[file].fileSize;
+			if (newTotal > (uint64) temp_file_limit * (uint64) 1024)
+				ereport(ERROR,
+						(errcode(ERRCODE_CONFIGURATION_LIMIT_EXCEEDED),
+						 errmsg("temporary file size exceeds temp_file_limit (%dkB)",
+								temp_file_limit)));
+		}
+	}
+
 retry:
 	errno = 0;
 	returnCode = write(VfdCache[file].fd, buffer, amount);
@@ -1232,7 +1290,21 @@ retry:
 		errno = ENOSPC;
 
 	if (returnCode >= 0)
+	{
 		VfdCache[file].seekPos += returnCode;
+
+		/* maintain fileSize and temporary_files_size if it's a temp file */
+		if (VfdCache[file].fdstate & FD_TEMPORARY)
+		{
+			off_t	newPos = VfdCache[file].seekPos;
+
+			if (newPos > VfdCache[file].fileSize)
+			{
+				temporary_files_size += newPos - VfdCache[file].fileSize;
+				VfdCache[file].fileSize = newPos;
+			}
+		}
+	}
 	else
 	{
 		/*
@@ -1375,6 +1447,15 @@ FileTruncate(File file, off_t offset)
 		return returnCode;
 
 	returnCode = ftruncate(VfdCache[file].fd, offset);
+
+	if (returnCode == 0 && VfdCache[file].fileSize > offset)
+	{
+		/* adjust our state for truncation of a temp file */
+		Assert(VfdCache[file].fdstate & FD_TEMPORARY);
+		temporary_files_size -= VfdCache[file].fileSize - offset;
+		VfdCache[file].fileSize = offset;
+	}
+
 	return returnCode;
 }
 
@@ -1778,8 +1859,9 @@ AtEOSubXact_Files(bool isCommit, SubTransactionId mySubid,
  * particularly care which).  All still-open per-transaction temporary file
  * VFDs are closed, which also causes the underlying files to be deleted
  * (although they should've been closed already by the ResourceOwner
- * cleanup). Furthermore, all "allocated" stdio files are closed. We also
- * forget any transaction-local temp tablespace list.
+ * cleanup). Transient files have their kernel file descriptors closed.
+ * Furthermore, all "allocated" stdio files are closed. We also forget any
+ * transaction-local temp tablespace list.
  */
 void
 AtEOXact_Files(void)
@@ -1802,7 +1884,10 @@ AtProcExit_Files(int code, Datum arg)
 }
 
 /*
- * Close temporary files and delete their underlying files.
+ * General cleanup routine for fd.c.
+ *
+ * Temporary files are closed, and their underlying files deleted.
+ * Transient files are closed.
  *
  * isProcExit: if true, this is being called as the backend process is
  * exiting. If that's the case, we should remove all temporary files; if
@@ -1819,35 +1904,51 @@ CleanupTempFiles(bool isProcExit)
 	 * Careful here: at proc_exit we need extra cleanup, not just
 	 * xact_temporary files.
 	 */
-	if (isProcExit || have_xact_temporary_files)
+	if (isProcExit || have_pending_fd_cleanup)
 	{
 		Assert(FileIsNotOpen(0));		/* Make sure ring not corrupted */
 		for (i = 1; i < SizeVfdCache; i++)
 		{
 			unsigned short fdstate = VfdCache[i].fdstate;
 
-			if ((fdstate & FD_TEMPORARY) && VfdCache[i].fileName != NULL)
+			if (VfdCache[i].fileName != NULL)
 			{
-				/*
-				 * If we're in the process of exiting a backend process, close
-				 * all temporary files. Otherwise, only close temporary files
-				 * local to the current transaction. They should be closed by
-				 * the ResourceOwner mechanism already, so this is just a
-				 * debugging cross-check.
-				 */
-				if (isProcExit)
-					FileClose(i);
-				else if (fdstate & FD_XACT_TEMPORARY)
+				if (fdstate & FD_TEMPORARY)
 				{
-					elog(WARNING,
-						 "temporary file %s not closed at end-of-transaction",
-						 VfdCache[i].fileName);
-					FileClose(i);
+					/*
+					 * If we're in the process of exiting a backend process,
+					 * close all temporary files. Otherwise, only close
+					 * temporary files local to the current transaction.
+					 * They should be closed by the ResourceOwner mechanism
+					 * already, so this is just a debugging cross-check.
+					 */
+					if (isProcExit)
+						FileClose(i);
+					else if (fdstate & FD_XACT_TEMPORARY)
+					{
+						elog(WARNING,
+							 "temporary file %s not closed at end-of-transaction",
+							 VfdCache[i].fileName);
+						FileClose(i);
+					}
+				}
+				else if (fdstate & FD_XACT_TRANSIENT)
+				{
+					/*
+					 * Close the FD, and remove the entry from the LRU ring,
+					 * but also remove the flag from the VFD.  This is to
+					 * ensure that if the VFD is reused in the future for
+					 * non-transient access, we don't close it inappropriately
+					 * then.
+					 */
+					if (!FileIsNotOpen(i))
+						LruDelete(i);
+					VfdCache[i].fdstate &= ~FD_XACT_TRANSIENT;
 				}
 			}
 		}
 
-		have_xact_temporary_files = false;
+		have_pending_fd_cleanup = false;
 	}
 
 	/* Clean up "allocated" stdio files and dirs. */
@@ -1900,7 +2001,7 @@ RemovePgTempFiles(void)
 		RemovePgTempFilesInDir(temp_path);
 
 		snprintf(temp_path, sizeof(temp_path), "pg_tblspc/%s/%s",
-			spc_de->d_name, TABLESPACE_VERSION_DIRECTORY);
+				 spc_de->d_name, TABLESPACE_VERSION_DIRECTORY);
 		RemovePgTempRelationFiles(temp_path);
 	}
 
@@ -1977,7 +2078,7 @@ RemovePgTempRelationFiles(const char *tsdirname)
 
 	while ((de = ReadDir(ts_dir, tsdirname)) != NULL)
 	{
-		int		i = 0;
+		int			i = 0;
 
 		/*
 		 * We're only interested in the per-database directories, which have
@@ -2023,7 +2124,7 @@ RemovePgTempRelationFilesInDbspace(const char *dbspacedirname)
 		snprintf(rm_path, sizeof(rm_path), "%s/%s",
 				 dbspacedirname, de->d_name);
 
-		unlink(rm_path);	/* note we ignore any error */
+		unlink(rm_path);		/* note we ignore any error */
 	}
 
 	FreeDir(dbspace_dir);
@@ -2055,15 +2156,17 @@ looks_like_temp_rel_name(const char *name)
 	/* We might have _forkname or .segment or both. */
 	if (name[pos] == '_')
 	{
-		int		forkchar = forkname_chars(&name[pos+1], NULL);
+		int			forkchar = forkname_chars(&name[pos + 1], NULL);
+
 		if (forkchar <= 0)
 			return false;
 		pos += forkchar + 1;
 	}
 	if (name[pos] == '.')
 	{
-		int		segchar;
-		for (segchar = 1; isdigit((unsigned char) name[pos+segchar]); ++segchar)
+		int			segchar;
+
+		for (segchar = 1; isdigit((unsigned char) name[pos + segchar]); ++segchar)
 			;
 		if (segchar <= 1)
 			return false;

@@ -34,7 +34,6 @@ extern int	max_locks_per_xact;
 #ifdef LOCK_DEBUG
 extern int	Trace_lock_oidmin;
 extern bool Trace_locks;
-extern bool Trace_userlocks;
 extern int	Trace_lock_table;
 extern bool Debug_deadlocks;
 #endif   /* LOCK_DEBUG */
@@ -412,6 +411,7 @@ typedef struct LOCALLOCK
 	int64		nLocks;			/* total number of times lock is held */
 	int			numLockOwners;	/* # of relevant ResourceOwners */
 	int			maxLockOwners;	/* allocated size of array */
+	bool		holdsStrongLockCount;	/* did we bump FastPathStrongLocks? */
 	LOCALLOCKOWNER *lockOwners; /* dynamically resizable array */
 } LOCALLOCK;
 
@@ -419,19 +419,25 @@ typedef struct LOCALLOCK
 
 
 /*
- * This struct holds information passed from lmgr internals to the lock
- * listing user-level functions (in lockfuncs.c).	For each PROCLOCK in
- * the system, copies of the PROCLOCK object and associated PGPROC and
- * LOCK objects are stored.  Note there will often be multiple copies
- * of the same PGPROC or LOCK --- to detect whether two are the same,
- * compare the PROCLOCK tag fields.
+ * These structures hold information passed from lmgr internals to the lock
+ * listing user-level functions (in lockfuncs.c).
  */
+
+typedef struct LockInstanceData
+{
+	LOCKTAG		locktag;		/* locked object */
+	LOCKMASK	holdMask;		/* locks held by this PGPROC */
+	LOCKMODE	waitLockMode;	/* lock awaited by this PGPROC, if any */
+	BackendId	backend;		/* backend ID of this PGPROC */
+	LocalTransactionId	lxid;	/* local transaction ID of this PGPROC */
+	int			pid;			/* pid of this PGPROC */
+	bool		fastpath;		/* taken via fastpath? */
+} LockInstanceData;
+
 typedef struct LockData
 {
-	int			nelements;		/* The length of each of the arrays */
-	PROCLOCK   *proclocks;
-	PGPROC	   *procs;
-	LOCK	   *locks;
+	int			nelements;		/* The length of the array */
+	LockInstanceData   *locks;
 } LockData;
 
 
@@ -484,6 +490,7 @@ extern LockAcquireResult LockAcquireExtended(const LOCKTAG *locktag,
 					bool report_memory_error);
 extern bool LockRelease(const LOCKTAG *locktag,
 			LOCKMODE lockmode, bool sessionLock);
+extern void LockReleaseSession(LOCKMETHODID lockmethodid);
 extern void LockReleaseAll(LOCKMETHODID lockmethodid, bool allLocks);
 extern void LockReleaseCurrentOwner(void);
 extern void LockReassignCurrentOwner(void);
@@ -534,5 +541,9 @@ extern void InitDeadLockChecking(void);
 extern void DumpLocks(PGPROC *proc);
 extern void DumpAllLocks(void);
 #endif
+
+/* Lock a VXID (used to wait for a transaction to finish) */
+extern void VirtualXactLockTableInsert(VirtualTransactionId vxid);
+extern bool VirtualXactLock(VirtualTransactionId vxid, bool wait);
 
 #endif   /* LOCK_H */

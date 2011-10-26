@@ -45,7 +45,7 @@ makeA_Expr(A_Expr_Kind kind, List *name,
  *		As above, given a simple (unqualified) operator name
  */
 A_Expr *
-makeSimpleA_Expr(A_Expr_Kind kind, const char *name,
+makeSimpleA_Expr(A_Expr_Kind kind, char *name,
 				 Node *lexpr, Node *rexpr, int location)
 {
 	A_Expr	   *a = makeNode(A_Expr);
@@ -67,6 +67,7 @@ makeVar(Index varno,
 		AttrNumber varattno,
 		Oid vartype,
 		int32 vartypmod,
+		Oid varcollid,
 		Index varlevelsup)
 {
 	Var		   *var = makeNode(Var);
@@ -75,6 +76,7 @@ makeVar(Index varno,
 	var->varattno = varattno;
 	var->vartype = vartype;
 	var->vartypmod = vartypmod;
+	var->varcollid = varcollid;
 	var->varlevelsup = varlevelsup;
 
 	/*
@@ -105,6 +107,7 @@ makeVarFromTargetEntry(Index varno,
 				   tle->resno,
 				   exprType((Node *) tle->expr),
 				   exprTypmod((Node *) tle->expr),
+				   exprCollation((Node *) tle->expr),
 				   0);
 }
 
@@ -139,6 +142,7 @@ makeWholeRowVar(RangeTblEntry *rte,
 							 InvalidAttrNumber,
 							 toid,
 							 -1,
+							 InvalidOid,
 							 varlevelsup);
 			break;
 		case RTE_FUNCTION:
@@ -150,6 +154,7 @@ makeWholeRowVar(RangeTblEntry *rte,
 								 InvalidAttrNumber,
 								 toid,
 								 -1,
+								 InvalidOid,
 								 varlevelsup);
 			}
 			else
@@ -164,6 +169,7 @@ makeWholeRowVar(RangeTblEntry *rte,
 								 1,
 								 toid,
 								 -1,
+								 InvalidOid,
 								 varlevelsup);
 			}
 			break;
@@ -174,6 +180,7 @@ makeWholeRowVar(RangeTblEntry *rte,
 							 InvalidAttrNumber,
 							 toid,
 							 -1,
+							 InvalidOid,
 							 varlevelsup);
 			break;
 		default:
@@ -188,6 +195,7 @@ makeWholeRowVar(RangeTblEntry *rte,
 							 InvalidAttrNumber,
 							 RECORDOID,
 							 -1,
+							 InvalidOid,
 							 varlevelsup);
 			break;
 	}
@@ -263,6 +271,7 @@ makeFromExpr(List *fromlist, Node *quals)
 Const *
 makeConst(Oid consttype,
 		  int32 consttypmod,
+		  Oid constcollid,
 		  int constlen,
 		  Datum constvalue,
 		  bool constisnull,
@@ -272,6 +281,7 @@ makeConst(Oid consttype,
 
 	cnst->consttype = consttype;
 	cnst->consttypmod = consttypmod;
+	cnst->constcollid = constcollid;
 	cnst->constlen = constlen;
 	cnst->constvalue = constvalue;
 	cnst->constisnull = constisnull;
@@ -289,7 +299,7 @@ makeConst(Oid consttype,
  * storage properties.
  */
 Const *
-makeNullConst(Oid consttype, int32 consttypmod)
+makeNullConst(Oid consttype, int32 consttypmod, Oid constcollid)
 {
 	int16		typLen;
 	bool		typByVal;
@@ -297,6 +307,7 @@ makeNullConst(Oid consttype, int32 consttypmod)
 	get_typlenbyval(consttype, &typLen, &typByVal);
 	return makeConst(consttype,
 					 consttypmod,
+					 constcollid,
 					 (int) typLen,
 					 (Datum) 0,
 					 true,
@@ -311,7 +322,7 @@ Node *
 makeBoolConst(bool value, bool isnull)
 {
 	/* note that pg_type.h hardwires size of bool as 1 ... duplicate it */
-	return (Node *) makeConst(BOOLOID, -1, 1,
+	return (Node *) makeConst(BOOLOID, -1, InvalidOid, 1,
 							  BoolGetDatum(value), isnull, true);
 }
 
@@ -353,13 +364,15 @@ makeAlias(const char *aliasname, List *colnames)
  *	  creates a RelabelType node
  */
 RelabelType *
-makeRelabelType(Expr *arg, Oid rtype, int32 rtypmod, CoercionForm rformat)
+makeRelabelType(Expr *arg, Oid rtype, int32 rtypmod, Oid rcollid,
+				CoercionForm rformat)
 {
 	RelabelType *r = makeNode(RelabelType);
 
 	r->arg = arg;
 	r->resulttype = rtype;
 	r->resulttypmod = rtypmod;
+	r->resultcollid = rcollid;
 	r->relabelformat = rformat;
 	r->location = -1;
 
@@ -438,7 +451,8 @@ makeTypeNameFromOid(Oid typeOid, int32 typmod)
  * The argument expressions must have been transformed already.
  */
 FuncExpr *
-makeFuncExpr(Oid funcid, Oid rettype, List *args, CoercionForm fformat)
+makeFuncExpr(Oid funcid, Oid rettype, List *args,
+			 Oid funccollid, Oid inputcollid, CoercionForm fformat)
 {
 	FuncExpr   *funcexpr;
 
@@ -447,6 +461,8 @@ makeFuncExpr(Oid funcid, Oid rettype, List *args, CoercionForm fformat)
 	funcexpr->funcresulttype = rettype;
 	funcexpr->funcretset = false;		/* only allowed case here */
 	funcexpr->funcformat = fformat;
+	funcexpr->funccollid = funccollid;
+	funcexpr->inputcollid = inputcollid;
 	funcexpr->args = args;
 	funcexpr->location = -1;
 

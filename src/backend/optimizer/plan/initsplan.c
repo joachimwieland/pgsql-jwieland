@@ -14,11 +14,9 @@
  */
 #include "postgres.h"
 
-#include "catalog/pg_operator.h"
 #include "catalog/pg_type.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/clauses.h"
-#include "optimizer/cost.h"
 #include "optimizer/joininfo.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
@@ -27,11 +25,7 @@
 #include "optimizer/prep.h"
 #include "optimizer/restrictinfo.h"
 #include "optimizer/var.h"
-#include "parser/parse_expr.h"
-#include "parser/parse_oper.h"
-#include "utils/builtins.h"
 #include "utils/lsyscache.h"
-#include "utils/syscache.h"
 
 
 /* These parameters are set by GUC */
@@ -132,11 +126,12 @@ void
 build_base_rel_tlists(PlannerInfo *root, List *final_tlist)
 {
 	List	   *tlist_vars = pull_var_clause((Node *) final_tlist,
+											 PVC_RECURSE_AGGREGATES,
 											 PVC_INCLUDE_PLACEHOLDERS);
 
 	if (tlist_vars != NIL)
 	{
-		add_vars_to_targetlist(root, tlist_vars, bms_make_singleton(0));
+		add_vars_to_targetlist(root, tlist_vars, bms_make_singleton(0), true);
 		list_free(tlist_vars);
 	}
 }
@@ -150,10 +145,15 @@ build_base_rel_tlists(PlannerInfo *root, List *final_tlist)
  *
  *	  The list may also contain PlaceHolderVars.  These don't necessarily
  *	  have a single owning relation; we keep their attr_needed info in
- *	  root->placeholder_list instead.
+ *	  root->placeholder_list instead.  If create_new_ph is true, it's OK
+ *	  to create new PlaceHolderInfos, and we also have to update ph_may_need;
+ *	  otherwise, the PlaceHolderInfos must already exist, and we should only
+ *	  update their ph_needed.  (It should be true before deconstruct_jointree
+ *	  begins, and false after that.)
  */
 void
-add_vars_to_targetlist(PlannerInfo *root, List *vars, Relids where_needed)
+add_vars_to_targetlist(PlannerInfo *root, List *vars,
+					   Relids where_needed, bool create_new_ph)
 {
 	ListCell   *temp;
 
@@ -184,17 +184,20 @@ add_vars_to_targetlist(PlannerInfo *root, List *vars, Relids where_needed)
 		else if (IsA(node, PlaceHolderVar))
 		{
 			PlaceHolderVar *phv = (PlaceHolderVar *) node;
-			PlaceHolderInfo *phinfo = find_placeholder_info(root, phv);
+			PlaceHolderInfo *phinfo = find_placeholder_info(root, phv,
+															create_new_ph);
 
+			/* Always adjust ph_needed */
 			phinfo->ph_needed = bms_add_members(phinfo->ph_needed,
 												where_needed);
+
 			/*
-			 * Update ph_may_need too.  This is currently only necessary
-			 * when being called from build_base_rel_tlists, but we may as
-			 * well do it always.
+			 * If we are creating PlaceHolderInfos, mark them with the
+			 * correct maybe-needed locations.  Otherwise, it's too late to
+			 * change that.
 			 */
-			phinfo->ph_may_need = bms_add_members(phinfo->ph_may_need,
-												  where_needed);
+			if (create_new_ph)
+				mark_placeholder_maybe_needed(root, phinfo, where_needed);
 		}
 		else
 			elog(ERROR, "unrecognized node type: %d", (int) nodeTag(node));
@@ -704,8 +707,8 @@ make_outerjoininfo(PlannerInfo *root,
 	 * this join's nullable side, and it may get used above this join, then
 	 * ensure that min_righthand contains the full eval_at set of the PHV.
 	 * This ensures that the PHV actually can be evaluated within the RHS.
-	 * Note that this works only because we should already have determined
-	 * the final eval_at level for any PHV syntactically within this join.
+	 * Note that this works only because we should already have determined the
+	 * final eval_at level for any PHV syntactically within this join.
 	 */
 	foreach(l, root->placeholder_list)
 	{
@@ -1029,9 +1032,11 @@ distribute_qual_to_rels(PlannerInfo *root, Node *clause,
 	 */
 	if (bms_membership(relids) == BMS_MULTIPLE)
 	{
-		List	   *vars = pull_var_clause(clause, PVC_INCLUDE_PLACEHOLDERS);
+		List	   *vars = pull_var_clause(clause,
+										   PVC_RECURSE_AGGREGATES,
+										   PVC_INCLUDE_PLACEHOLDERS);
 
-		add_vars_to_targetlist(root, vars, relids);
+		add_vars_to_targetlist(root, vars, relids, false);
 		list_free(vars);
 	}
 
@@ -1070,7 +1075,7 @@ distribute_qual_to_rels(PlannerInfo *root, Node *clause,
 	 *
 	 * In all cases, it's important to initialize the left_ec and right_ec
 	 * fields of a mergejoinable clause, so that all possibly mergejoinable
-	 * expressions have representations in EquivalenceClasses.  If
+	 * expressions have representations in EquivalenceClasses.	If
 	 * process_equivalence is successful, it will take care of that;
 	 * otherwise, we have to call initialize_mergeclause_eclasses to do it.
 	 */
@@ -1371,6 +1376,7 @@ distribute_restrictinfo_to_rels(PlannerInfo *root,
 void
 process_implied_equality(PlannerInfo *root,
 						 Oid opno,
+						 Oid collation,
 						 Expr *item1,
 						 Expr *item2,
 						 Relids qualscope,
@@ -1387,7 +1393,9 @@ process_implied_equality(PlannerInfo *root,
 						   BOOLOID,		/* opresulttype */
 						   false,		/* opretset */
 						   (Expr *) copyObject(item1),
-						   (Expr *) copyObject(item2));
+						   (Expr *) copyObject(item2),
+						   InvalidOid,
+						   collation);
 
 	/* If both constant, try to reduce to a boolean constant. */
 	if (both_const)
@@ -1427,6 +1435,7 @@ process_implied_equality(PlannerInfo *root,
  */
 RestrictInfo *
 build_implied_join_equality(Oid opno,
+							Oid collation,
 							Expr *item1,
 							Expr *item2,
 							Relids qualscope)
@@ -1442,7 +1451,9 @@ build_implied_join_equality(Oid opno,
 						   BOOLOID,		/* opresulttype */
 						   false,		/* opretset */
 						   (Expr *) copyObject(item1),
-						   (Expr *) copyObject(item2));
+						   (Expr *) copyObject(item2),
+						   InvalidOid,
+						   collation);
 
 	/* Make a copy of qualscope to avoid problems if source EC changes */
 	qualscope = bms_copy(qualscope);

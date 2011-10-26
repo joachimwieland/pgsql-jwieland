@@ -32,9 +32,9 @@ ALTER TABLE <replaceable class="PARAMETER">name</replaceable>
 
 <phrase>where <replaceable class="PARAMETER">action</replaceable> is one of:</phrase>
 
-    ADD [ COLUMN ] <replaceable class="PARAMETER">column</replaceable> <replaceable class="PARAMETER">data_type</replaceable> [ <replaceable class="PARAMETER">column_constraint</replaceable> [ ... ] ]
+    ADD [ COLUMN ] <replaceable class="PARAMETER">column</replaceable> <replaceable class="PARAMETER">data_type</replaceable> [ COLLATE <replaceable class="PARAMETER">collation</replaceable> ] [ <replaceable class="PARAMETER">column_constraint</replaceable> [ ... ] ]
     DROP [ COLUMN ] [ IF EXISTS ] <replaceable class="PARAMETER">column</replaceable> [ RESTRICT | CASCADE ]
-    ALTER [ COLUMN ] <replaceable class="PARAMETER">column</replaceable> [ SET DATA ] TYPE <replaceable class="PARAMETER">type</replaceable> [ USING <replaceable class="PARAMETER">expression</replaceable> ]
+    ALTER [ COLUMN ] <replaceable class="PARAMETER">column</replaceable> [ SET DATA ] TYPE <replaceable class="PARAMETER">data_type</replaceable> [ COLLATE <replaceable class="PARAMETER">collation</replaceable> ] [ USING <replaceable class="PARAMETER">expression</replaceable> ]
     ALTER [ COLUMN ] <replaceable class="PARAMETER">column</replaceable> SET DEFAULT <replaceable class="PARAMETER">expression</replaceable>
     ALTER [ COLUMN ] <replaceable class="PARAMETER">column</replaceable> DROP DEFAULT
     ALTER [ COLUMN ] <replaceable class="PARAMETER">column</replaceable> { SET | DROP } NOT NULL
@@ -42,8 +42,9 @@ ALTER TABLE <replaceable class="PARAMETER">name</replaceable>
     ALTER [ COLUMN ] <replaceable class="PARAMETER">column</replaceable> SET ( <replaceable class="PARAMETER">attribute_option</replaceable> = <replaceable class="PARAMETER">value</replaceable> [, ... ] )
     ALTER [ COLUMN ] <replaceable class="PARAMETER">column</replaceable> RESET ( <replaceable class="PARAMETER">attribute_option</replaceable> [, ... ] )
     ALTER [ COLUMN ] <replaceable class="PARAMETER">column</replaceable> SET STORAGE { PLAIN | EXTERNAL | EXTENDED | MAIN }
-    ADD <replaceable class="PARAMETER">table_constraint</replaceable>
+    ADD <replaceable class="PARAMETER">table_constraint</replaceable> [ NOT VALID ]
     ADD <replaceable class="PARAMETER">table_constraint_using_index</replaceable>
+    VALIDATE CONSTRAINT <replaceable class="PARAMETER">constraint_name</replaceable>
     DROP CONSTRAINT [ IF EXISTS ]  <replaceable class="PARAMETER">constraint_name</replaceable> [ RESTRICT | CASCADE ]
     DISABLE TRIGGER [ <replaceable class="PARAMETER">trigger_name</replaceable> | ALL | USER ]
     ENABLE TRIGGER [ <replaceable class="PARAMETER">trigger_name</replaceable> | ALL | USER ]
@@ -61,6 +62,8 @@ ALTER TABLE <replaceable class="PARAMETER">name</replaceable>
     RESET ( <replaceable class="PARAMETER">storage_parameter</replaceable> [, ... ] )
     INHERIT <replaceable class="PARAMETER">parent_table</replaceable>
     NO INHERIT <replaceable class="PARAMETER">parent_table</replaceable>
+    OF <replaceable class="PARAMETER">type_name</replaceable>
+    NOT OF
     OWNER TO <replaceable class="PARAMETER">new_owner</replaceable>
     SET TABLESPACE <replaceable class="PARAMETER">new_tablespace</replaceable>
 
@@ -113,7 +116,11 @@ ALTER TABLE <replaceable class="PARAMETER">name</replaceable>
       This form changes the type of a column of a table. Indexes and
       simple table constraints involving the column will be automatically
       converted to use the new column type by reparsing the originally
-      supplied expression.  The optional <literal>USING</literal>
+      supplied expression.
+      The optional <literal>COLLATE</literal> clause specifies a collation
+      for the new column; if omitted, the collation is the default for the
+      new column type.
+      The optional <literal>USING</literal>
       clause specifies how to compute the new column value from the old;
       if omitted, the default conversion is the same as an assignment
       cast from old data type to new.  A  <literal>USING</literal>
@@ -227,11 +234,23 @@ ALTER TABLE <replaceable class="PARAMETER">name</replaceable>
    </varlistentry>
 
    <varlistentry>
-    <term><literal>ADD <replaceable class="PARAMETER">table_constraint</replaceable></literal></term>
+    <term><literal>ADD <replaceable class="PARAMETER">table_constraint</replaceable> [ NOT VALID ]</literal></term>
     <listitem>
      <para>
       This form adds a new constraint to a table using the same syntax as
-      <xref linkend="SQL-CREATETABLE">.
+      <xref linkend="SQL-CREATETABLE">, plus the option <literal>NOT
+      VALID</literal>, which is currently only allowed for foreign key
+      and CHECK constraints.
+      If the constraint is marked <literal>NOT VALID</literal>, the
+      potentially-lengthy initial check to verify that all rows in the table
+      satisfy the constraint is skipped.  The constraint will still be
+      enforced against subsequent inserts or updates (that is, they'll fail
+      unless there is a matching row in the referenced table, in the case
+      of foreign keys; and they'll fail unless the new row matches the
+      specified check constraints).  But the
+      database will not assume that the constraint holds for all rows in
+      the table, until it is validated by using the <literal>VALIDATE
+      CONSTRAINT</literal> option.
      </para>
     </listitem>
    </varlistentry>
@@ -284,6 +303,21 @@ ALTER TABLE <replaceable class="PARAMETER">name</replaceable>
        official constraint using this syntax.  See the example below.
       </para>
      </note>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term><literal>VALIDATE CONSTRAINT</literal></term>
+    <listitem>
+     <para>
+      This form validates a foreign key or check constraint that was previously created
+      as <literal>NOT VALID</literal>, by scanning the table to ensure there
+      are no rows for which the constraint is not satisfied.
+      Nothing happens if the constraint is already marked valid.
+      The value of separating validation from initial creation of the
+      constraint is that validation requires a lesser lock on the table
+      than constraint creation does.
+     </para>
     </listitem>
    </varlistentry>
 
@@ -403,9 +437,9 @@ ALTER TABLE <replaceable class="PARAMETER">name</replaceable>
       for details on the available parameters.  Note that the table contents
       will not be modified immediately by this command; depending on the
       parameter you might need to rewrite the table to get the desired effects.
-      That can be done with <xref linkend="SQL-CLUSTER">
-      or one of the forms of <command>ALTER
-      TABLE</> that forces a table rewrite.
+      That can be done with <link linkend="SQL-VACUUM">VACUUM
+      FULL</>, <xref linkend="SQL-CLUSTER"> or one of the forms
+      of <command>ALTER TABLE</> that forces a table rewrite.
      </para>
 
      <note>
@@ -464,6 +498,30 @@ ALTER TABLE <replaceable class="PARAMETER">name</replaceable>
       specified parent table.
       Queries against the parent table will no longer include records drawn
       from the target table.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term><literal>OF <replaceable class="PARAMETER">type_name</replaceable></literal></term>
+    <listitem>
+     <para>
+      This form links the table to a composite type as though <command>CREATE
+      TABLE OF</> had formed it.  The table's list of column names and types
+      must precisely match that of the composite type; the presence of
+      an <literal>oid</> system column is permitted to differ.  The table must
+      not inherit from any other table.  These restrictions ensure
+      that <command>CREATE TABLE OF</> would permit an equivalent table
+      definition.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term><literal>NOT OF</literal></term>
+    <listitem>
+     <para>
+      This form dissociates a typed table from its type.
      </para>
     </listitem>
    </varlistentry>
@@ -748,9 +806,14 @@ ALTER TABLE <replaceable class="PARAMETER">name</replaceable>
    <para>
     Adding a column with a non-null default or changing the type of an
     existing column will require the entire table and indexes to be rewritten.
-    This might take a significant amount of time for a large table; and it will
-    temporarily require double the disk space.  Adding or removing a system
-    <literal>oid</> column likewise requires rewriting the entire table.
+    As an exception, if the <literal>USING</> clause does not change the column
+    contents and the old type is either binary coercible to the new type or
+    an unconstrained domain over the new type, a table rewrite is not needed,
+    but any indexes on the affected columns must still be rebuilt.  Adding or
+    removing a system <literal>oid</> column also requires rewriting the entire
+    table.  Table and/or index rebuilds may take a significant amount of time
+    for a large table; and will temporarily require as much as double the disk
+    space.
    </para>
 
    <para>
@@ -777,18 +840,11 @@ ALTER TABLE <replaceable class="PARAMETER">name</replaceable>
    </para>
 
    <para>
-    The fact that <literal>SET DATA TYPE</> requires rewriting the whole table
-    is sometimes an advantage, because the rewriting process eliminates
-    any dead space in the table.  For example, to reclaim the space occupied
-    by a dropped column immediately, the fastest way is:
-<programlisting>
-ALTER TABLE table ALTER COLUMN anycol TYPE anytype;
-</programlisting>
-    where <literal>anycol</> is any remaining table column and
-    <literal>anytype</> is the same type that column already has.
-    This results in no semantically-visible change in the table,
-    but the command forces rewriting, which gets rid of no-longer-useful
-    data.
+    To force an immediate rewrite of the table, you can use
+    <link linkend="SQL-VACUUM">VACUUM FULL</>, <xref linkend="SQL-CLUSTER">
+    or one of the forms of ALTER TABLE that forces a rewrite.  This results in
+    no semantically-visible change in the table, but gets rid of
+    no-longer-useful data.
    </para>
 
    <para>
@@ -945,7 +1001,7 @@ ALTER TABLE ONLY distributors DROP CONSTRAINT zipchk;
   <para>
    To add a foreign key constraint to a table:
 <programlisting>
-ALTER TABLE distributors ADD CONSTRAINT distfk FOREIGN KEY (address) REFERENCES addresses (address) MATCH FULL;
+ALTER TABLE distributors ADD CONSTRAINT distfk FOREIGN KEY (address) REFERENCES addresses (address);
 </programlisting>
   </para>
 
@@ -985,8 +1041,7 @@ ALTER TABLE myschema.distributors SET SCHEMA yourschema;
 CREATE UNIQUE INDEX CONCURRENTLY dist_id_temp_idx ON distributors (dist_id);
 ALTER TABLE distributors DROP CONSTRAINT distributors_pkey,
     ADD CONSTRAINT distributors_pkey PRIMARY KEY USING INDEX dist_id_temp_idx;
-</programlisting>
-  </para>
+</programlisting></para>
 
  </refsect1>
 

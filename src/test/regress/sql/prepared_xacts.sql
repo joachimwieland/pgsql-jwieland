@@ -14,7 +14,7 @@ INSERT INTO pxtest1 VALUES ('aaa');
 
 
 -- Test PREPARE TRANSACTION
-BEGIN;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 UPDATE pxtest1 SET foobar = 'bbb' WHERE foobar = 'aaa';
 SELECT * FROM pxtest1;
 PREPARE TRANSACTION 'foo1';
@@ -33,7 +33,7 @@ SELECT gid FROM pg_prepared_xacts;
 
 
 -- Test COMMIT PREPARED
-BEGIN;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 INSERT INTO pxtest1 VALUES ('ddd');
 SELECT * FROM pxtest1;
 PREPARE TRANSACTION 'foo2';
@@ -45,16 +45,15 @@ COMMIT PREPARED 'foo2';
 SELECT * FROM pxtest1;
 
 -- Test duplicate gids
-BEGIN;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 UPDATE pxtest1 SET foobar = 'eee' WHERE foobar = 'ddd';
 SELECT * FROM pxtest1;
 PREPARE TRANSACTION 'foo3';
 
 SELECT gid FROM pg_prepared_xacts;
 
-BEGIN;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 INSERT INTO pxtest1 VALUES ('fff');
-SELECT * FROM pxtest1;
 
 -- This should fail, because the gid foo3 is already in use
 PREPARE TRANSACTION 'foo3';
@@ -65,11 +64,32 @@ ROLLBACK PREPARED 'foo3';
 
 SELECT * FROM pxtest1;
 
+-- Test serialization failure (SSI)
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+UPDATE pxtest1 SET foobar = 'eee' WHERE foobar = 'ddd';
+SELECT * FROM pxtest1;
+PREPARE TRANSACTION 'foo4';
+
+SELECT gid FROM pg_prepared_xacts;
+
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+SELECT * FROM pxtest1;
+
+-- This should fail, because the two transactions have a write-skew anomaly
+INSERT INTO pxtest1 VALUES ('fff');
+PREPARE TRANSACTION 'foo5';
+
+SELECT gid FROM pg_prepared_xacts;
+
+ROLLBACK PREPARED 'foo4';
+
+SELECT gid FROM pg_prepared_xacts;
+
 -- Clean up
 DROP TABLE pxtest1;
 
 -- Test subtransactions
-BEGIN;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
   CREATE TABLE pxtest2 (a int);
   INSERT INTO pxtest2 VALUES (1);
   SAVEPOINT a;
@@ -82,7 +102,7 @@ PREPARE TRANSACTION 'regress-one';
 CREATE TABLE pxtest3(fff int);
 
 -- Test shared invalidation
-BEGIN;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
   DROP TABLE pxtest3;
   CREATE TABLE pxtest4 (a int);
   INSERT INTO pxtest4 VALUES (1);

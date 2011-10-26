@@ -1,6 +1,6 @@
 <!-- doc/src/sgml/unaccent.sgml -->
 
-<sect1 id="unaccent">
+<sect1 id="unaccent" xreflabel="unaccent">
  <title>unaccent</title>
 
  <indexterm zone="unaccent">
@@ -73,7 +73,7 @@
   <title>Usage</title>
 
   <para>
-   Running the installation script <filename>unaccent.sql</> creates a text
+   Installing the <literal>unaccent</> extension creates a text
    search template <literal>unaccent</> and a dictionary <literal>unaccent</>
    based on it.  The <literal>unaccent</> dictionary has the default
    parameter setting <literal>RULES='unaccent'</>, which makes it immediately

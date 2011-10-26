@@ -18,6 +18,7 @@
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/portal.h"
+#include "utils/rel.h"
 
 
 static char *fetch_cursor_param_value(ExprContext *econtext, int paramId);
@@ -261,6 +262,7 @@ search_plan_tree(PlanState *node, Oid table_oid)
 			 */
 		case T_SeqScanState:
 		case T_IndexScanState:
+		case T_IndexOnlyScanState:
 		case T_BitmapHeapScanState:
 		case T_TidScanState:
 			{

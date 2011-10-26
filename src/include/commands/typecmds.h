@@ -20,7 +20,6 @@
 #define DEFAULT_TYPDELIM		','
 
 extern void DefineType(List *names, List *parameters);
-extern void RemoveTypes(DropStmt *drop);
 extern void RemoveTypeById(Oid typeOid);
 extern void DefineDomain(CreateDomainStmt *stmt);
 extern void DefineEnum(CreateEnumStmt *stmt);
@@ -31,6 +30,7 @@ extern Oid	AssignTypeArrayOid(void);
 extern void AlterDomainDefault(List *names, Node *defaultRaw);
 extern void AlterDomainNotNull(List *names, bool notNull);
 extern void AlterDomainAddConstraint(List *names, Node *constr);
+extern void AlterDomainValidateConstraint(List *names, char *constrName);
 extern void AlterDomainDropConstraint(List *names, const char *constrName,
 						  DropBehavior behavior);
 
@@ -41,7 +41,8 @@ extern void AlterTypeOwner(List *names, Oid newOwnerId);
 extern void AlterTypeOwnerInternal(Oid typeOid, Oid newOwnerId,
 					   bool hasDependEntry);
 extern void AlterTypeNamespace(List *names, const char *newschema);
-extern void AlterTypeNamespaceInternal(Oid typeOid, Oid nspOid,
+extern Oid	AlterTypeNamespace_oid(Oid typeOid, Oid nspOid);
+extern Oid AlterTypeNamespaceInternal(Oid typeOid, Oid nspOid,
 						   bool isImplicitArray,
 						   bool errorOnTableType);
 

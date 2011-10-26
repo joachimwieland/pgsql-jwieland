@@ -29,6 +29,7 @@ typedef struct constrCheck
 {
 	char	   *ccname;
 	char	   *ccbin;			/* nodeToString representation of expr */
+	bool		ccvalid;
 } ConstrCheck;
 
 /* This structure contains constraints of a tuple */
@@ -114,8 +115,12 @@ extern void TupleDescInitEntry(TupleDesc desc,
 				   int32 typmod,
 				   int attdim);
 
+extern void TupleDescInitEntryCollation(TupleDesc desc,
+							AttrNumber attributeNumber,
+							Oid collationid);
+
 extern TupleDesc BuildDescForRelation(List *schema);
 
-extern TupleDesc BuildDescFromLists(List *names, List *types, List *typmods);
+extern TupleDesc BuildDescFromLists(List *names, List *types, List *typmods, List *collations);
 
 #endif   /* TUPDESC_H */

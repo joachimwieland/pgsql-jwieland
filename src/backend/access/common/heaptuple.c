@@ -57,7 +57,6 @@
 
 #include "postgres.h"
 
-#include "access/heapam.h"
 #include "access/sysattr.h"
 #include "access/tuptoaster.h"
 #include "executor/tuptable.h"
@@ -350,7 +349,7 @@ nocachegetattr(HeapTuple tuple,
 		 *
 		 * check to see if any preceding bits are null...
 		 */
-		int byte = attnum >> 3;
+		int			byte = attnum >> 3;
 		int			finalbit = attnum & 0x07;
 
 		/* check for nulls "before" final bit of last byte */

@@ -87,6 +87,7 @@ INSERT INTO domarrtest values (NULL, '{{"a","b","c"},{"d","e","f"}}');
 INSERT INTO domarrtest values (NULL, '{{"toolong","b","c"},{"d","e","f"}}');
 select * from domarrtest;
 select testint4arr[1], testchar4arr[2:2] from domarrtest;
+select array_dims(testint4arr), array_dims(testchar4arr) from domarrtest;
 
 COPY domarrtest FROM stdin;
 {3,4}	{q,w,e}
@@ -103,6 +104,12 @@ drop table domarrtest;
 drop domain domainint4arr restrict;
 drop domain domainchar4arr restrict;
 
+create domain dia as int[];
+select '{1,2,3}'::dia;
+select array_dims('{1,2,3}'::dia);
+select pg_typeof('{1,2,3}'::dia);
+select pg_typeof('{1,2,3}'::dia || 42); -- should be int[] not dia
+drop domain dia;
 
 create domain dnotnull varchar(15) NOT NULL;
 create domain dnull    varchar(15);
@@ -251,6 +258,16 @@ insert into domcontest values (5);
 alter domain con drop constraint t;
 insert into domcontest values (-5); --fails
 insert into domcontest values (42);
+
+-- Test ALTER DOMAIN .. CONSTRAINT .. NOT VALID
+create domain things AS INT;
+CREATE TABLE thethings (stuff things);
+INSERT INTO thethings (stuff) VALUES (55);
+ALTER DOMAIN things ADD CONSTRAINT meow CHECK (VALUE < 11);
+ALTER DOMAIN things ADD CONSTRAINT meow CHECK (VALUE < 11) NOT VALID;
+ALTER DOMAIN things VALIDATE CONSTRAINT meow;
+UPDATE thethings SET stuff = 10;
+ALTER DOMAIN things VALIDATE CONSTRAINT meow;
 
 -- Confirm ALTER DOMAIN with RULES.
 create table domtab (col1 integer);

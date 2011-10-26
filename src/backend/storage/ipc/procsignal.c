@@ -20,12 +20,9 @@
 #include "bootstrap/bootstrap.h"
 #include "commands/async.h"
 #include "miscadmin.h"
-#include "storage/ipc.h"
 #include "storage/latch.h"
-#include "storage/procsignal.h"
-#include "storage/shmem.h"
+#include "storage/ipc.h"
 #include "storage/sinval.h"
-#include "storage/standby.h"
 #include "tcop/tcopprot.h"
 
 

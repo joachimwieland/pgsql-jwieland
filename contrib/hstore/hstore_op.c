@@ -4,8 +4,6 @@
 #include "postgres.h"
 
 #include "access/hash.h"
-#include "access/heapam.h"
-#include "access/htup.h"
 #include "catalog/pg_type.h"
 #include "funcapi.h"
 #include "utils/builtins.h"
@@ -437,7 +435,7 @@ hstore_delete_hstore(PG_FUNCTION_ARGS)
 			if (snullval != HS_VALISNULL(es2, j)
 				|| (!snullval
 					&& (svallen != HS_VALLEN(es2, j)
-						|| memcmp(HS_VAL(es, ps, i), HS_VAL(es2, ps2, j), svallen) != 0)))
+			|| memcmp(HS_VAL(es, ps, i), HS_VAL(es2, ps2, j), svallen) != 0)))
 			{
 				HS_COPYITEM(ed, bufd, pd,
 							HS_KEY(es, ps, i), HS_KEYLEN(es, i),
@@ -1000,7 +998,7 @@ hstore_contains(PG_FUNCTION_ARGS)
 			if (nullval != HS_VALISNULL(ve, idx)
 				|| (!nullval
 					&& (vallen != HS_VALLEN(ve, idx)
-			|| memcmp(HS_VAL(te, tstr, i), HS_VAL(ve, vstr, idx), vallen))))
+			 || memcmp(HS_VAL(te, tstr, i), HS_VAL(ve, vstr, idx), vallen))))
 				res = false;
 		}
 		else

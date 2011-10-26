@@ -20,6 +20,7 @@
 
 #include "storage/s_lock.h"
 
+slock_t  dummy_spinlock;
 
 static int	spins_per_delay = DEFAULT_SPINS_PER_DELAY;
 
@@ -96,7 +97,7 @@ s_lock(volatile slock_t *lock, const char *file, int line)
 	int			delays = 0;
 	int			cur_delay = 0;
 
-	while (TAS(lock))
+	while (TAS_SPIN(lock))
 	{
 		/* CPU-specific delay each time through the loop */
 		SPIN_DELAY();

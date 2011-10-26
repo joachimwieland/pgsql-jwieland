@@ -89,6 +89,7 @@ test: namespace
 test: prepared_xacts
 test: privileges
 test: security_label
+test: collate
 test: misc
 test: rules
 test: select_views
@@ -105,6 +106,7 @@ test: foreign_data
 test: window
 test: xmlmap
 test: functional_deps
+test: advisory_lock
 test: plancache
 test: limit
 test: plpgsql

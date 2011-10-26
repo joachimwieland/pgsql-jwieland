@@ -18,6 +18,7 @@
 #include <limits.h>
 
 #include "access/tuptoaster.h"
+#include "catalog/pg_collation.h"
 #include "catalog/pg_type.h"
 #include "libpq/md5.h"
 #include "libpq/pqformat.h"
@@ -55,7 +56,7 @@ typedef struct
 #define PG_GETARG_UNKNOWN_P_COPY(n) DatumGetUnknownPCopy(PG_GETARG_DATUM(n))
 #define PG_RETURN_UNKNOWN_P(x)		PG_RETURN_POINTER(x)
 
-static int	text_cmp(text *arg1, text *arg2);
+static int	text_cmp(text *arg1, text *arg2, Oid collid);
 static int32 text_length(Datum str);
 static int	text_position(text *t1, text *t2);
 static void text_position_setup(text *t1, text *t2, TextPositionState *state);
@@ -80,7 +81,7 @@ void text_format_string_conversion(StringInfo buf, char conversion,
 
 static Datum text_to_array_internal(PG_FUNCTION_ARGS);
 static text *array_to_text_internal(FunctionCallInfo fcinfo, ArrayType *v,
-									char *fldsep, char *null_string);
+					   char *fldsep, char *null_string);
 
 
 /*****************************************************************************
@@ -1274,7 +1275,7 @@ text_position_cleanup(TextPositionState *state)
  * whether arg1 is less than, equal to, or greater than arg2.
  */
 int
-varstr_cmp(char *arg1, int len1, char *arg2, int len2)
+varstr_cmp(char *arg1, int len1, char *arg2, int len2, Oid collid)
 {
 	int			result;
 
@@ -1284,7 +1285,7 @@ varstr_cmp(char *arg1, int len1, char *arg2, int len2)
 	 * slower, so we optimize the case where LC_COLLATE is C.  We also try to
 	 * optimize relatively-short strings by avoiding palloc/pfree overhead.
 	 */
-	if (lc_collate_is_c())
+	if (lc_collate_is_c(collid))
 	{
 		result = memcmp(arg1, arg2, Min(len1, len2));
 		if ((result == 0) && (len1 != len2))
@@ -1298,6 +1299,23 @@ varstr_cmp(char *arg1, int len1, char *arg2, int len2)
 		char		a2buf[STACKBUFLEN];
 		char	   *a1p,
 				   *a2p;
+		pg_locale_t mylocale = 0;
+
+		if (collid != DEFAULT_COLLATION_OID)
+		{
+			if (!OidIsValid(collid))
+			{
+				/*
+				 * This typically means that the parser could not resolve a
+				 * conflict of implicit collations, so report it that way.
+				 */
+				ereport(ERROR,
+						(errcode(ERRCODE_INDETERMINATE_COLLATION),
+						 errmsg("could not determine which collation to use for string comparison"),
+						 errhint("Use the COLLATE clause to set the collation explicitly.")));
+			}
+			mylocale = pg_newlocale_from_collation(collid);
+		}
 
 #ifdef WIN32
 		/* Win32 does not have UTF-8, so we need to map to UTF-16 */
@@ -1337,7 +1355,7 @@ varstr_cmp(char *arg1, int len1, char *arg2, int len2)
 										(LPWSTR) a1p, a1len / 2);
 				if (!r)
 					ereport(ERROR,
-					 (errmsg("could not convert string to UTF-16: error %lu",
+					 (errmsg("could not convert string to UTF-16: error code %lu",
 							 GetLastError())));
 			}
 			((LPWSTR) a1p)[r] = 0;
@@ -1350,13 +1368,18 @@ varstr_cmp(char *arg1, int len1, char *arg2, int len2)
 										(LPWSTR) a2p, a2len / 2);
 				if (!r)
 					ereport(ERROR,
-					 (errmsg("could not convert string to UTF-16: error %lu",
+					 (errmsg("could not convert string to UTF-16: error code %lu",
 							 GetLastError())));
 			}
 			((LPWSTR) a2p)[r] = 0;
 
 			errno = 0;
-			result = wcscoll((LPWSTR) a1p, (LPWSTR) a2p);
+#ifdef HAVE_LOCALE_T
+			if (mylocale)
+				result = wcscoll_l((LPWSTR) a1p, (LPWSTR) a2p, mylocale);
+			else
+#endif
+				result = wcscoll((LPWSTR) a1p, (LPWSTR) a2p);
 			if (result == 2147483647)	/* _NLSCMPERROR; missing from mingw
 										 * headers */
 				ereport(ERROR,
@@ -1398,7 +1421,12 @@ varstr_cmp(char *arg1, int len1, char *arg2, int len2)
 		memcpy(a2p, arg2, len2);
 		a2p[len2] = '\0';
 
-		result = strcoll(a1p, a2p);
+#ifdef HAVE_LOCALE_T
+		if (mylocale)
+			result = strcoll_l(a1p, a2p, mylocale);
+		else
+#endif
+			result = strcoll(a1p, a2p);
 
 		/*
 		 * In some locales strcoll() can claim that nonidentical strings are
@@ -1424,7 +1452,7 @@ varstr_cmp(char *arg1, int len1, char *arg2, int len2)
  * Returns -1, 0 or 1
  */
 static int
-text_cmp(text *arg1, text *arg2)
+text_cmp(text *arg1, text *arg2, Oid collid)
 {
 	char	   *a1p,
 			   *a2p;
@@ -1437,7 +1465,7 @@ text_cmp(text *arg1, text *arg2)
 	len1 = VARSIZE_ANY_EXHDR(arg1);
 	len2 = VARSIZE_ANY_EXHDR(arg2);
 
-	return varstr_cmp(a1p, len1, a2p, len2);
+	return varstr_cmp(a1p, len1, a2p, len2, collid);
 }
 
 /*
@@ -1459,10 +1487,10 @@ texteq(PG_FUNCTION_ARGS)
 
 	/*
 	 * Since we only care about equality or not-equality, we can avoid all the
-	 * expense of strcoll() here, and just do bitwise comparison.  In fact,
-	 * we don't even have to do a bitwise comparison if we can show the
-	 * lengths of the strings are unequal; which might save us from having
-	 * to detoast one or both values.
+	 * expense of strcoll() here, and just do bitwise comparison.  In fact, we
+	 * don't even have to do a bitwise comparison if we can show the lengths
+	 * of the strings are unequal; which might save us from having to detoast
+	 * one or both values.
 	 */
 	len1 = toast_raw_datum_size(arg1);
 	len2 = toast_raw_datum_size(arg2);
@@ -1519,7 +1547,7 @@ text_lt(PG_FUNCTION_ARGS)
 	text	   *arg2 = PG_GETARG_TEXT_PP(1);
 	bool		result;
 
-	result = (text_cmp(arg1, arg2) < 0);
+	result = (text_cmp(arg1, arg2, PG_GET_COLLATION()) < 0);
 
 	PG_FREE_IF_COPY(arg1, 0);
 	PG_FREE_IF_COPY(arg2, 1);
@@ -1534,7 +1562,7 @@ text_le(PG_FUNCTION_ARGS)
 	text	   *arg2 = PG_GETARG_TEXT_PP(1);
 	bool		result;
 
-	result = (text_cmp(arg1, arg2) <= 0);
+	result = (text_cmp(arg1, arg2, PG_GET_COLLATION()) <= 0);
 
 	PG_FREE_IF_COPY(arg1, 0);
 	PG_FREE_IF_COPY(arg2, 1);
@@ -1549,7 +1577,7 @@ text_gt(PG_FUNCTION_ARGS)
 	text	   *arg2 = PG_GETARG_TEXT_PP(1);
 	bool		result;
 
-	result = (text_cmp(arg1, arg2) > 0);
+	result = (text_cmp(arg1, arg2, PG_GET_COLLATION()) > 0);
 
 	PG_FREE_IF_COPY(arg1, 0);
 	PG_FREE_IF_COPY(arg2, 1);
@@ -1564,7 +1592,7 @@ text_ge(PG_FUNCTION_ARGS)
 	text	   *arg2 = PG_GETARG_TEXT_PP(1);
 	bool		result;
 
-	result = (text_cmp(arg1, arg2) >= 0);
+	result = (text_cmp(arg1, arg2, PG_GET_COLLATION()) >= 0);
 
 	PG_FREE_IF_COPY(arg1, 0);
 	PG_FREE_IF_COPY(arg2, 1);
@@ -1579,7 +1607,7 @@ bttextcmp(PG_FUNCTION_ARGS)
 	text	   *arg2 = PG_GETARG_TEXT_PP(1);
 	int32		result;
 
-	result = text_cmp(arg1, arg2);
+	result = text_cmp(arg1, arg2, PG_GET_COLLATION());
 
 	PG_FREE_IF_COPY(arg1, 0);
 	PG_FREE_IF_COPY(arg2, 1);
@@ -1595,7 +1623,7 @@ text_larger(PG_FUNCTION_ARGS)
 	text	   *arg2 = PG_GETARG_TEXT_PP(1);
 	text	   *result;
 
-	result = ((text_cmp(arg1, arg2) > 0) ? arg1 : arg2);
+	result = ((text_cmp(arg1, arg2, PG_GET_COLLATION()) > 0) ? arg1 : arg2);
 
 	PG_RETURN_TEXT_P(result);
 }
@@ -1607,7 +1635,7 @@ text_smaller(PG_FUNCTION_ARGS)
 	text	   *arg2 = PG_GETARG_TEXT_PP(1);
 	text	   *result;
 
-	result = ((text_cmp(arg1, arg2) < 0) ? arg1 : arg2);
+	result = ((text_cmp(arg1, arg2, PG_GET_COLLATION()) < 0) ? arg1 : arg2);
 
 	PG_RETURN_TEXT_P(result);
 }
@@ -2003,7 +2031,7 @@ byteaGetByte(PG_FUNCTION_ARGS)
 	bytea	   *v = PG_GETARG_BYTEA_PP(0);
 	int32		n = PG_GETARG_INT32(1);
 	int			len;
-	int byte;
+	int			byte;
 
 	len = VARSIZE_ANY_EXHDR(v);
 
@@ -2034,7 +2062,7 @@ byteaGetBit(PG_FUNCTION_ARGS)
 	int			byteNo,
 				bitNo;
 	int			len;
-	int byte;
+	int			byte;
 
 	len = VARSIZE_ANY_EXHDR(v);
 
@@ -2049,7 +2077,7 @@ byteaGetBit(PG_FUNCTION_ARGS)
 
 	byte = ((unsigned char *) VARDATA_ANY(v))[byteNo];
 
-	if (byte &(1 << bitNo))
+	if (byte & (1 << bitNo))
 		PG_RETURN_INT32(1);
 	else
 		PG_RETURN_INT32(0);
@@ -3116,7 +3144,7 @@ text_to_array_internal(PG_FUNCTION_ARGS)
 			/* single element can be a NULL too */
 			is_null = null_string ? text_isequal(inputstring, null_string) : false;
 			PG_RETURN_ARRAYTYPE_P(create_singleton_array(fcinfo, TEXTOID,
-														 PointerGetDatum(inputstring),
+												PointerGetDatum(inputstring),
 														 is_null, 1));
 		}
 
@@ -3124,7 +3152,7 @@ text_to_array_internal(PG_FUNCTION_ARGS)
 		/* start_ptr points to the start_posn'th character of inputstring */
 		start_ptr = VARDATA_ANY(inputstring);
 
-		for (fldnum = 1;; fldnum++) /* field number is 1 based */
+		for (fldnum = 1;; fldnum++)		/* field number is 1 based */
 		{
 			CHECK_FOR_INTERRUPTS();
 
@@ -3169,8 +3197,8 @@ text_to_array_internal(PG_FUNCTION_ARGS)
 	{
 		/*
 		 * When fldsep is NULL, each character in the inputstring becomes an
-		 * element in the result array.  The separator is effectively the space
-		 * between characters.
+		 * element in the result array.  The separator is effectively the
+		 * space between characters.
 		 */
 		inputstring_len = VARSIZE_ANY_EXHDR(inputstring);
 
@@ -3182,7 +3210,7 @@ text_to_array_internal(PG_FUNCTION_ARGS)
 
 		while (inputstring_len > 0)
 		{
-			int		chunk_len = pg_mblen(start_ptr);
+			int			chunk_len = pg_mblen(start_ptr);
 
 			CHECK_FOR_INTERRUPTS();
 
@@ -3594,12 +3622,20 @@ string_agg_finalfn(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 }
 
+/*
+ * Implementation of both concat() and concat_ws().
+ *
+ * sepstr/seplen describe the separator.  argidx is the first argument
+ * to concatenate (counting from zero).
+ */
 static text *
-concat_internal(const char *sepstr, int seplen, int argidx, FunctionCallInfo fcinfo)
+concat_internal(const char *sepstr, int seplen, int argidx,
+				FunctionCallInfo fcinfo)
 {
-	StringInfoData	str;
-	text		   *result;
-	int				i;
+	text	   *result;
+	StringInfoData str;
+	bool		first_arg = true;
+	int			i;
 
 	initStringInfo(&str);
 
@@ -3607,20 +3643,24 @@ concat_internal(const char *sepstr, int seplen, int argidx, FunctionCallInfo fci
 	{
 		if (!PG_ARGISNULL(i))
 		{
-			Oid		valtype;
-			Datum	value;
-			Oid		typOutput;
-			bool	typIsVarlena;
+			Datum		value = PG_GETARG_DATUM(i);
+			Oid			valtype;
+			Oid			typOutput;
+			bool		typIsVarlena;
 
-			if (i > argidx)
+			/* add separator if appropriate */
+			if (first_arg)
+				first_arg = false;
+			else
 				appendBinaryStringInfo(&str, sepstr, seplen);
 
-			/* append n-th value */
-			value = PG_GETARG_DATUM(i);
+			/* call the appropriate type output function, append the result */
 			valtype = get_fn_expr_argtype(fcinfo->flinfo, i);
+			if (!OidIsValid(valtype))
+				elog(ERROR, "could not determine data type of concat() input");
 			getTypeOutputInfo(valtype, &typOutput, &typIsVarlena);
 			appendStringInfoString(&str,
-				OidOutputFunctionCall(typOutput, value));
+								   OidOutputFunctionCall(typOutput, value));
 		}
 	}
 
@@ -3636,17 +3676,17 @@ concat_internal(const char *sepstr, int seplen, int argidx, FunctionCallInfo fci
 Datum
 text_concat(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_TEXT_P(concat_internal(NULL, 0, 0, fcinfo));
+	PG_RETURN_TEXT_P(concat_internal("", 0, 0, fcinfo));
 }
 
 /*
- * Concatenate all but first argument values with separators. The first
- * parameter is used as a separator. NULL arguments are ignored.
+ * Concatenate all but first argument value with separators. The first
+ * parameter is used as the separator. NULL arguments are ignored.
  */
 Datum
 text_concat_ws(PG_FUNCTION_ARGS)
 {
-	text		   *sep;
+	text	   *sep;
 
 	/* return NULL when separator is NULL */
 	if (PG_ARGISNULL(0))
@@ -3654,8 +3694,8 @@ text_concat_ws(PG_FUNCTION_ARGS)
 
 	sep = PG_GETARG_TEXT_PP(0);
 
-	PG_RETURN_TEXT_P(concat_internal(
-		VARDATA_ANY(sep), VARSIZE_ANY_EXHDR(sep), 1, fcinfo));
+	PG_RETURN_TEXT_P(concat_internal(VARDATA_ANY(sep), VARSIZE_ANY_EXHDR(sep),
+									 1, fcinfo));
 }
 
 /*
@@ -3706,15 +3746,15 @@ text_right(PG_FUNCTION_ARGS)
 Datum
 text_reverse(PG_FUNCTION_ARGS)
 {
-	text		   *str = PG_GETARG_TEXT_PP(0);
-	const char	   *p = VARDATA_ANY(str);
-	int				len = VARSIZE_ANY_EXHDR(str);
-	const char	   *endp = p + len;
-	text		   *result;
-	char		   *dst;
+	text	   *str = PG_GETARG_TEXT_PP(0);
+	const char *p = VARDATA_ANY(str);
+	int			len = VARSIZE_ANY_EXHDR(str);
+	const char *endp = p + len;
+	text	   *result;
+	char	   *dst;
 
 	result = palloc(len + VARHDRSZ);
-	dst = (char*) VARDATA(result) + len;
+	dst = (char *) VARDATA(result) + len;
 	SET_VARSIZE(result, len + VARHDRSZ);
 
 	if (pg_database_encoding_max_length() > 1)
@@ -3722,7 +3762,7 @@ text_reverse(PG_FUNCTION_ARGS)
 		/* multibyte version */
 		while (p < endp)
 		{
-			int		sz;
+			int			sz;
 
 			sz = pg_mblen(p);
 			dst -= sz;
@@ -3747,7 +3787,7 @@ Datum
 text_format(PG_FUNCTION_ARGS)
 {
 	text	   *fmt;
-	StringInfoData	str;
+	StringInfoData str;
 	const char *cp;
 	const char *start_ptr;
 	const char *end_ptr;
@@ -3767,9 +3807,9 @@ text_format(PG_FUNCTION_ARGS)
 	/* Scan format string, looking for conversion specifiers. */
 	for (cp = start_ptr; cp < end_ptr; cp++)
 	{
-		Datum	value;
-		bool	isNull;
-		Oid		typid;
+		Datum		value;
+		bool		isNull;
+		Oid			typid;
 
 		/*
 		 * If it's not the start of a conversion specifier, just copy it to
@@ -3799,18 +3839,34 @@ text_format(PG_FUNCTION_ARGS)
 		 * to the next one.  If they have, we must parse it.
 		 */
 		if (*cp < '0' || *cp > '9')
+		{
 			++arg;
+			if (arg <= 0)		/* overflow? */
+			{
+				/*
+				 * Should not happen, as you can't pass billions of arguments
+				 * to a function, but better safe than sorry.
+				 */
+				ereport(ERROR,
+						(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+						 errmsg("argument number is out of range")));
+			}
+		}
 		else
 		{
-			bool unterminated = false;
+			bool		unterminated = false;
 
 			/* Parse digit string. */
 			arg = 0;
-			do {
-				/* Treat overflowing arg position as unterminated. */
-				if (arg > INT_MAX / 10)
-					break;
-				arg = arg * 10 + (*cp - '0');
+			do
+			{
+				int			newarg = arg * 10 + (*cp - '0');
+
+				if (newarg / 10 != arg) /* overflow? */
+					ereport(ERROR,
+							(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+							 errmsg("argument number is out of range")));
+				arg = newarg;
 				++cp;
 			} while (cp < end_ptr && *cp >= '0' && *cp <= '9');
 
@@ -3835,20 +3891,20 @@ text_format(PG_FUNCTION_ARGS)
 			/* There's no argument 0. */
 			if (arg == 0)
 				ereport(ERROR,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("conversion specifies argument 0, but arguments are numbered from 1")));
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("conversion specifies argument 0, but arguments are numbered from 1")));
 		}
 
 		/* Not enough arguments?  Deduct 1 to avoid counting format string. */
 		if (arg > PG_NARGS() - 1)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("too few arguments for format conversion")));
+					 errmsg("too few arguments for format")));
 
 		/*
-		 * At this point, we should see the main conversion specifier.
-		 * Whether or not an argument position was present, it's known
-		 * that at least one character remains in the string at this point.
+		 * At this point, we should see the main conversion specifier. Whether
+		 * or not an argument position was present, it's known that at least
+		 * one character remains in the string at this point.
 		 */
 		value = PG_GETARG_DATUM(arg);
 		isNull = PG_ARGISNULL(arg);
@@ -3864,8 +3920,8 @@ text_format(PG_FUNCTION_ARGS)
 			default:
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						 errmsg("unrecognized conversion specifier: %c",
-							*cp)));
+						 errmsg("unrecognized conversion specifier \"%c\"",
+								*cp)));
 		}
 	}
 
@@ -3879,11 +3935,11 @@ text_format(PG_FUNCTION_ARGS)
 /* Format a %s, %I, or %L conversion. */
 void
 text_format_string_conversion(StringInfo buf, char conversion,
-						 Oid typid, Datum value, bool isNull)
+							  Oid typid, Datum value, bool isNull)
 {
-	Oid		typOutput;
-	bool	typIsVarlena;
-	char   *str;
+	Oid			typOutput;
+	bool		typIsVarlena;
+	char	   *str;
 
 	/* Handle NULL arguments before trying to stringify the value. */
 	if (isNull)
@@ -3891,9 +3947,9 @@ text_format_string_conversion(StringInfo buf, char conversion,
 		if (conversion == 'L')
 			appendStringInfoString(buf, "NULL");
 		else if (conversion == 'I')
-			ereport(ERROR, 
+			ereport(ERROR,
 					(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
-					 errmsg("NULL cannot be escaped as an SQL identifier")));
+					 errmsg("null values cannot be formatted as an SQL identifier")));
 		return;
 	}
 
@@ -3909,7 +3965,8 @@ text_format_string_conversion(StringInfo buf, char conversion,
 	}
 	else if (conversion == 'L')
 	{
-		char *qstr = quote_literal_cstr(str);
+		char	   *qstr = quote_literal_cstr(str);
+
 		appendStringInfoString(buf, qstr);
 		/* quote_literal_cstr() always allocates a new string */
 		pfree(qstr);
@@ -3923,8 +3980,10 @@ text_format_string_conversion(StringInfo buf, char conversion,
 
 /*
  * text_format_nv - nonvariadic wrapper for text_format function.
- * 
- * note: this wrapper is necessary to be sanity_checks test ok
+ *
+ * note: this wrapper is necessary to pass the sanity check in opr_sanity,
+ * which checks that all built-in functions that share the implementing C
+ * function take the same number of arguments.
  */
 Datum
 text_format_nv(PG_FUNCTION_ARGS)

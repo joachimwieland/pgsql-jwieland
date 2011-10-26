@@ -5,8 +5,9 @@ Typical markup:
 
 &<>                             use & escapes
 PostgreSQL                      <productname>
-postgresql.conf, pg_hba.conf    <filename>
-[A-Z][A-Z ]+[A-Z]               <command>, <literal>, <envar>
+postgresql.conf, pg_hba.conf,
+        recovery.conf           <filename>
+[A-Z][A-Z_ ]+[A-Z_]             <command>, <literal>, <envar>
 [A-Za-z_][A-Za-z0-9_]+()        <function>
 -[-A-Za-z_]+                    <option>
 [A-Za-z_]/[A-Za-z_]+            <filename>
@@ -25,6 +26,8 @@ non-ASCII characters            convert to HTML4 entity (&) escapes
         we cannot use UTF8 because SGML Docbook
         does not support it
           http://www.pemberley.com/janeinfo/latin1.html#latexta
+
+        Alvaro Herrera is &Aacute;lvaro Herrera
 
 wrap long lines
 

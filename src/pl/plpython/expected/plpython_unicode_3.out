@@ -1,6 +1,7 @@
 --
 -- Unicode handling
 --
+SET client_encoding TO UTF8;
 CREATE TABLE unicode_test (
 	testvalue  text NOT NULL
 );
@@ -39,11 +40,12 @@ SELECT * FROM unicode_test;
 (0 rows)
 
 SELECT unicode_plan1();
-WARNING:  plpy.SPIError: unrecognized error in PLy_spi_execute_plan
-CONTEXT:  PL/Python function "unicode_plan1"
-ERROR:  plpy.SPIError: could not convert Python Unicode object to PostgreSQL server encoding
+ERROR:  spiexceptions.InternalError: could not convert Python Unicode object to PostgreSQL server encoding
 DETAIL:  UnicodeEncodeError: 'ascii' codec can't encode character u'\x80' in position 0: ordinal not in range(128)
-CONTEXT:  PL/Python function "unicode_plan1"
+CONTEXT:  Traceback (most recent call last):
+  PL/Python function "unicode_plan1", line 3, in <module>
+    rv = plpy.execute(plan, [u"\x80"], 1)
+PL/Python function "unicode_plan1"
 SELECT unicode_plan2();
  unicode_plan2 
 ---------------

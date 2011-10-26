@@ -7,11 +7,11 @@
  *	contrib/pg_upgrade/controldata.c
  */
 
+#include "postgres.h"
+
 #include "pg_upgrade.h"
 
 #include <ctype.h>
-
-static void putenv2(const char *var, const char *val);
 
 /*
  * get_control_data()
@@ -85,21 +85,21 @@ get_control_data(ClusterInfo *cluster, bool live_check)
 	if (getenv("LC_MESSAGES"))
 		lc_messages = pg_strdup(getenv("LC_MESSAGES"));
 
-	putenv2("LC_COLLATE", NULL);
-	putenv2("LC_CTYPE", NULL);
-	putenv2("LC_MONETARY", NULL);
-	putenv2("LC_NUMERIC", NULL);
-	putenv2("LC_TIME", NULL);
-	putenv2("LANG",
+	pg_putenv("LC_COLLATE", NULL);
+	pg_putenv("LC_CTYPE", NULL);
+	pg_putenv("LC_MONETARY", NULL);
+	pg_putenv("LC_NUMERIC", NULL);
+	pg_putenv("LC_TIME", NULL);
+	pg_putenv("LANG",
 #ifndef WIN32
-			NULL);
+			  NULL);
 #else
 	/* On Windows the default locale cannot be English, so force it */
-			"en");
+			  "en");
 #endif
-	putenv2("LANGUAGE", NULL);
-	putenv2("LC_ALL", NULL);
-	putenv2("LC_MESSAGES", "C");
+	pg_putenv("LANGUAGE", NULL);
+	pg_putenv("LC_ALL", NULL);
+	pg_putenv("LC_MESSAGES", "C");
 
 	snprintf(cmd, sizeof(cmd), SYSTEMQUOTE "\"%s/%s \"%s\"" SYSTEMQUOTE,
 			 cluster->bindir,
@@ -109,8 +109,8 @@ get_control_data(ClusterInfo *cluster, bool live_check)
 	fflush(stderr);
 
 	if ((output = popen(cmd, "r")) == NULL)
-		pg_log(PG_FATAL, "Could not get control data: %s\n",
-			   getErrorText(errno));
+		pg_log(PG_FATAL, "Could not get control data using %s: %s\n",
+			   cmd, getErrorText(errno));
 
 	/* Only pre-8.4 has these so if they are not set below we will check later */
 	cluster->controldata.lc_collate = NULL;
@@ -142,8 +142,8 @@ get_control_data(ClusterInfo *cluster, bool live_check)
 				if (!isascii(*p))
 					pg_log(PG_FATAL,
 						   "The 8.3 cluster's pg_controldata is incapable of outputting ASCII, even\n"
-						   "with LANG=C.  You must upgrade this cluster to a newer version of Postgres\n"
-						   "8.3 to fix this bug.  Postgres 8.3.7 and later are known to work properly.\n");
+						   "with LANG=C.  You must upgrade this cluster to a newer version of PostgreSQL\n"
+						   "8.3 to fix this bug.  PostgreSQL 8.3.7 and later are known to work properly.\n");
 		}
 #endif
 
@@ -332,7 +332,7 @@ get_control_data(ClusterInfo *cluster, bool live_check)
 				pg_log(PG_FATAL, "%d: controldata retrieval problem\n", __LINE__);
 
 			p++;				/* removing ':' char */
-			/* used later for /contrib check */
+			/* used later for contrib check */
 			cluster->controldata.float8_pass_by_value = strstr(p, "by value") != NULL;
 			got_float8_pass_by_value = true;
 		}
@@ -374,15 +374,15 @@ get_control_data(ClusterInfo *cluster, bool live_check)
 	/*
 	 * Restore environment variables
 	 */
-	putenv2("LC_COLLATE", lc_collate);
-	putenv2("LC_CTYPE", lc_ctype);
-	putenv2("LC_MONETARY", lc_monetary);
-	putenv2("LC_NUMERIC", lc_numeric);
-	putenv2("LC_TIME", lc_time);
-	putenv2("LANG", lang);
-	putenv2("LANGUAGE", language);
-	putenv2("LC_ALL", lc_all);
-	putenv2("LC_MESSAGES", lc_messages);
+	pg_putenv("LC_COLLATE", lc_collate);
+	pg_putenv("LC_CTYPE", lc_ctype);
+	pg_putenv("LC_MONETARY", lc_monetary);
+	pg_putenv("LC_NUMERIC", lc_numeric);
+	pg_putenv("LC_TIME", lc_time);
+	pg_putenv("LANG", lang);
+	pg_putenv("LANGUAGE", language);
+	pg_putenv("LC_ALL", lc_all);
+	pg_putenv("LC_MESSAGES", lc_messages);
 
 	pg_free(lc_collate);
 	pg_free(lc_ctype);
@@ -453,7 +453,7 @@ get_control_data(ClusterInfo *cluster, bool live_check)
 			pg_log(PG_REPORT, "  float8 argument passing method\n");
 
 		pg_log(PG_FATAL,
-			   "Unable to continue without required control information, terminating\n");
+			   "Cannot continue without required control information, terminating\n");
 	}
 }
 
@@ -505,13 +505,12 @@ check_control_data(ControlData *oldctrl,
 			   "\nOld and new pg_controldata date/time storage types do not match.\n");
 
 		/*
-		 * This is a common 8.3 -> 8.4 upgrade problem, so we are more
-		 * verbose
+		 * This is a common 8.3 -> 8.4 upgrade problem, so we are more verbose
 		 */
 		pg_log(PG_FATAL,
-			   "You will need to rebuild the new server with configure\n"
-			   "--disable-integer-datetimes or get server binaries built\n"
-			   "with those options.\n");
+			   "You will need to rebuild the new server with configure option\n"
+			   "--disable-integer-datetimes or get server binaries built with those\n"
+			   "options.\n");
 	}
 }
 
@@ -529,41 +528,4 @@ rename_old_pg_control(void)
 	if (pg_mv_file(old_path, new_path) != 0)
 		pg_log(PG_FATAL, "Unable to rename %s to %s.\n", old_path, new_path);
 	check_ok();
-}
-
-
-/*
- *	putenv2()
- *
- *	This is like putenv(), but takes two arguments.
- *	It also does unsetenv() if val is NULL.
- */
-static void
-putenv2(const char *var, const char *val)
-{
-	if (val)
-	{
-#ifndef WIN32
-		char	   *envstr = (char *) pg_malloc(strlen(var) +
-												strlen(val) + 2);
-
-		sprintf(envstr, "%s=%s", var, val);
-		putenv(envstr);
-
-		/*
-		 * Do not free envstr because it becomes part of the environment on
-		 * some operating systems.	See port/unsetenv.c::unsetenv.
-		 */
-#else
-		SetEnvironmentVariableA(var, val);
-#endif
-	}
-	else
-	{
-#ifndef WIN32
-		unsetenv(var);
-#else
-		SetEnvironmentVariableA(var, "");
-#endif
-	}
 }

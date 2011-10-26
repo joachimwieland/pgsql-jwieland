@@ -16,14 +16,10 @@
 
 #include "access/genam.h"
 #include "access/gist_private.h"
-#include "catalog/storage.h"
 #include "commands/vacuum.h"
 #include "miscadmin.h"
-#include "storage/bufmgr.h"
-#include "storage/freespace.h"
 #include "storage/indexfsm.h"
 #include "storage/lmgr.h"
-#include "utils/memutils.h"
 
 
 /*
@@ -38,8 +34,6 @@ gistvacuumcleanup(PG_FUNCTION_ARGS)
 	BlockNumber npages,
 				blkno;
 	BlockNumber totFreePages;
-	BlockNumber lastBlock = GIST_ROOT_BLKNO,
-				lastFilledBlock = GIST_ROOT_BLKNO;
 	bool		needLock;
 
 	/* No-op in ANALYZE ONLY mode */
@@ -90,11 +84,8 @@ gistvacuumcleanup(PG_FUNCTION_ARGS)
 			totFreePages++;
 			RecordFreeIndexPage(rel, blkno);
 		}
-		else
-			lastFilledBlock = blkno;
 		UnlockReleaseBuffer(buffer);
 	}
-	lastBlock = npages - 1;
 
 	/* Finally, vacuum the FSM */
 	IndexFreeSpaceMapVacuum(info->index);
@@ -275,7 +266,7 @@ gistbulkdelete(PG_FUNCTION_ARGS)
 					ereport(LOG,
 							(errmsg("index \"%s\" contains an inner tuple marked as invalid",
 									RelationGetRelationName(rel)),
-							 errdetail("This is caused by an incomplete page split at crash recovery before upgrading to 9.1."),
+							 errdetail("This is caused by an incomplete page split at crash recovery before upgrading to PostgreSQL 9.1."),
 							 errhint("Please REINDEX it.")));
 			}
 		}

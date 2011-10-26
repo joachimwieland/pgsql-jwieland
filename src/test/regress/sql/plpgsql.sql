@@ -2941,6 +2941,76 @@ $$ language plpgsql;
 
 select raise_test();
 
+-- test access to exception data
+create function zero_divide() returns int as $$
+declare v int := 0;
+begin
+  return 10 / v;
+end;
+$$ language plpgsql;
+
+create or replace function raise_test() returns void as $$
+begin
+  raise exception 'custom exception'
+     using detail = 'some detail of custom exception',
+           hint = 'some hint related to custom exception';
+end;
+$$ language plpgsql;
+
+create function stacked_diagnostics_test() returns void as $$
+declare _sqlstate text;
+        _message text;
+        _context text;
+begin
+  perform zero_divide();
+exception when others then
+  get stacked diagnostics
+        _sqlstate = returned_sqlstate,
+        _message = message_text,
+        _context = pg_exception_context;
+  raise notice 'sqlstate: %, message: %, context: [%]',
+    _sqlstate, _message, replace(_context, E'\n', ' <- ');
+end;
+$$ language plpgsql;
+
+select stacked_diagnostics_test();
+
+create or replace function stacked_diagnostics_test() returns void as $$
+declare _detail text;
+        _hint text;
+        _message text;
+begin
+  perform raise_test();
+exception when others then
+  get stacked diagnostics
+        _message = message_text,
+        _detail = pg_exception_detail,
+        _hint = pg_exception_hint;
+  raise notice 'message: %, detail: %, hint: %', _message, _detail, _hint;
+end;
+$$ language plpgsql;
+
+select stacked_diagnostics_test();
+
+-- fail, cannot use stacked diagnostics statement outside handler
+create or replace function stacked_diagnostics_test() returns void as $$
+declare _detail text;
+        _hint text;
+        _message text;
+begin
+  get stacked diagnostics
+        _message = message_text,
+        _detail = pg_exception_detail,
+        _hint = pg_exception_hint;
+  raise notice 'message: %, detail: %, hint: %', _message, _detail, _hint;
+end;
+$$ language plpgsql;
+
+select stacked_diagnostics_test();
+
+drop function zero_divide();
+drop function stacked_diagnostics_test();
+
 -- check cases where implicit SQLSTATE variable could be confused with
 -- SQLSTATE as a keyword, cf bug #5524
 create or replace function raise_test() returns void as $$
@@ -3375,3 +3445,158 @@ $$ language plpgsql;
 select unreserved_test();
 
 drop function unreserved_test();
+
+--
+-- Test FOREACH over arrays
+--
+
+create function foreach_test(anyarray)
+returns void as $$
+declare x int;
+begin
+  foreach x in array $1
+  loop
+    raise notice '%', x;
+  end loop;
+  end;
+$$ language plpgsql;
+
+select foreach_test(ARRAY[1,2,3,4]);
+select foreach_test(ARRAY[[1,2],[3,4]]);
+
+create or replace function foreach_test(anyarray)
+returns void as $$
+declare x int;
+begin
+  foreach x slice 1 in array $1
+  loop
+    raise notice '%', x;
+  end loop;
+  end;
+$$ language plpgsql;
+
+-- should fail
+select foreach_test(ARRAY[1,2,3,4]);
+select foreach_test(ARRAY[[1,2],[3,4]]);
+
+create or replace function foreach_test(anyarray)
+returns void as $$
+declare x int[];
+begin
+  foreach x slice 1 in array $1
+  loop
+    raise notice '%', x;
+  end loop;
+  end;
+$$ language plpgsql;
+
+select foreach_test(ARRAY[1,2,3,4]);
+select foreach_test(ARRAY[[1,2],[3,4]]);
+
+-- higher level of slicing
+create or replace function foreach_test(anyarray)
+returns void as $$
+declare x int[];
+begin
+  foreach x slice 2 in array $1
+  loop
+    raise notice '%', x;
+  end loop;
+  end;
+$$ language plpgsql;
+
+-- should fail
+select foreach_test(ARRAY[1,2,3,4]);
+-- ok
+select foreach_test(ARRAY[[1,2],[3,4]]);
+select foreach_test(ARRAY[[[1,2]],[[3,4]]]);
+
+create type xy_tuple AS (x int, y int);
+
+-- iteration over array of records
+create or replace function foreach_test(anyarray)
+returns void as $$
+declare r record;
+begin
+  foreach r in array $1
+  loop
+    raise notice '%', r;
+  end loop;
+  end;
+$$ language plpgsql;
+
+select foreach_test(ARRAY[(10,20),(40,69),(35,78)]::xy_tuple[]);
+select foreach_test(ARRAY[[(10,20),(40,69)],[(35,78),(88,76)]]::xy_tuple[]);
+
+create or replace function foreach_test(anyarray)
+returns void as $$
+declare x int; y int;
+begin
+  foreach x, y in array $1
+  loop
+    raise notice 'x = %, y = %', x, y;
+  end loop;
+  end;
+$$ language plpgsql;
+
+select foreach_test(ARRAY[(10,20),(40,69),(35,78)]::xy_tuple[]);
+select foreach_test(ARRAY[[(10,20),(40,69)],[(35,78),(88,76)]]::xy_tuple[]);
+
+-- slicing over array of composite types
+create or replace function foreach_test(anyarray)
+returns void as $$
+declare x xy_tuple[];
+begin
+  foreach x slice 1 in array $1
+  loop
+    raise notice '%', x;
+  end loop;
+  end;
+$$ language plpgsql;
+
+select foreach_test(ARRAY[(10,20),(40,69),(35,78)]::xy_tuple[]);
+select foreach_test(ARRAY[[(10,20),(40,69)],[(35,78),(88,76)]]::xy_tuple[]);
+
+drop function foreach_test(anyarray);
+drop type xy_tuple;
+
+--
+-- Assorted tests for array subscript assignment
+--
+
+create temp table rtype (id int, ar text[]);
+
+create function arrayassign1() returns text[] language plpgsql as $$
+declare
+ r record;
+begin
+  r := row(12, '{foo,bar,baz}')::rtype;
+  r.ar[2] := 'replace';
+  return r.ar;
+end$$;
+
+select arrayassign1();
+select arrayassign1(); -- try again to exercise internal caching
+
+create domain orderedarray as int[2]
+  constraint sorted check (value[1] < value[2]);
+
+select '{1,2}'::orderedarray;
+select '{2,1}'::orderedarray;  -- fail
+
+create function testoa(x1 int, x2 int, x3 int) returns orderedarray
+language plpgsql as $$
+declare res orderedarray;
+begin
+  res := array[x1, x2];
+  res[2] := x3;
+  return res;
+end$$;
+
+select testoa(1,2,3);
+select testoa(1,2,3); -- try again to exercise internal caching
+select testoa(2,1,3); -- fail at initial assign
+select testoa(1,2,1); -- fail at update
+
+drop function arrayassign1();
+drop function testoa(x1 int, x2 int, x3 int);

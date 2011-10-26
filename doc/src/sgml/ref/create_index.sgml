@@ -22,7 +22,7 @@ PostgreSQL documentation
  <refsynopsisdiv>
 <synopsis>
 CREATE [ UNIQUE ] INDEX [ CONCURRENTLY ] [ <replaceable class="parameter">name</replaceable> ] ON <replaceable class="parameter">table</replaceable> [ USING <replaceable class="parameter">method</replaceable> ]
-    ( { <replaceable class="parameter">column</replaceable> | ( <replaceable class="parameter">expression</replaceable> ) } [ <replaceable class="parameter">opclass</replaceable> ] [ ASC | DESC ] [ NULLS { FIRST | LAST } ] [, ...] )
+    ( { <replaceable class="parameter">column</replaceable> | ( <replaceable class="parameter">expression</replaceable> ) } [ COLLATE <replaceable class="parameter">collation</replaceable> ] [ <replaceable class="parameter">opclass</replaceable> ] [ ASC | DESC ] [ NULLS { FIRST | LAST } ] [, ...] )
     [ WITH ( <replaceable class="PARAMETER">storage_parameter</replaceable> = <replaceable class="PARAMETER">value</replaceable> [, ... ] ) ]
     [ TABLESPACE <replaceable class="parameter">tablespace</replaceable> ]
     [ WHERE <replaceable class="parameter">predicate</replaceable> ]
@@ -182,6 +182,19 @@ CREATE [ UNIQUE ] INDEX [ CONCURRENTLY ] [ <replaceable class="parameter">name</
      </varlistentry>
 
      <varlistentry>
+      <term><replaceable class="parameter">collation</replaceable></term>
+      <listitem>
+       <para>
+        The name of the collation to use for the index.  By default,
+        the index uses the collation declared for the column to be
+        indexed or the result collation of the expression to be
+        indexed.  Indexes with non-default collations can be useful for
+        queries that involve expressions using non-default collations.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
       <term><replaceable class="parameter">opclass</replaceable></term>
       <listitem>
        <para>
@@ -328,6 +341,26 @@ CREATE [ UNIQUE ] INDEX [ CONCURRENTLY ] [ <replaceable class="parameter">name</
    </varlistentry>
 
    </variablelist>
+   <para>
+    GiST indexes additionally accept parameter:
+   </para>
+
+   <variablelist>
+
+   <varlistentry>
+    <term><literal>BUFFERING</></term>
+    <listitem>
+    <para>
+     Determines whether the buffering build technique described in
+     <xref linkend="gist-buffering-build"> is used to build the index. With
+     <literal>OFF</> it is disabled, with <literal>ON</> it is enabled, and
+     with <literal>AUTO</> it is initially disabled, but turned on
+     on-the-fly once the index size reaches <xref linkend="guc-effective-cache-size">. The default is <literal>AUTO</>.
+    </para>
+    </listitem>
+   </varlistentry>
+
+   </variablelist>
   </refsect2>
 
   <refsect2 id="SQL-CREATEINDEX-CONCURRENTLY">
@@ -368,7 +401,16 @@ CREATE [ UNIQUE ] INDEX [ CONCURRENTLY ] [ <replaceable class="parameter">name</
    <para>
     In a concurrent index build, the index is actually entered into the
     system catalogs in one transaction, then the two table scans occur in a
-    second and third transaction.
+    second and third transaction.  All active transactions at the time the
+    second table scan starts, not just ones that already involve the table,
+    have the potential to block the concurrent index creation until they
+    finish.  When checking for transactions that could still use the original
+    index, concurrent index creation advances through potentially interfering
+    older transactions one at a time, obtaining shared locks on their virtual
+    transaction identifiers to wait for them to complete.
+   </para>
+
+   <para>
     If a problem arises while scanning the table, such as a
     uniqueness violation in a unique index, the <command>CREATE INDEX</>
     command will fail but leave behind an <quote>invalid</> index. This index
@@ -524,6 +566,13 @@ CREATE INDEX ON films ((lower(title)));
   </para>
 
   <para>
+   To create an index with non-default collation:
+<programlisting>
+CREATE INDEX title_idx_german ON films (title COLLATE "de_DE");
+</programlisting>
+  </para>
+
+  <para>
    To create an index with non-default sort ordering of nulls:
 <programlisting>
 CREATE INDEX title_idx_nulls_low ON films (title NULLS FIRST);
@@ -569,8 +618,7 @@ SELECT * FROM points
    To create an index without locking out writes to the table:
 <programlisting>
 CREATE INDEX CONCURRENTLY sales_quantity_index ON sales_table (quantity);
-</programlisting>
-  </para>
+</programlisting></para>
 
  </refsect1>
 

@@ -76,7 +76,11 @@ ignore: random
 # ----------
 test: select_into select_distinct select_distinct_on select_implicit select_having subselect union case join aggregates transactions random portals arrays btree_index hash_index update namespace prepared_xacts delete
 
-test: privileges security_label
+# ----------
+# Another group of parallel tests
+# ----------
+test: privileges security_label collate
+
 test: misc
 # rules cannot run concurrently with any test that creates a view
 test: rules
@@ -84,7 +88,7 @@ test: rules
 # ----------
 # Another group of parallel tests
 # ----------
-test: select_views portals_p2 foreign_key cluster dependency guc bitmapops combocid tsearch tsdicts foreign_data window xmlmap functional_deps
+test: select_views portals_p2 foreign_key cluster dependency guc bitmapops combocid tsearch tsdicts foreign_data window xmlmap functional_deps advisory_lock
 
 # ----------
 # Another group of parallel tests

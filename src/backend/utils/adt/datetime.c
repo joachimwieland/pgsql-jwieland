@@ -342,7 +342,7 @@ j2date(int jd, int *year, int *month, int *day)
 	*year = y - 4800;
 	quad = julian * 2141 / 65536;
 	*day = julian - 7834 * quad / 256;
-	*month = (quad + 10) % 12 + 1;
+	*month = (quad + 10) % MONTHS_PER_YEAR + 1;
 
 	return;
 }	/* j2date() */
@@ -799,6 +799,7 @@ DecodeDateTime(char **field, int *ftype, int nf,
 	bool		is2digits = FALSE;
 	bool		bc = FALSE;
 	pg_tz	   *namedTz = NULL;
+	struct pg_tm cur_tm;
 
 	/*
 	 * We'll insist on at least all of the date fields, but initialize the
@@ -952,8 +953,8 @@ DecodeDateTime(char **field, int *ftype, int nf,
 				 * DecodeTime()
 				 */
 				/* test for > 24:00:00 */
-				if (tm->tm_hour > 24 ||
-					(tm->tm_hour == 24 &&
+				if (tm->tm_hour > HOURS_PER_DAY ||
+					(tm->tm_hour == HOURS_PER_DAY &&
 					 (tm->tm_min > 0 || tm->tm_sec > 0 || *fsec > 0)))
 					return DTERR_FIELD_OVERFLOW;
 				break;
@@ -1197,32 +1198,26 @@ DecodeDateTime(char **field, int *ftype, int nf,
 							case DTK_YESTERDAY:
 								tmask = DTK_DATE_M;
 								*dtype = DTK_DATE;
-								GetCurrentDateTime(tm);
-								j2date(date2j(tm->tm_year, tm->tm_mon, tm->tm_mday) - 1,
+								GetCurrentDateTime(&cur_tm);
+								j2date(date2j(cur_tm.tm_year, cur_tm.tm_mon, cur_tm.tm_mday) - 1,
 									&tm->tm_year, &tm->tm_mon, &tm->tm_mday);
-								tm->tm_hour = 0;
-								tm->tm_min = 0;
-								tm->tm_sec = 0;
 								break;
 
 							case DTK_TODAY:
 								tmask = DTK_DATE_M;
 								*dtype = DTK_DATE;
-								GetCurrentDateTime(tm);
-								tm->tm_hour = 0;
-								tm->tm_min = 0;
-								tm->tm_sec = 0;
+								GetCurrentDateTime(&cur_tm);
+								tm->tm_year = cur_tm.tm_year;
+								tm->tm_mon = cur_tm.tm_mon;
+								tm->tm_mday = cur_tm.tm_mday;
 								break;
 
 							case DTK_TOMORROW:
 								tmask = DTK_DATE_M;
 								*dtype = DTK_DATE;
-								GetCurrentDateTime(tm);
-								j2date(date2j(tm->tm_year, tm->tm_mon, tm->tm_mday) + 1,
+								GetCurrentDateTime(&cur_tm);
+								j2date(date2j(cur_tm.tm_year, cur_tm.tm_mon, cur_tm.tm_mday) + 1,
 									&tm->tm_year, &tm->tm_mon, &tm->tm_mday);
-								tm->tm_hour = 0;
-								tm->tm_min = 0;
-								tm->tm_sec = 0;
 								break;
 
 							case DTK_ZULU:
@@ -1371,12 +1366,12 @@ DecodeDateTime(char **field, int *ftype, int nf,
 		return dterr;
 
 	/* handle AM/PM */
-	if (mer != HR24 && tm->tm_hour > 12)
+	if (mer != HR24 && tm->tm_hour > HOURS_PER_DAY / 2)
 		return DTERR_FIELD_OVERFLOW;
-	if (mer == AM && tm->tm_hour == 12)
+	if (mer == AM && tm->tm_hour == HOURS_PER_DAY / 2)
 		tm->tm_hour = 0;
-	else if (mer == PM && tm->tm_hour != 12)
-		tm->tm_hour += 12;
+	else if (mer == PM && tm->tm_hour != HOURS_PER_DAY / 2)
+		tm->tm_hour += HOURS_PER_DAY / 2;
 
 	/* do additional checking for full date specs... */
 	if (*dtype == DTK_DATE)
@@ -2058,17 +2053,18 @@ DecodeTimeOnly(char **field, int *ftype, int nf,
 		return dterr;
 
 	/* handle AM/PM */
-	if (mer != HR24 && tm->tm_hour > 12)
+	if (mer != HR24 && tm->tm_hour > HOURS_PER_DAY / 2)
 		return DTERR_FIELD_OVERFLOW;
-	if (mer == AM && tm->tm_hour == 12)
+	if (mer == AM && tm->tm_hour == HOURS_PER_DAY / 2)
 		tm->tm_hour = 0;
-	else if (mer == PM && tm->tm_hour != 12)
-		tm->tm_hour += 12;
+	else if (mer == PM && tm->tm_hour != HOURS_PER_DAY / 2)
+		tm->tm_hour += HOURS_PER_DAY / 2;
 
-	if (tm->tm_hour < 0 || tm->tm_min < 0 || tm->tm_min > 59 ||
-		tm->tm_sec < 0 || tm->tm_sec > 60 || tm->tm_hour > 24 ||
+	if (tm->tm_hour < 0 || tm->tm_min < 0 || tm->tm_min > MINS_PER_HOUR - 1 ||
+		tm->tm_sec < 0 || tm->tm_sec > SECS_PER_MINUTE ||
+		tm->tm_hour > HOURS_PER_DAY ||
 	/* test for > 24:00:00 */
-		(tm->tm_hour == 24 &&
+		(tm->tm_hour == HOURS_PER_DAY &&
 		 (tm->tm_min > 0 || tm->tm_sec > 0 || *fsec > 0)) ||
 #ifdef HAVE_INT64_TIMESTAMP
 		*fsec < INT64CONST(0) || *fsec > USECS_PER_SEC
@@ -2396,13 +2392,15 @@ DecodeTime(char *str, int fmask, int range,
 
 	/* do a sanity check */
 #ifdef HAVE_INT64_TIMESTAMP
-	if (tm->tm_hour < 0 || tm->tm_min < 0 || tm->tm_min > 59 ||
-		tm->tm_sec < 0 || tm->tm_sec > 60 || *fsec < INT64CONST(0) ||
+	if (tm->tm_hour < 0 || tm->tm_min < 0 || tm->tm_min > MINS_PER_HOUR - 1 ||
+		tm->tm_sec < 0 || tm->tm_sec > SECS_PER_MINUTE ||
+		*fsec < INT64CONST(0) ||
 		*fsec > USECS_PER_SEC)
 		return DTERR_FIELD_OVERFLOW;
 #else
-	if (tm->tm_hour < 0 || tm->tm_min < 0 || tm->tm_min > 59 ||
-		tm->tm_sec < 0 || tm->tm_sec > 60 || *fsec < 0 || *fsec > 1)
+	if (tm->tm_hour < 0 || tm->tm_min < 0 || tm->tm_min > MINS_PER_HOUR - 1 ||
+		tm->tm_sec < 0 || tm->tm_sec > SECS_PER_MINUTE ||
+		*fsec < 0 || *fsec > 1)
 		return DTERR_FIELD_OVERFLOW;
 #endif
 
@@ -2748,9 +2746,9 @@ DecodeTimezone(char *str, int *tzp)
 
 	if (hr < 0 || hr > 14)
 		return DTERR_TZDISP_OVERFLOW;
-	if (min < 0 || min >= 60)
+	if (min < 0 || min >= MINS_PER_HOUR)
 		return DTERR_TZDISP_OVERFLOW;
-	if (sec < 0 || sec >= 60)
+	if (sec < 0 || sec >= SECS_PER_MINUTE)
 		return DTERR_TZDISP_OVERFLOW;
 
 	tz = (hr * MINS_PER_HOUR + min) * SECS_PER_MINUTE + sec;
@@ -3324,7 +3322,7 @@ DecodeISO8601Interval(char *str,
 			{
 				case 'Y':
 					tm->tm_year += val;
-					tm->tm_mon += (fval * 12);
+					tm->tm_mon += (fval * MONTHS_PER_YEAR);
 					break;
 				case 'M':
 					tm->tm_mon += val;
@@ -3359,7 +3357,7 @@ DecodeISO8601Interval(char *str,
 						return DTERR_BAD_FORMAT;
 
 					tm->tm_year += val;
-					tm->tm_mon += (fval * 12);
+					tm->tm_mon += (fval * MONTHS_PER_YEAR);
 					if (unit == '\0')
 						return 0;
 					if (unit == 'T')
@@ -3566,24 +3564,27 @@ DateTimeParseError(int dterr, const char *str, const char *datatype)
 static const datetkn *
 datebsearch(const char *key, const datetkn *base, int nel)
 {
-	const datetkn *last = base + nel - 1,
-			   *position;
-	int			result;
-
-	while (last >= base)
+	if (nel > 0)
 	{
-		position = base + ((last - base) >> 1);
-		result = key[0] - position->token[0];
-		if (result == 0)
+		const datetkn *last = base + nel - 1,
+				   *position;
+		int			result;
+
+		while (last >= base)
 		{
-			result = strncmp(key, position->token, TOKMAXLEN);
+			position = base + ((last - base) >> 1);
+			result = key[0] - position->token[0];
 			if (result == 0)
-				return position;
+			{
+				result = strncmp(key, position->token, TOKMAXLEN);
+				if (result == 0)
+					return position;
+			}
+			if (result < 0)
+				last = position - 1;
+			else
+				base = position + 1;
 		}
-		if (result < 0)
-			last = position - 1;
-		else
-			base = position + 1;
 	}
 	return NULL;
 }
@@ -4043,6 +4044,12 @@ EncodeInterval(struct pg_tm * tm, fsec_t fsec, int style, char *str)
 			/* Compatible with postgresql < 8.4 when DateStyle = 'iso' */
 		case INTSTYLE_POSTGRES:
 			cp = AddPostgresIntPart(cp, year, "year", &is_zero, &is_before);
+
+			/*
+			 * Ideally we should spell out "month" like we do for "year" and
+			 * "day".  However, for backward compatibility, we can't easily
+			 * fix this.  bjm 2011-05-24
+			 */
 			cp = AddPostgresIntPart(cp, mon, "mon", &is_zero, &is_before);
 			cp = AddPostgresIntPart(cp, mday, "day", &is_zero, &is_before);
 			if (is_zero || hour != 0 || min != 0 || sec != 0 || fsec != 0)
@@ -4137,35 +4144,40 @@ CheckDateTokenTables(void)
 /*
  * This function gets called during timezone config file load or reload
  * to create the final array of timezone tokens.  The argument array
- * is already sorted in name order.  This data is in a temporary memory
- * context and must be copied to somewhere permanent.
+ * is already sorted in name order.  The data is converted to datetkn
+ * format and installed in *tbl, which must be allocated by the caller.
  */
 void
-InstallTimeZoneAbbrevs(tzEntry *abbrevs, int n)
+ConvertTimeZoneAbbrevs(TimeZoneAbbrevTable *tbl,
+					   struct tzEntry *abbrevs, int n)
 {
-	datetkn    *newtbl;
+	datetkn    *newtbl = tbl->abbrevs;
 	int			i;
 
-	/*
-	 * Copy the data into TopMemoryContext and convert to datetkn format.
-	 */
-	newtbl = (datetkn *) MemoryContextAlloc(TopMemoryContext,
-											n * sizeof(datetkn));
+	tbl->numabbrevs = n;
 	for (i = 0; i < n; i++)
 	{
 		strncpy(newtbl[i].token, abbrevs[i].abbrev, TOKMAXLEN);
 		newtbl[i].type = abbrevs[i].is_dst ? DTZ : TZ;
-		TOVAL(&newtbl[i], abbrevs[i].offset / 60);
+		TOVAL(&newtbl[i], abbrevs[i].offset / MINS_PER_HOUR);
 	}
 
 	/* Check the ordering, if testing */
 	Assert(CheckDateTokenTable("timezone offset", newtbl, n));
+}
 
-	/* Now safe to replace existing table (if any) */
-	if (timezonetktbl)
-		pfree(timezonetktbl);
-	timezonetktbl = newtbl;
-	sztimezonetktbl = n;
+/*
+ * Install a TimeZoneAbbrevTable as the active table.
+ *
+ * Caller is responsible that the passed table doesn't go away while in use.
+ */
+void
+InstallTimeZoneAbbrevs(TimeZoneAbbrevTable *tbl)
+{
+	int			i;
+
+	timezonetktbl = tbl->abbrevs;
+	sztimezonetktbl = tbl->numabbrevs;
 
 	/* clear date cache in case it contains any stale timezone names */
 	for (i = 0; i < MAXDATEFIELDS; i++)

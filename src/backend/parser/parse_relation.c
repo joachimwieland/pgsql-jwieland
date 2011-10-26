@@ -16,7 +16,6 @@
 
 #include <ctype.h>
 
-#include "access/heapam.h"
 #include "access/sysattr.h"
 #include "catalog/heap.h"
 #include "catalog/namespace.h"
@@ -29,6 +28,7 @@
 #include "parser/parse_type.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
+#include "utils/rel.h"
 #include "utils/syscache.h"
 
 
@@ -272,11 +272,17 @@ searchRangeTable(ParseState *pstate, RangeVar *relation)
 	 * If it's an unqualified name, check for possible CTE matches. A CTE
 	 * hides any real relation matches.  If no CTE, look for a matching
 	 * relation.
+	 *
+	 * NB: It's not critical that RangeVarGetRelid return the correct answer
+	 * here in the face of concurrent DDL.  If it doesn't, the worst case
+	 * scenario is a less-clear error message.  Also, the tables involved in
+	 * the query are already locked, which reduces the number of cases in
+	 * which surprising behavior can occur.  So we do the name lookup unlocked.
 	 */
 	if (!relation->schemaname)
 		cte = scanNameSpaceForCTE(pstate, refname, &ctelevelsup);
 	if (!cte)
-		relId = RangeVarGetRelid(relation, true);
+		relId = RangeVarGetRelid(relation, NoLock, true, false);
 
 	/* Now look for RTEs matching either the relation/CTE or the alias */
 	for (levelsup = 0;
@@ -826,7 +832,7 @@ parserOpenTable(ParseState *pstate, const RangeVar *relation, int lockmode)
 	ParseCallbackState pcbstate;
 
 	setup_parser_errposition_callback(&pcbstate, pstate, relation->location);
-	rel = try_heap_openrv(relation, lockmode);
+	rel = heap_openrv_extended(relation, lockmode, true);
 	if (rel == NULL)
 	{
 		if (relation->schemaname)
@@ -894,6 +900,7 @@ addRangeTableEntry(ParseState *pstate,
 	lockmode = isLockedRefname(pstate, refname) ? RowShareLock : AccessShareLock;
 	rel = parserOpenTable(pstate, relation, lockmode);
 	rte->relid = RelationGetRelid(rel);
+	rte->relkind = rel->rd_rel->relkind;
 
 	/*
 	 * Build the list of effective column names using user-supplied aliases
@@ -956,6 +963,7 @@ addRangeTableEntryForRelation(ParseState *pstate,
 	rte->rtekind = RTE_RELATION;
 	rte->alias = alias;
 	rte->relid = RelationGetRelid(rel);
+	rte->relkind = rel->rd_rel->relkind;
 
 	/*
 	 * Build the list of effective column names using user-supplied aliases
@@ -1098,6 +1106,7 @@ addRangeTableEntryForFunction(ParseState *pstate,
 	rte->funcexpr = funcexpr;
 	rte->funccoltypes = NIL;
 	rte->funccoltypmods = NIL;
+	rte->funccolcollations = NIL;
 	rte->alias = alias;
 
 	eref = makeAlias(alias ? alias->aliasname : funcname, NIL);
@@ -1149,7 +1158,7 @@ addRangeTableEntryForFunction(ParseState *pstate,
 
 		/*
 		 * Use the column definition list to form the alias list and
-		 * funccoltypes/funccoltypmods lists.
+		 * funccoltypes/funccoltypmods/funccolcollations lists.
 		 */
 		foreach(col, coldeflist)
 		{
@@ -1157,6 +1166,7 @@ addRangeTableEntryForFunction(ParseState *pstate,
 			char	   *attrname;
 			Oid			attrtype;
 			int32		attrtypmod;
+			Oid			attrcollation;
 
 			attrname = pstrdup(n->colname);
 			if (n->typeName->setof)
@@ -1166,9 +1176,12 @@ addRangeTableEntryForFunction(ParseState *pstate,
 								attrname),
 						 parser_errposition(pstate, n->typeName->location)));
 			typenameTypeIdAndMod(pstate, n->typeName, &attrtype, &attrtypmod);
+			attrcollation = GetColumnDefCollation(pstate, n, attrtype);
 			eref->colnames = lappend(eref->colnames, makeString(attrname));
 			rte->funccoltypes = lappend_oid(rte->funccoltypes, attrtype);
 			rte->funccoltypmods = lappend_int(rte->funccoltypmods, attrtypmod);
+			rte->funccolcollations = lappend_oid(rte->funccolcollations,
+												 attrcollation);
 		}
 	}
 	else
@@ -1214,6 +1227,7 @@ addRangeTableEntryForFunction(ParseState *pstate,
 RangeTblEntry *
 addRangeTableEntryForValues(ParseState *pstate,
 							List *exprs,
+							List *collations,
 							Alias *alias,
 							bool inFromCl)
 {
@@ -1227,6 +1241,7 @@ addRangeTableEntryForValues(ParseState *pstate,
 	rte->relid = InvalidOid;
 	rte->subquery = NULL;
 	rte->values_lists = exprs;
+	rte->values_collations = collations;
 	rte->alias = alias;
 
 	eref = alias ? copyObject(alias) : makeAlias(refname, NIL);
@@ -1358,10 +1373,11 @@ RangeTblEntry *
 addRangeTableEntryForCTE(ParseState *pstate,
 						 CommonTableExpr *cte,
 						 Index levelsup,
-						 Alias *alias,
+						 RangeVar *rv,
 						 bool inFromCl)
 {
 	RangeTblEntry *rte = makeNode(RangeTblEntry);
+	Alias	   *alias = rv->alias;
 	char	   *refname = alias ? alias->aliasname : cte->ctename;
 	Alias	   *eref;
 	int			numaliases;
@@ -1379,8 +1395,27 @@ addRangeTableEntryForCTE(ParseState *pstate,
 	if (!rte->self_reference)
 		cte->cterefcount++;
 
+	/*
+	 * We throw error if the CTE is INSERT/UPDATE/DELETE without RETURNING.
+	 * This won't get checked in case of a self-reference, but that's OK
+	 * because data-modifying CTEs aren't allowed to be recursive anyhow.
+	 */
+	if (IsA(cte->ctequery, Query))
+	{
+		Query	   *ctequery = (Query *) cte->ctequery;
+
+		if (ctequery->commandType != CMD_SELECT &&
+			ctequery->returningList == NIL)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("WITH query \"%s\" does not have a RETURNING clause",
+						cte->ctename),
+					 parser_errposition(pstate, rv->location)));
+	}
+
 	rte->ctecoltypes = cte->ctecoltypes;
 	rte->ctecoltypmods = cte->ctecoltypmods;
+	rte->ctecolcollations = cte->ctecolcollations;
 
 	rte->alias = alias;
 	if (alias)
@@ -1573,6 +1608,7 @@ expandRTE(RangeTblEntry *rte, int rtindex, int sublevels_up,
 						varnode = makeVar(rtindex, varattno,
 										  exprType((Node *) te->expr),
 										  exprTypmod((Node *) te->expr),
+										  exprCollation((Node *) te->expr),
 										  sublevels_up);
 						varnode->location = location;
 
@@ -1612,6 +1648,7 @@ expandRTE(RangeTblEntry *rte, int rtindex, int sublevels_up,
 
 						varnode = makeVar(rtindex, 1,
 										  funcrettype, -1,
+										  exprCollation(rte->funcexpr),
 										  sublevels_up);
 						varnode->location = location;
 
@@ -1626,12 +1663,16 @@ expandRTE(RangeTblEntry *rte, int rtindex, int sublevels_up,
 					{
 						ListCell   *l1;
 						ListCell   *l2;
+						ListCell   *l3;
 						int			attnum = 0;
 
-						forboth(l1, rte->funccoltypes, l2, rte->funccoltypmods)
+						forthree(l1, rte->funccoltypes,
+								 l2, rte->funccoltypmods,
+								 l3, rte->funccolcollations)
 						{
 							Oid			attrtype = lfirst_oid(l1);
 							int32		attrtypmod = lfirst_int(l2);
+							Oid			attrcollation = lfirst_oid(l3);
 							Var		   *varnode;
 
 							attnum++;
@@ -1639,6 +1680,7 @@ expandRTE(RangeTblEntry *rte, int rtindex, int sublevels_up,
 											  attnum,
 											  attrtype,
 											  attrtypmod,
+											  attrcollation,
 											  sublevels_up);
 							varnode->location = location;
 							*colvars = lappend(*colvars, varnode);
@@ -1656,12 +1698,15 @@ expandRTE(RangeTblEntry *rte, int rtindex, int sublevels_up,
 			{
 				/* Values RTE */
 				ListCell   *aliasp_item = list_head(rte->eref->colnames);
-				ListCell   *lc;
+				ListCell   *lcv;
+				ListCell   *lcc;
 
 				varattno = 0;
-				foreach(lc, (List *) linitial(rte->values_lists))
+				forboth(lcv, (List *) linitial(rte->values_lists),
+						lcc, rte->values_collations)
 				{
-					Node	   *col = (Node *) lfirst(lc);
+					Node	   *col = (Node *) lfirst(lcv);
+					Oid			colcollation = lfirst_oid(lcc);
 
 					varattno++;
 					if (colnames)
@@ -1681,6 +1726,7 @@ expandRTE(RangeTblEntry *rte, int rtindex, int sublevels_up,
 						varnode = makeVar(rtindex, varattno,
 										  exprType(col),
 										  exprTypmod(col),
+										  colcollation,
 										  sublevels_up);
 						varnode->location = location;
 						*colvars = lappend(*colvars, varnode);
@@ -1740,6 +1786,7 @@ expandRTE(RangeTblEntry *rte, int rtindex, int sublevels_up,
 						varnode = makeVar(rtindex, varattno,
 										  exprType(avar),
 										  exprTypmod(avar),
+										  exprCollation(avar),
 										  sublevels_up);
 						varnode->location = location;
 
@@ -1753,12 +1800,16 @@ expandRTE(RangeTblEntry *rte, int rtindex, int sublevels_up,
 				ListCell   *aliasp_item = list_head(rte->eref->colnames);
 				ListCell   *lct;
 				ListCell   *lcm;
+				ListCell   *lcc;
 
 				varattno = 0;
-				forboth(lct, rte->ctecoltypes, lcm, rte->ctecoltypmods)
+				forthree(lct, rte->ctecoltypes,
+						 lcm, rte->ctecoltypmods,
+						 lcc, rte->ctecolcollations)
 				{
 					Oid			coltype = lfirst_oid(lct);
 					int32		coltypmod = lfirst_int(lcm);
+					Oid			colcoll = lfirst_oid(lcc);
 
 					varattno++;
 
@@ -1776,7 +1827,7 @@ expandRTE(RangeTblEntry *rte, int rtindex, int sublevels_up,
 						Var		   *varnode;
 
 						varnode = makeVar(rtindex, varattno,
-										  coltype, coltypmod,
+										  coltype, coltypmod, colcoll,
 										  sublevels_up);
 						*colvars = lappend(*colvars, varnode);
 					}
@@ -1835,7 +1886,8 @@ expandTupleDesc(TupleDesc tupdesc, Alias *eref,
 					 * can't use atttypid here, but it doesn't really matter
 					 * what type the Const claims to be.
 					 */
-					*colvars = lappend(*colvars, makeNullConst(INT4OID, -1));
+					*colvars = lappend(*colvars,
+									 makeNullConst(INT4OID, -1, InvalidOid));
 				}
 			}
 			continue;
@@ -1858,6 +1910,7 @@ expandTupleDesc(TupleDesc tupdesc, Alias *eref,
 
 			varnode = makeVar(rtindex, attr->attnum,
 							  attr->atttypid, attr->atttypmod,
+							  attr->attcollation,
 							  sublevels_up);
 			varnode->location = location;
 
@@ -1964,11 +2017,11 @@ get_rte_attribute_name(RangeTblEntry *rte, AttrNumber attnum)
 
 /*
  * get_rte_attribute_type
- *		Get attribute type information from a RangeTblEntry
+ *		Get attribute type/typmod/collation information from a RangeTblEntry
  */
 void
 get_rte_attribute_type(RangeTblEntry *rte, AttrNumber attnum,
-					   Oid *vartype, int32 *vartypmod)
+					   Oid *vartype, int32 *vartypmod, Oid *varcollid)
 {
 	switch (rte->rtekind)
 	{
@@ -1998,6 +2051,7 @@ get_rte_attribute_type(RangeTblEntry *rte, AttrNumber attnum,
 						   get_rel_name(rte->relid))));
 				*vartype = att_tup->atttypid;
 				*vartypmod = att_tup->atttypmod;
+				*varcollid = att_tup->attcollation;
 				ReleaseSysCache(tp);
 			}
 			break;
@@ -2012,6 +2066,7 @@ get_rte_attribute_type(RangeTblEntry *rte, AttrNumber attnum,
 						 rte->eref->aliasname, attnum);
 				*vartype = exprType((Node *) te->expr);
 				*vartypmod = exprTypmod((Node *) te->expr);
+				*varcollid = exprCollation((Node *) te->expr);
 			}
 			break;
 		case RTE_FUNCTION:
@@ -2053,17 +2108,20 @@ get_rte_attribute_type(RangeTblEntry *rte, AttrNumber attnum,
 										rte->eref->aliasname)));
 					*vartype = att_tup->atttypid;
 					*vartypmod = att_tup->atttypmod;
+					*varcollid = att_tup->attcollation;
 				}
 				else if (functypclass == TYPEFUNC_SCALAR)
 				{
 					/* Base data type, i.e. scalar */
 					*vartype = funcrettype;
 					*vartypmod = -1;
+					*varcollid = exprCollation(rte->funcexpr);
 				}
 				else if (functypclass == TYPEFUNC_RECORD)
 				{
 					*vartype = list_nth_oid(rte->funccoltypes, attnum - 1);
 					*vartypmod = list_nth_int(rte->funccoltypmods, attnum - 1);
+					*varcollid = list_nth_oid(rte->funccolcollations, attnum - 1);
 				}
 				else
 				{
@@ -2075,6 +2133,7 @@ get_rte_attribute_type(RangeTblEntry *rte, AttrNumber attnum,
 		case RTE_VALUES:
 			{
 				/* Values RTE --- get type info from first sublist */
+				/* collation is stored separately, though */
 				List	   *collist = (List *) linitial(rte->values_lists);
 				Node	   *col;
 
@@ -2084,6 +2143,7 @@ get_rte_attribute_type(RangeTblEntry *rte, AttrNumber attnum,
 				col = (Node *) list_nth(collist, attnum - 1);
 				*vartype = exprType(col);
 				*vartypmod = exprTypmod(col);
+				*varcollid = list_nth_oid(rte->values_collations, attnum - 1);
 			}
 			break;
 		case RTE_JOIN:
@@ -2097,6 +2157,7 @@ get_rte_attribute_type(RangeTblEntry *rte, AttrNumber attnum,
 				aliasvar = (Node *) list_nth(rte->joinaliasvars, attnum - 1);
 				*vartype = exprType(aliasvar);
 				*vartypmod = exprTypmod(aliasvar);
+				*varcollid = exprCollation(aliasvar);
 			}
 			break;
 		case RTE_CTE:
@@ -2105,6 +2166,7 @@ get_rte_attribute_type(RangeTblEntry *rte, AttrNumber attnum,
 				Assert(attnum > 0 && attnum <= list_length(rte->ctecoltypes));
 				*vartype = list_nth_oid(rte->ctecoltypes, attnum - 1);
 				*vartypmod = list_nth_int(rte->ctecoltypmods, attnum - 1);
+				*varcollid = list_nth_oid(rte->ctecolcollations, attnum - 1);
 			}
 			break;
 		default:
@@ -2352,6 +2414,24 @@ attnumTypeId(Relation rd, int attid)
 	if (attid > rd->rd_att->natts)
 		elog(ERROR, "invalid attribute number %d", attid);
 	return rd->rd_att->attrs[attid - 1]->atttypid;
+}
+
+/*
+ * given attribute id, return collation of that attribute
+ *
+ *	This should only be used if the relation is already heap_open()'ed.
+ */
+Oid
+attnumCollationId(Relation rd, int attid)
+{
+	if (attid <= 0)
+	{
+		/* All system attributes are of noncollatable types. */
+		return InvalidOid;
+	}
+	if (attid > rd->rd_att->natts)
+		elog(ERROR, "invalid attribute number %d", attid);
+	return rd->rd_att->attrs[attid - 1]->attcollation;
 }
 
 /*

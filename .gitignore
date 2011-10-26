@@ -12,8 +12,21 @@
 *.mo
 objfiles.txt
 .deps/
+*.gcno
+*.gcda
+*.gcov
+*.gcov.out
+lcov.info
+*.vcproj
+win32ver.rc
+*.exe
+lib*dll.def
 
 # Local excludes in root directory
 /GNUmakefile
 /config.log
 /config.status
+/pgsql.sln
+/pgsql.sln.cache
+/Debug/
+/Release/

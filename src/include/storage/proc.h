@@ -14,9 +14,11 @@
 #ifndef _PROC_H_
 #define _PROC_H_
 
+#include "access/xlog.h"
+#include "datatype/timestamp.h"
+#include "storage/latch.h"
 #include "storage/lock.h"
 #include "storage/pg_sema.h"
-#include "utils/timestamp.h"
 
 /*
  * Each backend advertises up to PGPROC_MAX_CACHED_SUBXIDS TransactionIds
@@ -48,6 +50,14 @@ struct XidCache
 #define		PROC_VACUUM_STATE_MASK (0x0E)
 
 /*
+ * We allow a small number of "weak" relation locks (AccesShareLock,
+ * RowShareLock, RowExclusiveLock) to be recorded in the PGPROC structure
+ * rather than the main lock table.  This eases contention on the lock
+ * manager LWLocks.  See storage/lmgr/README for additional details.
+ */
+#define		FP_LOCK_SLOTS_PER_BACKEND 16
+
+/*
  * Each backend has a PGPROC struct in shared memory.  There is also a list of
  * currently-unused PGPROC structs that will be reallocated to new backends.
  *
@@ -70,6 +80,8 @@ struct PGPROC
 
 	PGSemaphoreData sem;		/* ONE semaphore to sleep on */
 	int			waitStatus;		/* STATUS_WAITING, STATUS_OK or STATUS_ERROR */
+
+	Latch		procLatch;		/* generic latch for process */
 
 	LocalTransactionId lxid;	/* local id of top-level transaction currently
 								 * being executed by this proc, if running;
@@ -116,6 +128,16 @@ struct PGPROC
 								 * lock object by this backend */
 
 	/*
+	 * Info to allow us to wait for synchronous replication, if needed.
+	 * waitLSN is InvalidXLogRecPtr if not waiting; set only by user backend.
+	 * syncRepState must not be touched except by owning process or WALSender.
+	 * syncRepLinks used only while holding SyncRepLock.
+	 */
+	XLogRecPtr	waitLSN;		/* waiting for this LSN or higher */
+	int			syncRepState;	/* wait state for sync rep */
+	SHM_QUEUE	syncRepLinks;	/* list link if process is in syncrep queue */
+
+	/*
 	 * All PROCLOCK objects for locks held or awaited by this backend are
 	 * linked into one of these lists, according to the partition number of
 	 * their lock.
@@ -123,6 +145,15 @@ struct PGPROC
 	SHM_QUEUE	myProcLocks[NUM_LOCK_PARTITIONS];
 
 	struct XidCache subxids;	/* cache for subtransaction XIDs */
+
+	/* Per-backend LWLock.  Protects fields below. */
+	LWLockId	backendLock;	/* protects the fields below */
+
+	/* Lock manager data, recording fast-path locks taken by this backend. */
+	uint64		fpLockBits;		/* lock modes held for each fast-path slot */
+	Oid			fpRelId[FP_LOCK_SLOTS_PER_BACKEND]; /* slots for rel oids */
+	bool		fpVXIDLock;		/* are we holding a fast-path VXID lock? */
+	LocalTransactionId fpLocalTransactionId;	/* lxid for fast-path VXID lock */
 };
 
 /* NOTE: "typedef struct PGPROC PGPROC" appears in storage/lock.h. */
@@ -136,6 +167,10 @@ extern PGDLLIMPORT PGPROC *MyProc;
  */
 typedef struct PROC_HDR
 {
+	/* Array of PGPROC structures (not including dummies for prepared txns) */
+	PGPROC	   *allProcs;
+	/* Length of allProcs array */
+	uint32		allProcCount;
 	/* Head of list of free PGPROC structures */
 	PGPROC	   *freeProcs;
 	/* Head of list of autovacuum's free PGPROC structures */
@@ -145,9 +180,11 @@ typedef struct PROC_HDR
 	/* The proc of the Startup process, since not in ProcArray */
 	PGPROC	   *startupProc;
 	int			startupProcPid;
-	/* Buffer id of the buffer that Startup process waits for pin on */
+	/* Buffer id of the buffer that Startup process waits for pin on, or -1 */
 	int			startupBufferPinWaitBufId;
 } PROC_HDR;
+
+extern PROC_HDR *ProcGlobal;
 
 /*
  * We set aside some extra PGPROC structures for auxiliary processes,

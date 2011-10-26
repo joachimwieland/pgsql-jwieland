@@ -48,7 +48,8 @@
 /* And a few guys need only the pg_strtok support fields */
 #define READ_TEMP_LOCALS()	\
 	char	   *token;		\
-	int			length
+	int			length;		\
+	(void) token /* possibly unused */
 
 /* ... but most need both */
 #define READ_LOCALS(nodeTypeName)			\
@@ -203,6 +204,7 @@ _readQuery(void)
 	READ_BOOL_FIELD(hasSubLinks);
 	READ_BOOL_FIELD(hasDistinctOn);
 	READ_BOOL_FIELD(hasRecursive);
+	READ_BOOL_FIELD(hasModifyingCTE);
 	READ_BOOL_FIELD(hasForUpdate);
 	READ_NODE_FIELD(cteList);
 	READ_NODE_FIELD(rtable);
@@ -323,6 +325,7 @@ _readCommonTableExpr(void)
 	READ_NODE_FIELD(ctecolnames);
 	READ_NODE_FIELD(ctecoltypes);
 	READ_NODE_FIELD(ctecoltypmods);
+	READ_NODE_FIELD(ctecolcollations);
 
 	READ_DONE();
 }
@@ -341,6 +344,7 @@ _readSetOperationStmt(void)
 	READ_NODE_FIELD(rarg);
 	READ_NODE_FIELD(colTypes);
 	READ_NODE_FIELD(colTypmods);
+	READ_NODE_FIELD(colCollations);
 	READ_NODE_FIELD(groupClauses);
 
 	READ_DONE();
@@ -406,6 +410,7 @@ _readVar(void)
 	READ_INT_FIELD(varattno);
 	READ_OID_FIELD(vartype);
 	READ_INT_FIELD(vartypmod);
+	READ_OID_FIELD(varcollid);
 	READ_UINT_FIELD(varlevelsup);
 	READ_UINT_FIELD(varnoold);
 	READ_INT_FIELD(varoattno);
@@ -424,6 +429,7 @@ _readConst(void)
 
 	READ_OID_FIELD(consttype);
 	READ_INT_FIELD(consttypmod);
+	READ_OID_FIELD(constcollid);
 	READ_INT_FIELD(constlen);
 	READ_BOOL_FIELD(constbyval);
 	READ_BOOL_FIELD(constisnull);
@@ -450,6 +456,7 @@ _readParam(void)
 	READ_INT_FIELD(paramid);
 	READ_OID_FIELD(paramtype);
 	READ_INT_FIELD(paramtypmod);
+	READ_OID_FIELD(paramcollid);
 	READ_LOCATION_FIELD(location);
 
 	READ_DONE();
@@ -465,6 +472,8 @@ _readAggref(void)
 
 	READ_OID_FIELD(aggfnoid);
 	READ_OID_FIELD(aggtype);
+	READ_OID_FIELD(aggcollid);
+	READ_OID_FIELD(inputcollid);
 	READ_NODE_FIELD(args);
 	READ_NODE_FIELD(aggorder);
 	READ_NODE_FIELD(aggdistinct);
@@ -485,6 +494,8 @@ _readWindowFunc(void)
 
 	READ_OID_FIELD(winfnoid);
 	READ_OID_FIELD(wintype);
+	READ_OID_FIELD(wincollid);
+	READ_OID_FIELD(inputcollid);
 	READ_NODE_FIELD(args);
 	READ_UINT_FIELD(winref);
 	READ_BOOL_FIELD(winstar);
@@ -505,6 +516,7 @@ _readArrayRef(void)
 	READ_OID_FIELD(refarraytype);
 	READ_OID_FIELD(refelemtype);
 	READ_INT_FIELD(reftypmod);
+	READ_OID_FIELD(refcollid);
 	READ_NODE_FIELD(refupperindexpr);
 	READ_NODE_FIELD(reflowerindexpr);
 	READ_NODE_FIELD(refexpr);
@@ -525,6 +537,8 @@ _readFuncExpr(void)
 	READ_OID_FIELD(funcresulttype);
 	READ_BOOL_FIELD(funcretset);
 	READ_ENUM_FIELD(funcformat, CoercionForm);
+	READ_OID_FIELD(funccollid);
+	READ_OID_FIELD(inputcollid);
 	READ_NODE_FIELD(args);
 	READ_LOCATION_FIELD(location);
 
@@ -570,6 +584,8 @@ _readOpExpr(void)
 
 	READ_OID_FIELD(opresulttype);
 	READ_BOOL_FIELD(opretset);
+	READ_OID_FIELD(opcollid);
+	READ_OID_FIELD(inputcollid);
 	READ_NODE_FIELD(args);
 	READ_LOCATION_FIELD(location);
 
@@ -599,6 +615,39 @@ _readDistinctExpr(void)
 
 	READ_OID_FIELD(opresulttype);
 	READ_BOOL_FIELD(opretset);
+	READ_OID_FIELD(opcollid);
+	READ_OID_FIELD(inputcollid);
+	READ_NODE_FIELD(args);
+	READ_LOCATION_FIELD(location);
+
+	READ_DONE();
+}
+
+/*
+ * _readNullIfExpr
+ */
+static NullIfExpr *
+_readNullIfExpr(void)
+{
+	READ_LOCALS(NullIfExpr);
+
+	READ_OID_FIELD(opno);
+	READ_OID_FIELD(opfuncid);
+
+	/*
+	 * The opfuncid is stored in the textual format primarily for debugging
+	 * and documentation reasons.  We want to always read it as zero to force
+	 * it to be re-looked-up in the pg_operator entry.	This ensures that
+	 * stored rules don't have hidden dependencies on operators' functions.
+	 * (We don't currently support an ALTER OPERATOR command, but might
+	 * someday.)
+	 */
+	local_node->opfuncid = InvalidOid;
+
+	READ_OID_FIELD(opresulttype);
+	READ_BOOL_FIELD(opretset);
+	READ_OID_FIELD(opcollid);
+	READ_OID_FIELD(inputcollid);
 	READ_NODE_FIELD(args);
 	READ_LOCATION_FIELD(location);
 
@@ -627,6 +676,7 @@ _readScalarArrayOpExpr(void)
 	local_node->opfuncid = InvalidOid;
 
 	READ_BOOL_FIELD(useOr);
+	READ_OID_FIELD(inputcollid);
 	READ_NODE_FIELD(args);
 	READ_LOCATION_FIELD(location);
 
@@ -692,6 +742,7 @@ _readFieldSelect(void)
 	READ_INT_FIELD(fieldnum);
 	READ_OID_FIELD(resulttype);
 	READ_INT_FIELD(resulttypmod);
+	READ_OID_FIELD(resultcollid);
 
 	READ_DONE();
 }
@@ -723,6 +774,7 @@ _readRelabelType(void)
 	READ_NODE_FIELD(arg);
 	READ_OID_FIELD(resulttype);
 	READ_INT_FIELD(resulttypmod);
+	READ_OID_FIELD(resultcollid);
 	READ_ENUM_FIELD(relabelformat, CoercionForm);
 	READ_LOCATION_FIELD(location);
 
@@ -739,6 +791,7 @@ _readCoerceViaIO(void)
 
 	READ_NODE_FIELD(arg);
 	READ_OID_FIELD(resulttype);
+	READ_OID_FIELD(resultcollid);
 	READ_ENUM_FIELD(coerceformat, CoercionForm);
 	READ_LOCATION_FIELD(location);
 
@@ -757,6 +810,7 @@ _readArrayCoerceExpr(void)
 	READ_OID_FIELD(elemfuncid);
 	READ_OID_FIELD(resulttype);
 	READ_INT_FIELD(resulttypmod);
+	READ_OID_FIELD(resultcollid);
 	READ_BOOL_FIELD(isExplicit);
 	READ_ENUM_FIELD(coerceformat, CoercionForm);
 	READ_LOCATION_FIELD(location);
@@ -781,6 +835,21 @@ _readConvertRowtypeExpr(void)
 }
 
 /*
+ * _readCollateExpr
+ */
+static CollateExpr *
+_readCollateExpr(void)
+{
+	READ_LOCALS(CollateExpr);
+
+	READ_NODE_FIELD(arg);
+	READ_OID_FIELD(collOid);
+	READ_LOCATION_FIELD(location);
+
+	READ_DONE();
+}
+
+/*
  * _readCaseExpr
  */
 static CaseExpr *
@@ -789,6 +858,7 @@ _readCaseExpr(void)
 	READ_LOCALS(CaseExpr);
 
 	READ_OID_FIELD(casetype);
+	READ_OID_FIELD(casecollid);
 	READ_NODE_FIELD(arg);
 	READ_NODE_FIELD(args);
 	READ_NODE_FIELD(defresult);
@@ -822,6 +892,7 @@ _readCaseTestExpr(void)
 
 	READ_OID_FIELD(typeId);
 	READ_INT_FIELD(typeMod);
+	READ_OID_FIELD(collation);
 
 	READ_DONE();
 }
@@ -835,6 +906,7 @@ _readArrayExpr(void)
 	READ_LOCALS(ArrayExpr);
 
 	READ_OID_FIELD(array_typeid);
+	READ_OID_FIELD(array_collid);
 	READ_OID_FIELD(element_typeid);
 	READ_NODE_FIELD(elements);
 	READ_BOOL_FIELD(multidims);
@@ -871,6 +943,7 @@ _readRowCompareExpr(void)
 	READ_ENUM_FIELD(rctype, RowCompareType);
 	READ_NODE_FIELD(opnos);
 	READ_NODE_FIELD(opfamilies);
+	READ_NODE_FIELD(inputcollids);
 	READ_NODE_FIELD(largs);
 	READ_NODE_FIELD(rargs);
 
@@ -886,6 +959,7 @@ _readCoalesceExpr(void)
 	READ_LOCALS(CoalesceExpr);
 
 	READ_OID_FIELD(coalescetype);
+	READ_OID_FIELD(coalescecollid);
 	READ_NODE_FIELD(args);
 	READ_LOCATION_FIELD(location);
 
@@ -901,6 +975,8 @@ _readMinMaxExpr(void)
 	READ_LOCALS(MinMaxExpr);
 
 	READ_OID_FIELD(minmaxtype);
+	READ_OID_FIELD(minmaxcollid);
+	READ_OID_FIELD(inputcollid);
 	READ_ENUM_FIELD(op, MinMaxOp);
 	READ_NODE_FIELD(args);
 	READ_LOCATION_FIELD(location);
@@ -924,35 +1000,6 @@ _readXmlExpr(void)
 	READ_ENUM_FIELD(xmloption, XmlOptionType);
 	READ_OID_FIELD(type);
 	READ_INT_FIELD(typmod);
-	READ_LOCATION_FIELD(location);
-
-	READ_DONE();
-}
-
-/*
- * _readNullIfExpr
- */
-static NullIfExpr *
-_readNullIfExpr(void)
-{
-	READ_LOCALS(NullIfExpr);
-
-	READ_OID_FIELD(opno);
-	READ_OID_FIELD(opfuncid);
-
-	/*
-	 * The opfuncid is stored in the textual format primarily for debugging
-	 * and documentation reasons.  We want to always read it as zero to force
-	 * it to be re-looked-up in the pg_operator entry.	This ensures that
-	 * stored rules don't have hidden dependencies on operators' functions.
-	 * (We don't currently support an ALTER OPERATOR command, but might
-	 * someday.)
-	 */
-	local_node->opfuncid = InvalidOid;
-
-	READ_OID_FIELD(opresulttype);
-	READ_BOOL_FIELD(opretset);
-	READ_NODE_FIELD(args);
 	READ_LOCATION_FIELD(location);
 
 	READ_DONE();
@@ -998,6 +1045,7 @@ _readCoerceToDomain(void)
 	READ_NODE_FIELD(arg);
 	READ_OID_FIELD(resulttype);
 	READ_INT_FIELD(resulttypmod);
+	READ_OID_FIELD(resultcollid);
 	READ_ENUM_FIELD(coercionformat, CoercionForm);
 	READ_LOCATION_FIELD(location);
 
@@ -1014,6 +1062,7 @@ _readCoerceToDomainValue(void)
 
 	READ_OID_FIELD(typeId);
 	READ_INT_FIELD(typeMod);
+	READ_OID_FIELD(collation);
 	READ_LOCATION_FIELD(location);
 
 	READ_DONE();
@@ -1029,6 +1078,7 @@ _readSetToDefault(void)
 
 	READ_OID_FIELD(typeId);
 	READ_INT_FIELD(typeMod);
+	READ_OID_FIELD(collation);
 	READ_LOCATION_FIELD(location);
 
 	READ_DONE();
@@ -1136,8 +1186,8 @@ _readRangeTblEntry(void)
 	switch (local_node->rtekind)
 	{
 		case RTE_RELATION:
-		case RTE_SPECIAL:
 			READ_OID_FIELD(relid);
+			READ_CHAR_FIELD(relkind);
 			break;
 		case RTE_SUBQUERY:
 			READ_NODE_FIELD(subquery);
@@ -1150,9 +1200,11 @@ _readRangeTblEntry(void)
 			READ_NODE_FIELD(funcexpr);
 			READ_NODE_FIELD(funccoltypes);
 			READ_NODE_FIELD(funccoltypmods);
+			READ_NODE_FIELD(funccolcollations);
 			break;
 		case RTE_VALUES:
 			READ_NODE_FIELD(values_lists);
+			READ_NODE_FIELD(values_collations);
 			break;
 		case RTE_CTE:
 			READ_STRING_FIELD(ctename);
@@ -1160,6 +1212,7 @@ _readRangeTblEntry(void)
 			READ_BOOL_FIELD(self_reference);
 			READ_NODE_FIELD(ctecoltypes);
 			READ_NODE_FIELD(ctecoltypmods);
+			READ_NODE_FIELD(ctecolcollations);
 			break;
 		default:
 			elog(ERROR, "unrecognized RTE kind: %d",
@@ -1236,6 +1289,8 @@ parseNodeString(void)
 		return_value = _readOpExpr();
 	else if (MATCH("DISTINCTEXPR", 12))
 		return_value = _readDistinctExpr();
+	else if (MATCH("NULLIFEXPR", 10))
+		return_value = _readNullIfExpr();
 	else if (MATCH("SCALARARRAYOPEXPR", 17))
 		return_value = _readScalarArrayOpExpr();
 	else if (MATCH("BOOLEXPR", 8))
@@ -1254,6 +1309,8 @@ parseNodeString(void)
 		return_value = _readArrayCoerceExpr();
 	else if (MATCH("CONVERTROWTYPEEXPR", 18))
 		return_value = _readConvertRowtypeExpr();
+	else if (MATCH("COLLATE", 7))
+		return_value = _readCollateExpr();
 	else if (MATCH("CASE", 4))
 		return_value = _readCaseExpr();
 	else if (MATCH("WHEN", 4))
@@ -1272,8 +1329,6 @@ parseNodeString(void)
 		return_value = _readMinMaxExpr();
 	else if (MATCH("XMLEXPR", 7))
 		return_value = _readXmlExpr();
-	else if (MATCH("NULLIFEXPR", 10))
-		return_value = _readNullIfExpr();
 	else if (MATCH("NULLTEST", 8))
 		return_value = _readNullTest();
 	else if (MATCH("BOOLEANTEST", 11))

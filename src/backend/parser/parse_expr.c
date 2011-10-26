@@ -23,6 +23,7 @@
 #include "optimizer/var.h"
 #include "parser/analyze.h"
 #include "parser/parse_coerce.h"
+#include "parser/parse_collate.h"
 #include "parser/parse_expr.h"
 #include "parser/parse_func.h"
 #include "parser/parse_oper.h"
@@ -65,6 +66,7 @@ static Node *transformWholeRowRef(ParseState *pstate, RangeTblEntry *rte,
 static Node *transformIndirection(ParseState *pstate, Node *basenode,
 					 List *indirection);
 static Node *transformTypeCast(ParseState *pstate, TypeCast *tc);
+static Node *transformCollateClause(ParseState *pstate, CollateClause *c);
 static Node *make_row_comparison_op(ParseState *pstate, List *opname,
 					   List *largs, List *rargs, int location);
 static Node *make_row_distinct_op(ParseState *pstate, List *opname,
@@ -161,6 +163,7 @@ transformExpr(ParseState *pstate, Node *expr)
 
 					typenameTypeIdAndMod(pstate, tc->typeName,
 										 &targetType, &targetTypmod);
+
 					/*
 					 * If target is a domain over array, work with the base
 					 * array type here.  transformTypeCast below will cast the
@@ -184,6 +187,10 @@ transformExpr(ParseState *pstate, Node *expr)
 				result = transformTypeCast(pstate, tc);
 				break;
 			}
+
+		case T_CollateClause:
+			result = transformCollateClause(pstate, (CollateClause *) expr);
+			break;
 
 		case T_A_Expr:
 			{
@@ -304,8 +311,8 @@ transformExpr(ParseState *pstate, Node *expr)
 		case T_FuncExpr:
 		case T_OpExpr:
 		case T_DistinctExpr:
-		case T_ScalarArrayOpExpr:
 		case T_NullIfExpr:
+		case T_ScalarArrayOpExpr:
 		case T_BoolExpr:
 		case T_FieldSelect:
 		case T_FieldStore:
@@ -313,6 +320,7 @@ transformExpr(ParseState *pstate, Node *expr)
 		case T_CoerceViaIO:
 		case T_ArrayCoerceExpr:
 		case T_ConvertRowtypeExpr:
+		case T_CollateExpr:
 		case T_CaseTestExpr:
 		case T_ArrayExpr:
 		case T_CoerceToDomain:
@@ -828,12 +836,15 @@ transformAExprOp(ParseState *pstate, A_Expr *a)
 	/*
 	 * Special-case "foo = NULL" and "NULL = foo" for compatibility with
 	 * standards-broken products (like Microsoft's).  Turn these into IS NULL
-	 * exprs.
+	 * exprs. (If either side is a CaseTestExpr, then the expression was
+	 * generated internally from a CASE-WHEN expression, and
+	 * transform_null_equals does not apply.)
 	 */
 	if (Transform_null_equals &&
 		list_length(a->name) == 1 &&
 		strcmp(strVal(linitial(a->name)), "=") == 0 &&
-		(exprIsNullConstant(lexpr) || exprIsNullConstant(rexpr)))
+		(exprIsNullConstant(lexpr) || exprIsNullConstant(rexpr)) &&
+		(!IsA(lexpr, CaseTestExpr) && !IsA(rexpr, CaseTestExpr)))
 	{
 		NullTest   *n = makeNode(NullTest);
 
@@ -993,25 +1004,34 @@ transformAExprNullIf(ParseState *pstate, A_Expr *a)
 {
 	Node	   *lexpr = transformExpr(pstate, a->lexpr);
 	Node	   *rexpr = transformExpr(pstate, a->rexpr);
-	Node	   *result;
+	OpExpr	   *result;
 
-	result = (Node *) make_op(pstate,
-							  a->name,
-							  lexpr,
-							  rexpr,
-							  a->location);
-	if (((OpExpr *) result)->opresulttype != BOOLOID)
+	result = (OpExpr *) make_op(pstate,
+								a->name,
+								lexpr,
+								rexpr,
+								a->location);
+
+	/*
+	 * The comparison operator itself should yield boolean ...
+	 */
+	if (result->opresulttype != BOOLOID)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATATYPE_MISMATCH),
 				 errmsg("NULLIF requires = operator to yield boolean"),
 				 parser_errposition(pstate, a->location)));
 
 	/*
+	 * ... but the NullIfExpr will yield the first operand's type.
+	 */
+	result->opresulttype = exprType((Node *) linitial(result->args));
+
+	/*
 	 * We rely on NullIfExpr and OpExpr being the same struct
 	 */
 	NodeSetTag(result, T_NullIfExpr);
 
-	return result;
+	return (Node *) result;
 }
 
 static Node *
@@ -1145,6 +1165,7 @@ transformAExprIn(ParseState *pstate, A_Expr *a)
 			}
 			newa = makeNode(ArrayExpr);
 			newa->array_typeid = array_type;
+			/* array_collid will be set by parse_collate.c */
 			newa->element_typeid = scalar_type;
 			newa->elements = aexprs;
 			newa->multidims = false;
@@ -1264,9 +1285,18 @@ transformCaseExpr(ParseState *pstate, CaseExpr *c)
 		if (exprType(arg) == UNKNOWNOID)
 			arg = coerce_to_common_type(pstate, arg, TEXTOID, "CASE");
 
+		/*
+		 * Run collation assignment on the test expression so that we know
+		 * what collation to mark the placeholder with.  In principle we could
+		 * leave it to parse_collate.c to do that later, but propagating the
+		 * result to the CaseTestExpr would be unnecessarily complicated.
+		 */
+		assign_expr_collations(pstate, arg);
+
 		placeholder = makeNode(CaseTestExpr);
 		placeholder->typeId = exprType(arg);
 		placeholder->typeMod = exprTypmod(arg);
+		placeholder->collation = exprCollation(arg);
 	}
 	else
 		placeholder = NULL;
@@ -1331,6 +1361,7 @@ transformCaseExpr(ParseState *pstate, CaseExpr *c)
 	ptype = select_common_type(pstate, resultexprs, "CASE", NULL);
 	Assert(OidIsValid(ptype));
 	newc->casetype = ptype;
+	/* casecollid will be set by parse_collate.c */
 
 	/* Convert default result clause, if necessary */
 	newc->defresult = (Expr *)
@@ -1461,6 +1492,7 @@ transformSubLink(ParseState *pstate, SubLink *sublink)
 			param->paramid = tent->resno;
 			param->paramtype = exprType((Node *) tent->expr);
 			param->paramtypmod = exprTypmod((Node *) tent->expr);
+			param->paramcollid = exprCollation((Node *) tent->expr);
 			param->location = -1;
 
 			right_list = lappend(right_list, param);
@@ -1648,6 +1680,7 @@ transformArrayExpr(ParseState *pstate, A_ArrayExpr *a,
 	}
 
 	newa->array_typeid = array_type;
+	/* array_collid will be set by parse_collate.c */
 	newa->element_typeid = element_type;
 	newa->elements = newcoercedelems;
 	newa->location = a->location;
@@ -1690,6 +1723,7 @@ transformCoalesceExpr(ParseState *pstate, CoalesceExpr *c)
 	}
 
 	newc->coalescetype = select_common_type(pstate, newargs, "COALESCE", NULL);
+	/* coalescecollid will be set by parse_collate.c */
 
 	/* Convert arguments if necessary */
 	foreach(args, newargs)
@@ -1728,6 +1762,7 @@ transformMinMaxExpr(ParseState *pstate, MinMaxExpr *m)
 	}
 
 	newm->minmaxtype = select_common_type(pstate, newargs, funcname, NULL);
+	/* minmaxcollid and inputcollid will be set by parse_collate.c */
 
 	/* Convert arguments if necessary */
 	foreach(args, newargs)
@@ -2083,6 +2118,39 @@ transformTypeCast(ParseState *pstate, TypeCast *tc)
 }
 
 /*
+ * Handle an explicit COLLATE clause.
+ *
+ * Transform the argument, and look up the collation name.
+ */
+static Node *
+transformCollateClause(ParseState *pstate, CollateClause *c)
+{
+	CollateExpr *newc;
+	Oid			argtype;
+
+	newc = makeNode(CollateExpr);
+	newc->arg = (Expr *) transformExpr(pstate, c->arg);
+
+	argtype = exprType((Node *) newc->arg);
+
+	/*
+	 * The unknown type is not collatable, but coerce_type() takes care of it
+	 * separately, so we'll let it go here.
+	 */
+	if (!type_is_collatable(argtype) && argtype != UNKNOWNOID)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("collations are not supported by type %s",
+						format_type_be(argtype)),
+				 parser_errposition(pstate, c->location)));
+
+	newc->collOid = LookupCollation(pstate, c->collname, c->location);
+	newc->location = c->location;
+
+	return (Node *) newc;
+}
+
+/*
  * Transform a "row compare-op row" construct
  *
  * The inputs are lists of already-transformed expressions.
@@ -2105,8 +2173,7 @@ make_row_comparison_op(ParseState *pstate, List *opname,
 	List	   *opfamilies;
 	ListCell   *l,
 			   *r;
-	List	  **opfamily_lists;
-	List	  **opstrat_lists;
+	List	  **opinfo_lists;
 	Bitmapset  *strats;
 	int			nopers;
 	int			i;
@@ -2176,8 +2243,7 @@ make_row_comparison_op(ParseState *pstate, List *opname,
 	 * containing the operators, and see which interpretations (strategy
 	 * numbers) exist for each operator.
 	 */
-	opfamily_lists = (List **) palloc(nopers * sizeof(List *));
-	opstrat_lists = (List **) palloc(nopers * sizeof(List *));
+	opinfo_lists = (List **) palloc(nopers * sizeof(List *));
 	strats = NULL;
 	i = 0;
 	foreach(l, opexprs)
@@ -2186,17 +2252,18 @@ make_row_comparison_op(ParseState *pstate, List *opname,
 		Bitmapset  *this_strats;
 		ListCell   *j;
 
-		get_op_btree_interpretation(opno,
-									&opfamily_lists[i], &opstrat_lists[i]);
+		opinfo_lists[i] = get_op_btree_interpretation(opno);
 
 		/*
-		 * convert strategy number list to a Bitmapset to make the
+		 * convert strategy numbers into a Bitmapset to make the
 		 * intersection calculation easy.
 		 */
 		this_strats = NULL;
-		foreach(j, opstrat_lists[i])
+		foreach(j, opinfo_lists[i])
 		{
-			this_strats = bms_add_member(this_strats, lfirst_int(j));
+			OpBtreeInterpretation *opinfo = lfirst(j);
+
+			this_strats = bms_add_member(this_strats, opinfo->strategy);
 		}
 		if (i == 0)
 			strats = this_strats;
@@ -2244,14 +2311,15 @@ make_row_comparison_op(ParseState *pstate, List *opname,
 	for (i = 0; i < nopers; i++)
 	{
 		Oid			opfamily = InvalidOid;
+		ListCell   *j;
 
-		forboth(l, opfamily_lists[i], r, opstrat_lists[i])
+		foreach(j, opinfo_lists[i])
 		{
-			int			opstrat = lfirst_int(r);
+			OpBtreeInterpretation *opinfo = lfirst(j);
 
-			if (opstrat == rctype)
+			if (opinfo->strategy == rctype)
 			{
-				opfamily = lfirst_oid(l);
+				opfamily = opinfo->opfamily_id;
 				break;
 			}
 		}
@@ -2288,6 +2356,7 @@ make_row_comparison_op(ParseState *pstate, List *opname,
 	rcexpr->rctype = rctype;
 	rcexpr->opnos = opnos;
 	rcexpr->opfamilies = opfamilies;
+	rcexpr->inputcollids = NIL; /* assign_expr_collations will fix this */
 	rcexpr->largs = largs;
 	rcexpr->rargs = rargs;
 

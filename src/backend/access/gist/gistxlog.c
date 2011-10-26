@@ -15,10 +15,7 @@
 
 #include "access/gist_private.h"
 #include "access/xlogutils.h"
-#include "miscadmin.h"
-#include "storage/bufmgr.h"
 #include "utils/memutils.h"
-#include "utils/rel.h"
 
 typedef struct
 {
@@ -41,12 +38,12 @@ static void
 gistRedoClearFollowRight(RelFileNode node, XLogRecPtr lsn,
 						 BlockNumber leftblkno)
 {
-	Buffer buffer;
+	Buffer		buffer;
 
 	buffer = XLogReadBuffer(node, leftblkno, false);
 	if (BufferIsValid(buffer))
 	{
-		Page page = (Page) BufferGetPage(buffer);
+		Page		page = (Page) BufferGetPage(buffer);
 
 		/*
 		 * Note that we still update the page even if page LSN is equal to the
@@ -103,6 +100,7 @@ gistRedoPageUpdateRecord(XLogRecPtr lsn, XLogRecord *record)
 	{
 		int			i;
 		OffsetNumber *todelete = (OffsetNumber *) data;
+
 		data += sizeof(OffsetNumber) * xldata->ntodelete;
 
 		for (i = 0; i < xldata->ntodelete; i++)
@@ -115,12 +113,14 @@ gistRedoPageUpdateRecord(XLogRecPtr lsn, XLogRecord *record)
 	if (data - begin < record->xl_len)
 	{
 		OffsetNumber off = (PageIsEmpty(page)) ? FirstOffsetNumber :
-			OffsetNumberNext(PageGetMaxOffsetNumber(page));
+		OffsetNumberNext(PageGetMaxOffsetNumber(page));
+
 		while (data - begin < record->xl_len)
 		{
-			IndexTuple itup = (IndexTuple) data;
+			IndexTuple	itup = (IndexTuple) data;
 			Size		sz = IndexTupleSize(itup);
 			OffsetNumber l;
+
 			data += sz;
 
 			l = PageAddItem(page, (Item) itup, sz, off, false, false);
@@ -263,7 +263,8 @@ gistRedoPageSplitRecord(XLogRecPtr lsn, XLogRecord *record)
 			else
 				GistPageGetOpaque(page)->rightlink = xldata->origrlink;
 			GistPageGetOpaque(page)->nsn = xldata->orignsn;
-			if (i < xlrec.data->npage - 1 && !isrootsplit)
+			if (i < xlrec.data->npage - 1 && !isrootsplit &&
+				xldata->markfollowright)
 				GistMarkFollowRight(page);
 			else
 				GistClearFollowRight(page);
@@ -303,7 +304,7 @@ gist_redo(XLogRecPtr lsn, XLogRecord *record)
 	MemoryContext oldCxt;
 
 	/*
-	 * GIST indexes do not require any conflict processing. NB: If we ever
+	 * GiST indexes do not require any conflict processing. NB: If we ever
 	 * implement a similar optimization we have in b-tree, and remove killed
 	 * tuples outside VACUUM, we'll need to handle that here.
 	 */
@@ -411,14 +412,14 @@ XLogRecPtr
 gistXLogSplit(RelFileNode node, BlockNumber blkno, bool page_is_leaf,
 			  SplitedPageLayout *dist,
 			  BlockNumber origrlink, GistNSN orignsn,
-			  Buffer leftchildbuf)
+			  Buffer leftchildbuf, bool markfollowright)
 {
 	XLogRecData *rdata;
 	gistxlogPageSplit xlrec;
 	SplitedPageLayout *ptr;
 	int			npage = 0,
 				cur;
-	XLogRecPtr recptr;
+	XLogRecPtr	recptr;
 
 	for (ptr = dist; ptr; ptr = ptr->next)
 		npage++;
@@ -433,6 +434,7 @@ gistXLogSplit(RelFileNode node, BlockNumber blkno, bool page_is_leaf,
 	xlrec.npage = (uint16) npage;
 	xlrec.leftchild =
 		BufferIsValid(leftchildbuf) ? BufferGetBlockNumber(leftchildbuf) : InvalidBlockNumber;
+	xlrec.markfollowright = markfollowright;
 
 	rdata[0].data = (char *) &xlrec;
 	rdata[0].len = sizeof(gistxlogPageSplit);
@@ -540,8 +542,8 @@ gistXLogUpdate(RelFileNode node, Buffer buffer,
 	}
 
 	/*
-	 * Include a full page image of the child buf. (only necessary if
-	 * a checkpoint happened since the child page was split)
+	 * Include a full page image of the child buf. (only necessary if a
+	 * checkpoint happened since the child page was split)
 	 */
 	if (BufferIsValid(leftchildbuf))
 	{

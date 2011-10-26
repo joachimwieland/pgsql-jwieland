@@ -1,6 +1,6 @@
 <!-- doc/src/sgml/recovery-config.sgml -->
 
-<chapter Id="recovery-config">
+<chapter id="recovery-config">
   <title>Recovery Configuration</title>
 
   <indexterm>
@@ -11,7 +11,8 @@
 
    <para>
     This chapter describes the settings available in the
-    <filename>recovery.conf</> file. They apply only for the duration of the
+    <filename>recovery.conf</><indexterm><primary>recovery.conf</></>
+    file. They apply only for the duration of the
     recovery.  They must be reset for any subsequent recovery you wish to
     perform.  They cannot be changed once recovery has begun.
    </para>
@@ -95,7 +96,7 @@ restore_command = 'copy "C:\\server\\archivedir\\%f" "%p"'  # Windows
         The <xref linkend="pgarchivecleanup"> module
         is often used in <varname>archive_cleanup_command</> for
         single-standby configurations, for example:
-<programlisting> archive_cleanup_command = 'pg_archivecleanup /mnt/server/archivedir %r' </programlisting>
+<programlisting>archive_cleanup_command = 'pg_archivecleanup /mnt/server/archivedir %r'</programlisting>
         Note however that if multiple standby servers are restoring from the
         same archive directory, you will need to ensure that you do not delete
         WAL files until they are no longer needed by any of the servers.
@@ -143,6 +144,25 @@ restore_command = 'copy "C:\\server\\archivedir\\%f" "%p"'  # Windows
     <title>Recovery Target Settings</title>
      <variablelist>
 
+     <varlistentry id="recovery-target-name" xreflabel="recovery_target_name">
+      <term><varname>recovery_target_name</varname>
+           (<type>string</type>)
+      </term>
+      <indexterm>
+        <primary><varname>recovery_target_name</> recovery parameter</primary>
+      </indexterm>
+      <listitem>
+       <para>
+        This parameter specifies the named restore point, created with
+        <function>pg_create_restore_point()</> to which recovery will proceed.
+        At most one of <varname>recovery_target_name</>,
+        <xref linkend="recovery-target-time"> or
+        <xref linkend="recovery-target-xid"> can be specified.  The default is to
+        recover to the end of the WAL log.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="recovery-target-time" xreflabel="recovery_target_time">
       <term><varname>recovery_target_time</varname>
            (<type>timestamp</type>)
@@ -154,7 +174,8 @@ restore_command = 'copy "C:\\server\\archivedir\\%f" "%p"'  # Windows
        <para>
         This parameter specifies the time stamp up to which recovery
         will proceed.
-        At most one of <varname>recovery_target_time</> and
+        At most one of <varname>recovery_target_time</>,
+        <xref linkend="recovery-target-name"> or
         <xref linkend="recovery-target-xid"> can be specified.
         The default is to recover to the end of the WAL log.
         The precise stopping point is also influenced by
@@ -176,7 +197,8 @@ restore_command = 'copy "C:\\server\\archivedir\\%f" "%p"'  # Windows
         start, transactions can complete in a different numeric order.
         The transactions that will be recovered are those that committed
         before (and optionally including) the specified one.
-        At most one of <varname>recovery_target_xid</> and
+        At most one of <varname>recovery_target_xid</>,
+        <xref linkend="recovery-target-name"> or
         <xref linkend="recovery-target-time"> can be specified.
         The default is to recover to the end of the WAL log.
         The precise stopping point is also influenced by
@@ -219,10 +241,41 @@ restore_command = 'copy "C:\\server\\archivedir\\%f" "%p"'  # Windows
        <para>
         Specifies recovering into a particular timeline.  The default is
         to recover along the same timeline that was current when the
-        base backup was taken.  You only need to set this parameter
+        base backup was taken. Setting this to <literal>latest</> recovers
+        to the latest timeline found in the archive, which is useful in
+        a standby server. Other than that you only need to set this parameter
         in complex re-recovery situations, where you need to return to
         a state that itself was reached after a point-in-time recovery.
         See <xref linkend="backup-timelines"> for discussion.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="pause-at-recovery-target"
+                   xreflabel="pause_at_recovery_target">
+      <term><varname>pause_at_recovery_target</varname>
+        (<type>boolean</type>)
+      </term>
+      <indexterm>
+        <primary><varname>pause_at_recovery_target</> recovery parameter</primary>
+      </indexterm>
+      <listitem>
+       <para>
+        Specifies whether recovery should pause when the recovery target
+        is reached. The default is true.
+        This is intended to allow queries to be executed against the
+        database to check if this recovery target is the most desirable
+        point for recovery. The paused state can be resumed by using
+        <function>pg_xlog_replay_resume()</> (See
+        <xref linkend="functions-recovery-control-table">), which then
+        causes recovery to end. If this recovery target is not the
+        desired stopping point, then shutdown the server, change the
+        recovery target settings to a later target and restart to
+        continue recovery.
+       </para>
+       <para>
+        This setting has no effect if <xref linkend="guc-hot-standby"> is not
+        enabled, or if no recovery target is set.
        </para>
       </listitem>
      </varlistentry>
@@ -273,7 +326,7 @@ restore_command = 'copy "C:\\server\\archivedir\\%f" "%p"'  # Windows
           of the primary server, as well as the port number if it is not
           the same as the standby server's default.
           Also specify a user name corresponding to a role that has the
-          <literal>SUPERUSER</> and <literal>LOGIN</> privileges on the
+          <literal>REPLICATION</> and <literal>LOGIN</> privileges on the
           primary (see
           <xref linkend="streaming-replication-authentication">).
           A password needs to be provided too, if the primary demands password
@@ -297,8 +350,8 @@ restore_command = 'copy "C:\\server\\archivedir\\%f" "%p"'  # Windows
         <listitem>
          <para>
           Specifies a trigger file whose presence ends recovery in the
-          standby. If no trigger file is specified, the standby never exits
-          recovery.
+          standby.  Even if this value is not set, you can still promote
+          the standby using <command>pg_ctl promote</>.
           This setting has no effect if <varname>standby_mode</> is <literal>off</>.
          </para>
         </listitem>

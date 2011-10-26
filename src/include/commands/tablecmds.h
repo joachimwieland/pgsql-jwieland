@@ -14,6 +14,7 @@
 #ifndef TABLECMDS_H
 #define TABLECMDS_H
 
+#include "access/htup.h"
 #include "nodes/parsenodes.h"
 #include "storage/lock.h"
 #include "utils/relcache.h"
@@ -42,6 +43,8 @@ extern void CheckTableNotInUse(Relation rel, const char *stmt);
 
 extern void ExecuteTruncate(TruncateStmt *stmt);
 
+extern void SetRelationHasSubclass(Oid relationId, bool relhassubclass);
+
 extern void renameatt(Oid myrelid, RenameStmt *stmt);
 
 extern void RenameRelation(Oid myrelid,
@@ -53,8 +56,10 @@ extern void RenameRelationInternal(Oid myrelid,
 					   Oid namespaceId);
 
 extern void find_composite_type_dependencies(Oid typeOid,
-								 const char *origTblName,
+								 Relation origRelation,
 								 const char *origTypeName);
+
+extern void check_of_type(HeapTuple typetuple);
 
 extern AttrNumber *varattnos_map(TupleDesc olddesc, TupleDesc newdesc);
 extern AttrNumber *varattnos_map_schema(TupleDesc old, List *schema);

@@ -1,9 +1,12 @@
 # contrib/earthdistance/Makefile
 
 MODULES = earthdistance
-DATA_built = earthdistance.sql
-DATA = uninstall_earthdistance.sql
+
+EXTENSION = earthdistance
+DATA = earthdistance--1.0.sql earthdistance--unpackaged--1.0.sql
+
 REGRESS = earthdistance
+REGRESS_OPTS = --extra-install=contrib/cube
 
 LDFLAGS_SL += $(filter -lm, $(LIBS))
 

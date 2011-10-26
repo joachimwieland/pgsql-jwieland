@@ -16,6 +16,7 @@
 
 #include "access/tupdesc.h"
 #include "access/tupmacs.h"
+#include "storage/bufpage.h"
 #include "storage/itemptr.h"
 #include "storage/relfilenode.h"
 
@@ -201,7 +202,7 @@ typedef HeapTupleHeaderData *HeapTupleHeader;
  * any visibility information, so we can overlay it on a visibility flag
  * instead of using up a dedicated bit.
  */
-#define HEAP_TUPLE_HAS_MATCH	HEAP_ONLY_TUPLE	/* tuple has a join match */
+#define HEAP_TUPLE_HAS_MATCH	HEAP_ONLY_TUPLE /* tuple has a join match */
 
 /*
  * HeapTupleHeader accessor macros
@@ -606,6 +607,7 @@ typedef HeapTupleData *HeapTuple;
 #define XLOG_HEAP2_CLEAN		0x10
 /* 0x20 is free, was XLOG_HEAP2_CLEAN_MOVE */
 #define XLOG_HEAP2_CLEANUP_INFO 0x30
+#define XLOG_HEAP2_VISIBLE		0x40
 
 /*
  * All what we need to find changed tuple
@@ -750,6 +752,15 @@ typedef struct xl_heap_freeze
 
 #define SizeOfHeapFreeze (offsetof(xl_heap_freeze, cutoff_xid) + sizeof(TransactionId))
 
+/* This is what we need to know about setting a visibility map bit */
+typedef struct xl_heap_visible
+{
+	RelFileNode node;
+	BlockNumber block;
+} xl_heap_visible;
+
+#define SizeOfHeapVisible (offsetof(xl_heap_visible, block) + sizeof(BlockNumber))
+
 extern void HeapTupleHeaderAdvanceLatestRemovedXid(HeapTupleHeader tuple,
 									   TransactionId *latestRemovedXid);
 
@@ -828,8 +839,6 @@ extern Datum fastgetattr(HeapTuple tup, int attnum, TupleDesc tupleDesc,
  * ----------------
  */
 #define heap_getattr(tup, attnum, tupleDesc, isnull) \
-( \
-	AssertMacro((tup) != NULL), \
 	( \
 		((attnum) > 0) ? \
 		( \
@@ -843,8 +852,7 @@ extern Datum fastgetattr(HeapTuple tup, int attnum, TupleDesc tupleDesc,
 		) \
 		: \
 			heap_getsysattr((tup), (attnum), (tupleDesc), (isnull)) \
-	) \
-)
+	)
 
 /* prototypes for functions in common/heaptuple.c */
 extern Size heap_compute_data_size(TupleDesc tupleDesc,

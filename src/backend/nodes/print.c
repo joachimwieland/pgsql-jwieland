@@ -20,12 +20,10 @@
 #include "postgres.h"
 
 #include "access/printtup.h"
-#include "lib/stringinfo.h"
 #include "nodes/print.h"
 #include "optimizer/clauses.h"
 #include "parser/parsetree.h"
 #include "utils/lsyscache.h"
-#include "utils/rel.h"
 
 
 /*
@@ -82,7 +80,7 @@ elog_node_display(int lev, const char *title, void *obj, bool pretty)
 	pfree(s);
 	ereport(lev,
 			(errmsg_internal("%s:", title),
-			 errdetail("%s", f)));
+			 errdetail_internal("%s", f)));
 	pfree(f);
 }
 
@@ -265,8 +263,8 @@ print_rt(List *rtable)
 		switch (rte->rtekind)
 		{
 			case RTE_RELATION:
-				printf("%d\t%s\t%u",
-					   i, rte->eref->aliasname, rte->relid);
+				printf("%d\t%s\t%u\t%c",
+					   i, rte->eref->aliasname, rte->relid, rte->relkind);
 				break;
 			case RTE_SUBQUERY:
 				printf("%d\t%s\t[subquery]",
@@ -274,10 +272,6 @@ print_rt(List *rtable)
 				break;
 			case RTE_JOIN:
 				printf("%d\t%s\t[join]",
-					   i, rte->eref->aliasname);
-				break;
-			case RTE_SPECIAL:
-				printf("%d\t%s\t[special]",
 					   i, rte->eref->aliasname);
 				break;
 			case RTE_FUNCTION:
@@ -326,12 +320,16 @@ print_expr(Node *expr, List *rtable)
 
 		switch (var->varno)
 		{
-			case INNER:
+			case INNER_VAR:
 				relname = "INNER";
 				attname = "?";
 				break;
-			case OUTER:
+			case OUTER_VAR:
 				relname = "OUTER";
+				attname = "?";
+				break;
+			case INDEX_VAR:
+				relname = "INDEX";
 				attname = "?";
 				break;
 			default:

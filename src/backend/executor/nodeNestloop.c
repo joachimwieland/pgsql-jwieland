@@ -137,9 +137,8 @@ ExecNestLoop(NestLoopState *node)
 			node->nl_MatchedOuter = false;
 
 			/*
-			 * fetch the values of any outer Vars that must be passed to
-			 * the inner scan, and store them in the appropriate PARAM_EXEC
-			 * slots.
+			 * fetch the values of any outer Vars that must be passed to the
+			 * inner scan, and store them in the appropriate PARAM_EXEC slots.
 			 */
 			foreach(lc, nl->nestParams)
 			{
@@ -148,8 +147,8 @@ ExecNestLoop(NestLoopState *node)
 				ParamExecData *prm;
 
 				prm = &(econtext->ecxt_param_exec_vals[paramno]);
-				/* Param value should be an OUTER var */
-				Assert(nlp->paramval->varno == OUTER);
+				/* Param value should be an OUTER_VAR var */
+				Assert(nlp->paramval->varno == OUTER_VAR);
 				Assert(nlp->paramval->varattno > 0);
 				prm->value = slot_getattr(outerTupleSlot,
 										  nlp->paramval->varattno,
@@ -215,6 +214,8 @@ ExecNestLoop(NestLoopState *node)
 						return result;
 					}
 				}
+				else
+					InstrCountFiltered2(node, 1);
 			}
 
 			/*
@@ -271,7 +272,11 @@ ExecNestLoop(NestLoopState *node)
 					return result;
 				}
 			}
+			else
+				InstrCountFiltered2(node, 1);
 		}
+		else
+			InstrCountFiltered1(node, 1);
 
 		/*
 		 * Tuple fails qual, so free per-tuple memory and try again.
@@ -330,9 +335,9 @@ ExecInitNestLoop(NestLoop *node, EState *estate, int eflags)
 	 *
 	 * If we have no parameters to pass into the inner rel from the outer,
 	 * tell the inner child that cheap rescans would be good.  If we do have
-	 * such parameters, then there is no point in REWIND support at all in
-	 * the inner child, because it will always be rescanned with fresh
-	 * parameter values.
+	 * such parameters, then there is no point in REWIND support at all in the
+	 * inner child, because it will always be rescanned with fresh parameter
+	 * values.
 	 */
 	outerPlanState(nlstate) = ExecInitNode(outerPlan(node), estate, eflags);
 	if (node->nestParams == NIL)

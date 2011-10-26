@@ -24,7 +24,6 @@
 #include "parser/parse_oper.h"
 #include "parser/parse_type.h"
 #include "utils/builtins.h"
-#include "utils/hsearch.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
@@ -79,7 +78,7 @@ static bool make_oper_cache_key(OprCacheKey *key, List *opname,
 					Oid ltypeId, Oid rtypeId);
 static Oid	find_oper_cache_entry(OprCacheKey *key);
 static void make_oper_cache_entry(OprCacheKey *key, Oid opr_oid);
-static void InvalidateOprCacheCallBack(Datum arg, int cacheid, ItemPointer tuplePtr);
+static void InvalidateOprCacheCallBack(Datum arg, int cacheid, uint32 hashvalue);
 
 
 /*
@@ -210,42 +209,6 @@ get_sort_group_operators(Oid argtype,
 	eq_opr = typentry->eq_opr;
 	gt_opr = typentry->gt_opr;
 	hashable = OidIsValid(typentry->hash_proc);
-
-	/*
-	 * If the datatype is an array, then we can use array_lt and friends ...
-	 * but only if there are suitable operators for the element type.
-	 * Likewise, array types are only hashable if the element type is.
-	 * Testing all three operator IDs here should be redundant, but let's do
-	 * it anyway.
-	 */
-	if (lt_opr == ARRAY_LT_OP ||
-		eq_opr == ARRAY_EQ_OP ||
-		gt_opr == ARRAY_GT_OP)
-	{
-		Oid			elem_type = get_base_element_type(argtype);
-
-		if (OidIsValid(elem_type))
-		{
-			typentry = lookup_type_cache(elem_type, cache_flags);
-			if (!OidIsValid(typentry->eq_opr))
-			{
-				/* element type is neither sortable nor hashable */
-				lt_opr = eq_opr = gt_opr = InvalidOid;
-			}
-			else if (!OidIsValid(typentry->lt_opr) ||
-					 !OidIsValid(typentry->gt_opr))
-			{
-				/* element type is hashable but not sortable */
-				lt_opr = gt_opr = InvalidOid;
-			}
-			hashable = OidIsValid(typentry->hash_proc);
-		}
-		else
-		{
-			lt_opr = eq_opr = gt_opr = InvalidOid;		/* bogus array type? */
-			hashable = false;
-		}
-	}
 
 	/* Report errors if needed */
 	if ((needLT && !OidIsValid(lt_opr)) ||
@@ -867,6 +830,7 @@ make_op(ParseState *pstate, List *opname, Node *ltree, Node *rtree,
 	result->opfuncid = opform->oprcode;
 	result->opresulttype = rettype;
 	result->opretset = get_func_retset(opform->oprcode);
+	/* opcollid and inputcollid will be set by parse_collate.c */
 	result->args = args;
 	result->location = location;
 
@@ -995,6 +959,7 @@ make_scalar_array_op(ParseState *pstate, List *opname,
 	result->opno = oprid(tup);
 	result->opfuncid = opform->oprcode;
 	result->useOr = useOr;
+	/* inputcollid will be set by parse_collate.c */
 	result->args = args;
 	result->location = location;
 
@@ -1138,7 +1103,7 @@ make_oper_cache_entry(OprCacheKey *key, Oid opr_oid)
  * Callback for pg_operator and pg_cast inval events
  */
 static void
-InvalidateOprCacheCallBack(Datum arg, int cacheid, ItemPointer tuplePtr)
+InvalidateOprCacheCallBack(Datum arg, int cacheid, uint32 hashvalue)
 {
 	HASH_SEQ_STATUS status;
 	OprCacheEntry *hentry;

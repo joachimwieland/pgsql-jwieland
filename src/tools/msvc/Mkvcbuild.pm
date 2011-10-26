@@ -50,10 +50,10 @@ sub mkvcbuild
     our @pgportfiles = qw(
       chklocale.c crypt.c fseeko.c getrusage.c inet_aton.c random.c srandom.c
       getaddrinfo.c gettimeofday.c inet_net_ntop.c kill.c open.c erand48.c
-      snprintf.c strlcat.c strlcpy.c dirmod.c exec.c noblock.c path.c pipe.c
+      snprintf.c strlcat.c strlcpy.c dirmod.c exec.c noblock.c path.c
       pgcheckdir.c pgmkdirp.c pgsleep.c pgstrcasecmp.c qsort.c qsort_arg.c
       sprompt.c thread.c getopt.c getopt_long.c dirent.c rint.c win32env.c
-      win32error.c);
+      win32error.c win32setlocale.c);
 
     $libpgport = $solution->AddProject('libpgport','lib','misc');
     $libpgport->AddDefine('FRONTEND');
@@ -68,6 +68,7 @@ sub mkvcbuild
     $postgres->ReplaceFile('src\backend\port\pg_shmem.c','src\backend\port\win32_shmem.c');
     $postgres->ReplaceFile('src\backend\port\pg_latch.c','src\backend\port\win32_latch.c');
     $postgres->AddFiles('src\port',@pgportfiles);
+    $postgres->AddFile('src\backend\port\pipe.c');
     $postgres->AddDir('src\timezone');
     $postgres->AddFiles('src\backend\parser','scan.l','gram.y');
     $postgres->AddFiles('src\backend\bootstrap','bootscanner.l','bootparse.y');
@@ -172,7 +173,8 @@ sub mkvcbuild
     if ($solution->{options}->{python})
     {
 
-        # Attempt to get python version and location. Assume python.exe in specified dir.
+        # Attempt to get python version and location.
+        # Assume python.exe in specified dir.
         open(P,
             $solution->{options}->{python}
               . "\\python -c \"import sys;print(sys.prefix);print(str(sys.version_info[0])+str(sys.version_info[1]))\" |"
@@ -183,11 +185,14 @@ sub mkvcbuild
         chomp($pyver);
         close(P);
 
-  # Sometimes (always?) if python is not present, the execution actually works, but gives no data...
+        # Sometimes (always?) if python is not present, the execution
+        # appears to work, but gives no data...
         die "Failed to query python for version information\n"
           if (!(defined($pyprefix) && defined($pyver)));
 
-        my $plpython = $solution->AddProject('plpython','dll','PLs','src\pl\plpython');
+        my $pymajorver = substr($pyver, 0, 1);
+        my $plpython =
+          $solution->AddProject('plpython' . $pymajorver, 'dll','PLs', 'src\pl\plpython');
         $plpython->AddIncludeDir($pyprefix . '\include');
         $plpython->AddLibrary($pyprefix . "\\Libs\\python$pyver.lib");
         $plpython->AddReference($postgres);
@@ -268,9 +273,33 @@ sub mkvcbuild
     $pgregress_ecpg->AddDefine('FRONTEND');
     $pgregress_ecpg->AddReference($libpgport);
 
+    my $isolation_tester = $solution->AddProject('isolationtester','exe','misc');
+    $isolation_tester->AddFile('src\test\isolation\isolationtester.c');
+    $isolation_tester->AddFile('src\test\isolation\specparse.y');
+    $isolation_tester->AddFile('src\test\isolation\specscanner.l');
+    $isolation_tester->AddFile('src\test\isolation\specparse.c');
+    $isolation_tester->AddIncludeDir('src\test\isolation');
+    $isolation_tester->AddIncludeDir('src\port');
+    $isolation_tester->AddIncludeDir('src\test\regress');
+    $isolation_tester->AddIncludeDir('src\interfaces\libpq');
+    $isolation_tester->AddDefine('HOST_TUPLE="i686-pc-win32vc"');
+    $isolation_tester->AddDefine('FRONTEND');
+    $isolation_tester->AddLibrary('wsock32.lib');
+    $isolation_tester->AddReference($libpq, $libpgport);
+
+    my $pgregress_isolation = $solution->AddProject('pg_isolation_regress','exe','misc');
+    $pgregress_isolation->AddFile('src\test\isolation\isolation_main.c');
+    $pgregress_isolation->AddFile('src\test\regress\pg_regress.c');
+    $pgregress_isolation->AddIncludeDir('src\port');
+    $pgregress_isolation->AddIncludeDir('src\test\regress');
+    $pgregress_isolation->AddDefine('HOST_TUPLE="i686-pc-win32vc"');
+    $pgregress_isolation->AddDefine('FRONTEND');
+    $pgregress_isolation->AddReference($libpgport);
+
     # src/bin
     my $initdb = AddSimpleFrontend('initdb');
     $initdb->AddIncludeDir('src\interfaces\libpq');
+    $initdb->AddIncludeDir('src\timezone');
     $initdb->AddDefine('FRONTEND');
     $initdb->AddLibrary('wsock32.lib');
     $initdb->AddLibrary('ws2_32.lib');
@@ -578,10 +607,6 @@ sub GenerateContribSqlFiles
             $l = substr($l, 0, index($l, '$(addsuffix ')) . substr($l, $i+1);
         }
 
-        # Special case for contrib/spi
-        $l = "autoinc.sql insert_username.sql moddatetime.sql refint.sql timetravel.sql"
-          if ($n eq 'spi');
-
         foreach my $d (split /\s+/, $l)
         {
             my $in = "$d.in";
@@ -593,7 +618,6 @@ sub GenerateContribSqlFiles
                 my $cont = Project::read_file("contrib/$n/$in");
                 my $dn = $out;
                 $dn =~ s/\.sql$//;
-                if ($mf =~ /^MODULE_big\s*=\s*(.*)$/m) { $dn = $1 }
                 $cont =~ s/MODULE_PATHNAME/\$libdir\/$dn/g;
                 my $o;
                 open($o,">contrib/$n/$out") || croak "Could not write to contrib/$n/$d";

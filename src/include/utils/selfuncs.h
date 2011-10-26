@@ -121,7 +121,8 @@ extern void get_join_variables(PlannerInfo *root, List *args,
 				   VariableStatData *vardata1,
 				   VariableStatData *vardata2,
 				   bool *join_is_reversed);
-extern double get_variable_numdistinct(VariableStatData *vardata);
+extern double get_variable_numdistinct(VariableStatData *vardata,
+									   bool *isdefault);
 extern double mcv_selectivity(VariableStatData *vardata, FmgrInfo *opproc,
 				Datum constval, bool varonleft,
 				double *sumcommonp);
@@ -132,9 +133,11 @@ extern double histogram_selectivity(VariableStatData *vardata, FmgrInfo *opproc,
 
 extern Pattern_Prefix_Status pattern_fixed_prefix(Const *patt,
 					 Pattern_Type ptype,
+					 Oid collation,
 					 Const **prefix,
 					 Const **rest);
-extern Const *make_greater_string(const Const *str_const, FmgrInfo *ltproc);
+extern Const *make_greater_string(const Const *str_const, FmgrInfo *ltproc,
+					Oid collation);
 
 extern Datum eqsel(PG_FUNCTION_ARGS);
 extern Datum neqsel(PG_FUNCTION_ARGS);

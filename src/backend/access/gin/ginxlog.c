@@ -15,7 +15,6 @@
 
 #include "access/gin_private.h"
 #include "access/xlogutils.h"
-#include "storage/bufmgr.h"
 #include "utils/memutils.h"
 
 static MemoryContext opCtx;		/* working memory for operations */
@@ -388,7 +387,7 @@ ginRedoVacuumPage(XLogRecPtr lsn, XLogRecord *record)
 		else
 		{
 			OffsetNumber i,
-				*tod;
+					   *tod;
 			IndexTuple	itup = (IndexTuple) (XLogRecGetData(record) + sizeof(ginxlogVacuumPage));
 
 			tod = (OffsetNumber *) palloc(sizeof(OffsetNumber) * PageGetMaxOffsetNumber(page));
@@ -513,10 +512,10 @@ ginRedoUpdateMetapage(XLogRecPtr lsn, XLogRecord *record)
 				if (!XLByteLE(lsn, PageGetLSN(page)))
 				{
 					OffsetNumber l,
-						off = (PageIsEmpty(page)) ? FirstOffsetNumber :
-						OffsetNumberNext(PageGetMaxOffsetNumber(page));
+								off = (PageIsEmpty(page)) ? FirstOffsetNumber :
+					OffsetNumberNext(PageGetMaxOffsetNumber(page));
 					int			i,
-						tupsize;
+								tupsize;
 					IndexTuple	tuples = (IndexTuple) (XLogRecGetData(record) + sizeof(ginxlogUpdateMeta));
 
 					for (i = 0; i < data->ntuples; i++)

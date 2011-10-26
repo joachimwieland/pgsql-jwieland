@@ -1,6 +1,8 @@
 /*
  * contrib/btree_gist/btree_time.c
  */
+#include "postgres.h"
+
 #include "btree_gist.h"
 #include "btree_utils_num.h"
 #include "utils/date.h"
@@ -20,6 +22,7 @@ PG_FUNCTION_INFO_V1(gbt_timetz_compress);
 PG_FUNCTION_INFO_V1(gbt_time_union);
 PG_FUNCTION_INFO_V1(gbt_time_picksplit);
 PG_FUNCTION_INFO_V1(gbt_time_consistent);
+PG_FUNCTION_INFO_V1(gbt_time_distance);
 PG_FUNCTION_INFO_V1(gbt_timetz_consistent);
 PG_FUNCTION_INFO_V1(gbt_time_penalty);
 PG_FUNCTION_INFO_V1(gbt_time_same);
@@ -29,6 +32,7 @@ Datum		gbt_timetz_compress(PG_FUNCTION_ARGS);
 Datum		gbt_time_union(PG_FUNCTION_ARGS);
 Datum		gbt_time_picksplit(PG_FUNCTION_ARGS);
 Datum		gbt_time_consistent(PG_FUNCTION_ARGS);
+Datum		gbt_time_distance(PG_FUNCTION_ARGS);
 Datum		gbt_timetz_consistent(PG_FUNCTION_ARGS);
 Datum		gbt_time_penalty(PG_FUNCTION_ARGS);
 Datum		gbt_time_same(PG_FUNCTION_ARGS);
@@ -101,8 +105,8 @@ gbt_timelt(const void *a, const void *b)
 static int
 gbt_timekey_cmp(const void *a, const void *b)
 {
-	timeKEY    *ia = (timeKEY *) (((Nsrt *) a)->t);
-	timeKEY    *ib = (timeKEY *) (((Nsrt *) b)->t);
+	timeKEY    *ia = (timeKEY *) (((const Nsrt *) a)->t);
+	timeKEY    *ib = (timeKEY *) (((const Nsrt *) b)->t);
 	int			res;
 
 	res = DatumGetInt32(DirectFunctionCall2(time_cmp, TimeADTGetDatumFast(ia->lower), TimeADTGetDatumFast(ib->lower)));
@@ -110,6 +114,19 @@ gbt_timekey_cmp(const void *a, const void *b)
 		return DatumGetInt32(DirectFunctionCall2(time_cmp, TimeADTGetDatumFast(ia->upper), TimeADTGetDatumFast(ib->upper)));
 
 	return res;
+}
+
+static float8
+gbt_time_dist(const void *a, const void *b)
+{
+	const TimeADT *aa = (const TimeADT *) a;
+	const TimeADT *bb = (const TimeADT *) b;
+	Interval   *i;
+
+	i = DatumGetIntervalP(DirectFunctionCall2(time_mi_time,
+											  TimeADTGetDatumFast(*aa),
+											  TimeADTGetDatumFast(*bb)));
+	return (float8) Abs(INTERVAL_TO_SEC(i));
 }
 
 
@@ -122,8 +139,22 @@ static const gbtree_ninfo tinfo =
 	gbt_timeeq,
 	gbt_timele,
 	gbt_timelt,
-	gbt_timekey_cmp
+	gbt_timekey_cmp,
+	gbt_time_dist
 };
+
+
+PG_FUNCTION_INFO_V1(time_dist);
+Datum		time_dist(PG_FUNCTION_ARGS);
+Datum
+time_dist(PG_FUNCTION_ARGS)
+{
+	Datum		diff = DirectFunctionCall2(time_mi_time,
+										   PG_GETARG_DATUM(0),
+										   PG_GETARG_DATUM(1));
+
+	PG_RETURN_INTERVAL_P(abs_interval(DatumGetIntervalP(diff)));
+}
 
 
 /**************************************************
@@ -193,6 +224,24 @@ gbt_time_consistent(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(
 				   gbt_num_consistent(&key, (void *) &query, &strategy, GIST_LEAF(entry), &tinfo)
+		);
+}
+
+Datum
+gbt_time_distance(PG_FUNCTION_ARGS)
+{
+	GISTENTRY  *entry = (GISTENTRY *) PG_GETARG_POINTER(0);
+	TimeADT		query = PG_GETARG_TIMEADT(1);
+
+	/* Oid		subtype = PG_GETARG_OID(3); */
+	timeKEY    *kkk = (timeKEY *) DatumGetPointer(entry->key);
+	GBT_NUMKEY_R key;
+
+	key.lower = (GBT_NUMKEY *) &kkk->lower;
+	key.upper = (GBT_NUMKEY *) &kkk->upper;
+
+	PG_RETURN_FLOAT8(
+			gbt_num_distance(&key, (void *) &query, GIST_LEAF(entry), &tinfo)
 		);
 }
 

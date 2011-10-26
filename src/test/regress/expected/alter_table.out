@@ -184,14 +184,127 @@ DETAIL:  Key (a)=(5) is not present in table "tmp2".
 DELETE FROM tmp3 where a=5;
 -- Try (and succeed)
 ALTER TABLE tmp3 add constraint tmpconstr foreign key (a) references tmp2 match full;
+ALTER TABLE tmp3 drop constraint tmpconstr;
+INSERT INTO tmp3 values (5,50);
+-- Try NOT VALID and then VALIDATE CONSTRAINT, but fails. Delete failure then re-validate
+ALTER TABLE tmp3 add constraint tmpconstr foreign key (a) references tmp2 match full NOT VALID;
+ALTER TABLE tmp3 validate constraint tmpconstr;
+ERROR:  insert or update on table "tmp3" violates foreign key constraint "tmpconstr"
+DETAIL:  Key (a)=(5) is not present in table "tmp2".
+-- Delete failing row
+DELETE FROM tmp3 where a=5;
+-- Try (and succeed) and repeat to show it works on already valid constraint
+ALTER TABLE tmp3 validate constraint tmpconstr;
+ALTER TABLE tmp3 validate constraint tmpconstr;
+-- Try a non-verified CHECK constraint
+ALTER TABLE tmp3 ADD CONSTRAINT b_greater_than_ten CHECK (b > 10); -- fail
+ERROR:  check constraint "b_greater_than_ten" is violated by some row
+ALTER TABLE tmp3 ADD CONSTRAINT b_greater_than_ten CHECK (b > 10) NOT VALID; -- succeeds
+ALTER TABLE tmp3 VALIDATE CONSTRAINT b_greater_than_ten; -- fails
+ERROR:  check constraint "b_greater_than_ten" is violated by some row
+DELETE FROM tmp3 WHERE NOT b > 10;
+ALTER TABLE tmp3 VALIDATE CONSTRAINT b_greater_than_ten; -- succeeds
+ALTER TABLE tmp3 VALIDATE CONSTRAINT b_greater_than_ten; -- succeeds
+-- Test inherited NOT VALID CHECK constraints
+select * from tmp3;
+ a | b  
+---+----
+ 1 | 20
+(1 row)
+
+CREATE TABLE tmp6 () INHERITS (tmp3);
+CREATE TABLE tmp7 () INHERITS (tmp3);
+INSERT INTO tmp6 VALUES (6, 30), (7, 16);
+ALTER TABLE tmp3 ADD CONSTRAINT b_le_20 CHECK (b <= 20) NOT VALID;
+ALTER TABLE tmp3 VALIDATE CONSTRAINT b_le_20;	-- fails
+ERROR:  check constraint "b_le_20" is violated by some row
+DELETE FROM tmp6 WHERE b > 20;
+ALTER TABLE tmp3 VALIDATE CONSTRAINT b_le_20;	-- succeeds
+-- An already validated constraint must not be revalidated
+CREATE FUNCTION boo(int) RETURNS int IMMUTABLE STRICT LANGUAGE plpgsql AS $$ BEGIN RAISE NOTICE 'boo: %', $1; RETURN $1; END; $$;
+INSERT INTO tmp7 VALUES (8, 18);
+ALTER TABLE tmp7 ADD CONSTRAINT identity CHECK (b = boo(b));
+NOTICE:  boo: 18
+ALTER TABLE tmp3 ADD CONSTRAINT IDENTITY check (b = boo(b)) NOT VALID;
+NOTICE:  merging constraint "identity" with inherited definition
+ALTER TABLE tmp3 VALIDATE CONSTRAINT identity;
+NOTICE:  boo: 16
+NOTICE:  boo: 20
 -- Try (and fail) to create constraint from tmp5(a) to tmp4(a) - unique constraint on
 -- tmp4 is a,b
 ALTER TABLE tmp5 add constraint tmpconstr foreign key(a) references tmp4(a) match full;
 ERROR:  there is no unique constraint matching given keys for referenced table "tmp4"
+DROP TABLE tmp7;
+DROP TABLE tmp6;
 DROP TABLE tmp5;
 DROP TABLE tmp4;
 DROP TABLE tmp3;
 DROP TABLE tmp2;
+-- NOT VALID with plan invalidation -- ensure we don't use a constraint for
+-- exclusion until validated
+set constraint_exclusion TO 'partition';
+create table nv_parent (d date); 
+create table nv_child_2010 () inherits (nv_parent);
+create table nv_child_2011 () inherits (nv_parent);
+alter table nv_child_2010 add check (d between '2010-01-01'::date and '2010-12-31'::date) not valid;
+alter table nv_child_2011 add check (d between '2011-01-01'::date and '2011-12-31'::date) not valid;
+explain (costs off) select * from nv_parent where d between '2011-08-01' and '2011-08-31';
+                                   QUERY PLAN                                    
+---------------------------------------------------------------------------------
+ Result
+   ->  Append
+         ->  Seq Scan on nv_parent
+               Filter: ((d >= '08-01-2011'::date) AND (d <= '08-31-2011'::date))
+         ->  Seq Scan on nv_child_2010 nv_parent
+               Filter: ((d >= '08-01-2011'::date) AND (d <= '08-31-2011'::date))
+         ->  Seq Scan on nv_child_2011 nv_parent
+               Filter: ((d >= '08-01-2011'::date) AND (d <= '08-31-2011'::date))
+(8 rows)
+
+create table nv_child_2009 (check (d between '2009-01-01'::date and '2009-12-31'::date)) inherits (nv_parent);
+explain (costs off) select * from nv_parent where d between '2011-08-01'::date and '2011-08-31'::date;
+                                   QUERY PLAN                                    
+---------------------------------------------------------------------------------
+ Result
+   ->  Append
+         ->  Seq Scan on nv_parent
+               Filter: ((d >= '08-01-2011'::date) AND (d <= '08-31-2011'::date))
+         ->  Seq Scan on nv_child_2010 nv_parent
+               Filter: ((d >= '08-01-2011'::date) AND (d <= '08-31-2011'::date))
+         ->  Seq Scan on nv_child_2011 nv_parent
+               Filter: ((d >= '08-01-2011'::date) AND (d <= '08-31-2011'::date))
+(8 rows)
+
+explain (costs off) select * from nv_parent where d between '2009-08-01'::date and '2009-08-31'::date;
+                                   QUERY PLAN                                    
+---------------------------------------------------------------------------------
+ Result
+   ->  Append
+         ->  Seq Scan on nv_parent
+               Filter: ((d >= '08-01-2009'::date) AND (d <= '08-31-2009'::date))
+         ->  Seq Scan on nv_child_2010 nv_parent
+               Filter: ((d >= '08-01-2009'::date) AND (d <= '08-31-2009'::date))
+         ->  Seq Scan on nv_child_2011 nv_parent
+               Filter: ((d >= '08-01-2009'::date) AND (d <= '08-31-2009'::date))
+         ->  Seq Scan on nv_child_2009 nv_parent
+               Filter: ((d >= '08-01-2009'::date) AND (d <= '08-31-2009'::date))
+(10 rows)
+
+-- after validation, the constraint should be used
+alter table nv_child_2011 VALIDATE CONSTRAINT nv_child_2011_d_check;
+explain (costs off) select * from nv_parent where d between '2009-08-01'::date and '2009-08-31'::date;
+                                   QUERY PLAN                                    
+---------------------------------------------------------------------------------
+ Result
+   ->  Append
+         ->  Seq Scan on nv_parent
+               Filter: ((d >= '08-01-2009'::date) AND (d <= '08-31-2009'::date))
+         ->  Seq Scan on nv_child_2010 nv_parent
+               Filter: ((d >= '08-01-2009'::date) AND (d <= '08-31-2009'::date))
+         ->  Seq Scan on nv_child_2009 nv_parent
+               Filter: ((d >= '08-01-2009'::date) AND (d <= '08-31-2009'::date))
+(8 rows)
+
 -- Foreign key adding test with mixed types
 -- Note: these tables are TEMP to avoid name conflicts when this test
 -- is run in parallel with foreign_key.sql.
@@ -1186,6 +1299,23 @@ drop table p1, p2 cascade;
 NOTICE:  drop cascades to 2 other objects
 DETAIL:  drop cascades to table c1
 drop cascades to table gc1
+-- test attinhcount tracking with merged columns
+create table depth0();
+create table depth1(c text) inherits (depth0);
+create table depth2() inherits (depth1);
+alter table depth0 add c text;
+NOTICE:  merging definition of column "c" for child "depth1"
+select attrelid::regclass, attname, attinhcount, attislocal
+from pg_attribute
+where attnum > 0 and attrelid::regclass in ('depth0', 'depth1', 'depth2')
+order by attrelid::regclass::text, attnum;
+ attrelid | attname | attinhcount | attislocal 
+----------+---------+-------------+------------
+ depth0   | c       |           0 | t
+ depth1   | c       |           1 | t
+ depth2   | c       |           1 | f
+(3 rows)
+
 --
 -- Test the ALTER TABLE SET WITH/WITHOUT OIDS command
 --
@@ -1480,7 +1610,35 @@ drop table another;
 create table tab1 (a int, b text);
 create table tab2 (x int, y tab1);
 alter table tab1 alter column b type varchar; -- fails
-ERROR:  cannot alter table "tab1" because column "tab2"."y" uses its rowtype
+ERROR:  cannot alter table "tab1" because column "tab2.y" uses its row type
+-- disallow recursive containment of row types
+create temp table recur1 (f1 int);
+alter table recur1 add column f2 recur1; -- fails
+ERROR:  composite type recur1 cannot be made a member of itself
+alter table recur1 add column f2 recur1[]; -- fails
+ERROR:  composite type recur1 cannot be made a member of itself
+create domain array_of_recur1 as recur1[];
+alter table recur1 add column f2 array_of_recur1; -- fails
+ERROR:  composite type recur1 cannot be made a member of itself
+create temp table recur2 (f1 int, f2 recur1);
+alter table recur1 add column f2 recur2; -- fails
+ERROR:  composite type recur1 cannot be made a member of itself
+alter table recur1 add column f2 int;
+alter table recur1 alter column f2 type recur2; -- fails
+ERROR:  composite type recur1 cannot be made a member of itself
+-- SET STORAGE may need to add a TOAST table
+create table test_storage (a text);
+alter table test_storage alter a set storage plain;
+alter table test_storage add b int default 0; -- rewrite table to remove its TOAST table
+alter table test_storage alter a set storage extended; -- re-add TOAST table
+select reltoastrelid <> 0 as has_toast_table
+from pg_class
+where oid = 'test_storage'::regclass;
+ has_toast_table 
+-----------------
+ t
+(1 row)
+
 --
 -- lock levels
 --
@@ -1511,90 +1669,88 @@ and c.relname != 'my_locks'
 group by c.relname;
 create table alterlock (f1 int primary key, f2 text);
 NOTICE:  CREATE TABLE / PRIMARY KEY will create implicit index "alterlock_pkey" for table "alterlock"
--- share update exclusive
 begin; alter table alterlock alter column f2 set statistics 150;
 select * from my_locks order by 1;
-  relname  |       max_lockmode       
------------+--------------------------
- alterlock | ShareUpdateExclusiveLock
+  relname  |    max_lockmode     
+-----------+---------------------
+ alterlock | AccessExclusiveLock
 (1 row)
 
 rollback;
 begin; alter table alterlock cluster on alterlock_pkey;
 select * from my_locks order by 1;
-    relname     |       max_lockmode       
-----------------+--------------------------
- alterlock      | ShareUpdateExclusiveLock
- alterlock_pkey | ShareUpdateExclusiveLock
+    relname     |    max_lockmode     
+----------------+---------------------
+ alterlock      | AccessExclusiveLock
+ alterlock_pkey | AccessExclusiveLock
 (2 rows)
 
 commit;
 begin; alter table alterlock set without cluster;
 select * from my_locks order by 1;
-  relname  |       max_lockmode       
------------+--------------------------
- alterlock | ShareUpdateExclusiveLock
+  relname  |    max_lockmode     
+-----------+---------------------
+ alterlock | AccessExclusiveLock
 (1 row)
 
 commit;
 begin; alter table alterlock set (fillfactor = 100);
 select * from my_locks order by 1;
-  relname  |       max_lockmode       
------------+--------------------------
- alterlock | ShareUpdateExclusiveLock
- pg_toast  | ShareUpdateExclusiveLock
+  relname  |    max_lockmode     
+-----------+---------------------
+ alterlock | AccessExclusiveLock
+ pg_toast  | AccessExclusiveLock
 (2 rows)
 
 commit;
 begin; alter table alterlock reset (fillfactor);
 select * from my_locks order by 1;
-  relname  |       max_lockmode       
------------+--------------------------
- alterlock | ShareUpdateExclusiveLock
- pg_toast  | ShareUpdateExclusiveLock
+  relname  |    max_lockmode     
+-----------+---------------------
+ alterlock | AccessExclusiveLock
+ pg_toast  | AccessExclusiveLock
 (2 rows)
 
 commit;
 begin; alter table alterlock set (toast.autovacuum_enabled = off);
 select * from my_locks order by 1;
-  relname  |       max_lockmode       
------------+--------------------------
- alterlock | ShareUpdateExclusiveLock
- pg_toast  | ShareUpdateExclusiveLock
+  relname  |    max_lockmode     
+-----------+---------------------
+ alterlock | AccessExclusiveLock
+ pg_toast  | AccessExclusiveLock
 (2 rows)
 
 commit;
 begin; alter table alterlock set (autovacuum_enabled = off);
 select * from my_locks order by 1;
-  relname  |       max_lockmode       
------------+--------------------------
- alterlock | ShareUpdateExclusiveLock
- pg_toast  | ShareUpdateExclusiveLock
+  relname  |    max_lockmode     
+-----------+---------------------
+ alterlock | AccessExclusiveLock
+ pg_toast  | AccessExclusiveLock
 (2 rows)
 
 commit;
 begin; alter table alterlock alter column f2 set (n_distinct = 1);
 select * from my_locks order by 1;
-  relname  |       max_lockmode       
------------+--------------------------
- alterlock | ShareUpdateExclusiveLock
+  relname  |    max_lockmode     
+-----------+---------------------
+ alterlock | AccessExclusiveLock
 (1 row)
 
 rollback;
 begin; alter table alterlock alter column f2 set storage extended;
 select * from my_locks order by 1;
-  relname  |       max_lockmode       
------------+--------------------------
- alterlock | ShareUpdateExclusiveLock
+  relname  |    max_lockmode     
+-----------+---------------------
+ alterlock | AccessExclusiveLock
 (1 row)
 
 rollback;
--- share row exclusive
 begin; alter table alterlock alter column f2 set default 'x';
 select * from my_locks order by 1;
-  relname  |     max_lockmode      
------------+-----------------------
- alterlock | ShareRowExclusiveLock
+  relname  |    max_lockmode     
+-----------+---------------------
+ alterlock | AccessExclusiveLock
 (1 row)
 
 rollback;
@@ -1725,44 +1881,44 @@ drop cascades to text search dictionary dict
 CREATE TYPE test_type AS (a int);
 \d test_type
 Composite type "public.test_type"
- Column |  Type   
---------+---------
- a      | integer
+ Column |  Type   | Modifiers 
+--------+---------+-----------
+ a      | integer | 
 
 ALTER TYPE nosuchtype ADD ATTRIBUTE b text; -- fails
 ERROR:  relation "nosuchtype" does not exist
 ALTER TYPE test_type ADD ATTRIBUTE b text;
 \d test_type
 Composite type "public.test_type"
- Column |  Type   
---------+---------
- a      | integer
- b      | text
+ Column |  Type   | Modifiers 
+--------+---------+-----------
+ a      | integer | 
+ b      | text    | 
 
 ALTER TYPE test_type ADD ATTRIBUTE b text; -- fails
 ERROR:  column "b" of relation "test_type" already exists
 ALTER TYPE test_type ALTER ATTRIBUTE b SET DATA TYPE varchar;
 \d test_type
-Composite type "public.test_type"
- Column |       Type        
---------+-------------------
- a      | integer
- b      | character varying
+   Composite type "public.test_type"
+ Column |       Type        | Modifiers 
+--------+-------------------+-----------
+ a      | integer           | 
+ b      | character varying | 
 
 ALTER TYPE test_type ALTER ATTRIBUTE b SET DATA TYPE integer;
 \d test_type
 Composite type "public.test_type"
- Column |  Type   
---------+---------
- a      | integer
- b      | integer
+ Column |  Type   | Modifiers 
+--------+---------+-----------
+ a      | integer | 
+ b      | integer | 
 
 ALTER TYPE test_type DROP ATTRIBUTE b;
 \d test_type
 Composite type "public.test_type"
- Column |  Type   
---------+---------
- a      | integer
+ Column |  Type   | Modifiers 
+--------+---------+-----------
+ a      | integer | 
 
 ALTER TYPE test_type DROP ATTRIBUTE c; -- fails
 ERROR:  column "c" of relation "test_type" does not exist
@@ -1771,32 +1927,33 @@ NOTICE:  column "c" of relation "test_type" does not exist, skipping
 ALTER TYPE test_type DROP ATTRIBUTE a, ADD ATTRIBUTE d boolean;
 \d test_type
 Composite type "public.test_type"
- Column |  Type   
---------+---------
- d      | boolean
+ Column |  Type   | Modifiers 
+--------+---------+-----------
+ d      | boolean | 
 
 ALTER TYPE test_type RENAME ATTRIBUTE a TO aa;
 ERROR:  column "a" does not exist
 ALTER TYPE test_type RENAME ATTRIBUTE d TO dd;
 \d test_type
 Composite type "public.test_type"
- Column |  Type   
---------+---------
- dd     | boolean
+ Column |  Type   | Modifiers 
+--------+---------+-----------
+ dd     | boolean | 
 
 DROP TYPE test_type;
 CREATE TYPE test_type1 AS (a int, b text);
 CREATE TABLE test_tbl1 (x int, y test_type1);
 ALTER TYPE test_type1 ALTER ATTRIBUTE b TYPE varchar; -- fails
-ERROR:  cannot alter type "test_type1" because column "test_tbl1"."y" uses it
+ERROR:  cannot alter type "test_type1" because column "test_tbl1.y" uses it
 CREATE TYPE test_type2 AS (a int, b text);
 CREATE TABLE test_tbl2 OF test_type2;
+CREATE TABLE test_tbl2_subclass () INHERITS (test_tbl2);
 \d test_type2
 Composite type "public.test_type2"
- Column |  Type   
---------+---------
- a      | integer
- b      | text
+ Column |  Type   | Modifiers 
+--------+---------+-----------
+ a      | integer | 
+ b      | text    | 
 
 \d test_tbl2
    Table "public.test_tbl2"
@@ -1804,6 +1961,7 @@ Composite type "public.test_type2"
 --------+---------+-----------
  a      | integer | 
  b      | text    | 
+Number of child tables: 1 (Use \d+ to list them.)
 Typed table of type: test_type2
 
 ALTER TYPE test_type2 ADD ATTRIBUTE c text; -- fails
@@ -1812,11 +1970,11 @@ HINT:  Use ALTER ... CASCADE to alter the typed tables too.
 ALTER TYPE test_type2 ADD ATTRIBUTE c text CASCADE;
 \d test_type2
 Composite type "public.test_type2"
- Column |  Type   
---------+---------
- a      | integer
- b      | text
- c      | text
+ Column |  Type   | Modifiers 
+--------+---------+-----------
+ a      | integer | 
+ b      | text    | 
+ c      | text    | 
 
 \d test_tbl2
    Table "public.test_tbl2"
@@ -1825,6 +1983,7 @@ Composite type "public.test_type2"
  a      | integer | 
  b      | text    | 
  c      | text    | 
+Number of child tables: 1 (Use \d+ to list them.)
 Typed table of type: test_type2
 
 ALTER TYPE test_type2 ALTER ATTRIBUTE b TYPE varchar; -- fails
@@ -1832,12 +1991,12 @@ ERROR:  cannot alter type "test_type2" because it is the type of a typed table
 HINT:  Use ALTER ... CASCADE to alter the typed tables too.
 ALTER TYPE test_type2 ALTER ATTRIBUTE b TYPE varchar CASCADE;
 \d test_type2
-Composite type "public.test_type2"
- Column |       Type        
---------+-------------------
- a      | integer
- b      | character varying
- c      | text
+   Composite type "public.test_type2"
+ Column |       Type        | Modifiers 
+--------+-------------------+-----------
+ a      | integer           | 
+ b      | character varying | 
+ c      | text              | 
 
 \d test_tbl2
         Table "public.test_tbl2"
@@ -1846,6 +2005,7 @@ Composite type "public.test_type2"
  a      | integer           | 
  b      | character varying | 
  c      | text              | 
+Number of child tables: 1 (Use \d+ to list them.)
 Typed table of type: test_type2
 
 ALTER TYPE test_type2 DROP ATTRIBUTE b; -- fails
@@ -1854,10 +2014,10 @@ HINT:  Use ALTER ... CASCADE to alter the typed tables too.
 ALTER TYPE test_type2 DROP ATTRIBUTE b CASCADE;
 \d test_type2
 Composite type "public.test_type2"
- Column |  Type   
---------+---------
- a      | integer
- c      | text
+ Column |  Type   | Modifiers 
+--------+---------+-----------
+ a      | integer | 
+ c      | text    | 
 
 \d test_tbl2
    Table "public.test_tbl2"
@@ -1865,6 +2025,7 @@ Composite type "public.test_type2"
 --------+---------+-----------
  a      | integer | 
  c      | text    | 
+Number of child tables: 1 (Use \d+ to list them.)
 Typed table of type: test_type2
 
 ALTER TYPE test_type2 RENAME ATTRIBUTE a TO aa; -- fails
@@ -1873,10 +2034,10 @@ HINT:  Use ALTER ... CASCADE to alter the typed tables too.
 ALTER TYPE test_type2 RENAME ATTRIBUTE a TO aa CASCADE;
 \d test_type2
 Composite type "public.test_type2"
- Column |  Type   
---------+---------
- aa     | integer
- c      | text
+ Column |  Type   | Modifiers 
+--------+---------+-----------
+ aa     | integer | 
+ c      | text    | 
 
 \d test_tbl2
    Table "public.test_tbl2"
@@ -1884,7 +2045,70 @@ Composite type "public.test_type2"
 --------+---------+-----------
  aa     | integer | 
  c      | text    | 
+Number of child tables: 1 (Use \d+ to list them.)
 Typed table of type: test_type2
 
+\d test_tbl2_subclass
+Table "public.test_tbl2_subclass"
+ Column |  Type   | Modifiers 
+--------+---------+-----------
+ aa     | integer | 
+ c      | text    | 
+Inherits: test_tbl2
+
+DROP TABLE test_tbl2_subclass;
+-- This test isn't that interesting on its own, but the purpose is to leave
+-- behind a table to test pg_upgrade with. The table has a composite type
+-- column in it, and the composite type has a dropped attribute.
+CREATE TYPE test_type3 AS (a int);
+CREATE TABLE test_tbl3 (c) AS SELECT '(1)'::test_type3;
+ALTER TYPE test_type3 DROP ATTRIBUTE a, ADD ATTRIBUTE b int;
 CREATE TYPE test_type_empty AS ();
 DROP TYPE test_type_empty;
+--
+-- typed tables: OF / NOT OF
+--
+CREATE TYPE tt_t0 AS (z inet, x int, y numeric(8,2));
+ALTER TYPE tt_t0 DROP ATTRIBUTE z;
+CREATE TABLE tt0 (x int NOT NULL, y numeric(8,2));	-- OK
+CREATE TABLE tt1 (x int, y bigint);					-- wrong base type
+CREATE TABLE tt2 (x int, y numeric(9,2));			-- wrong typmod
+CREATE TABLE tt3 (y numeric(8,2), x int);			-- wrong column order
+CREATE TABLE tt4 (x int);							-- too few columns
+CREATE TABLE tt5 (x int, y numeric(8,2), z int);	-- too few columns
+CREATE TABLE tt6 () INHERITS (tt0);					-- can't have a parent
+CREATE TABLE tt7 (x int, q text, y numeric(8,2)) WITH OIDS;
+ALTER TABLE tt7 DROP q;								-- OK
+ALTER TABLE tt0 OF tt_t0;
+ALTER TABLE tt1 OF tt_t0;
+ERROR:  table "tt1" has different type for column "y"
+ALTER TABLE tt2 OF tt_t0;
+ERROR:  table "tt2" has different type for column "y"
+ALTER TABLE tt3 OF tt_t0;
+ERROR:  table has column "y" where type requires "x"
+ALTER TABLE tt4 OF tt_t0;
+ERROR:  table is missing column "y"
+ALTER TABLE tt5 OF tt_t0;
+ERROR:  table has extra column "z"
+ALTER TABLE tt6 OF tt_t0;
+ERROR:  typed tables cannot inherit
+ALTER TABLE tt7 OF tt_t0;
+CREATE TYPE tt_t1 AS (x int, y numeric(8,2));
+ALTER TABLE tt7 OF tt_t1;			-- reassign an already-typed table
+ALTER TABLE tt7 NOT OF;
+\d tt7
+        Table "public.tt7"
+ Column |     Type     | Modifiers 
+--------+--------------+-----------
+ x      | integer      | 
+ y      | numeric(8,2) | 
+
+-- make sure we can drop a constraint on the parent but it remains on the child
+CREATE TABLE test_drop_constr_parent (c text CHECK (c IS NOT NULL));
+CREATE TABLE test_drop_constr_child () INHERITS (test_drop_constr_parent);
+ALTER TABLE ONLY test_drop_constr_parent DROP CONSTRAINT "test_drop_constr_parent_c_check";
+-- should fail
+INSERT INTO test_drop_constr_child (c) VALUES (NULL);
+ERROR:  new row for relation "test_drop_constr_child" violates check constraint "test_drop_constr_parent_c_check"
+DROP TABLE test_drop_constr_parent CASCADE;
+NOTICE:  drop cascades to table test_drop_constr_child

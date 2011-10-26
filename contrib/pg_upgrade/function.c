@@ -7,6 +7,8 @@
  *	contrib/pg_upgrade/function.c
  */
 
+#include "postgres.h"
+
 #include "pg_upgrade.h"
 
 #include "access/transam.h"
@@ -21,13 +23,13 @@
 void
 install_support_functions_in_new_db(const char *db_name)
 {
-	PGconn *conn = connectToServer(&new_cluster, db_name);
-	
+	PGconn	   *conn = connectToServer(&new_cluster, db_name);
+
 	/* suppress NOTICE of dropped objects */
 	PQclear(executeQueryOrDie(conn,
 							  "SET client_min_messages = warning;"));
 	PQclear(executeQueryOrDie(conn,
-					   "DROP SCHEMA IF EXISTS binary_upgrade CASCADE;"));
+						   "DROP SCHEMA IF EXISTS binary_upgrade CASCADE;"));
 	PQclear(executeQueryOrDie(conn,
 							  "RESET client_min_messages;"));
 
@@ -36,52 +38,58 @@ install_support_functions_in_new_db(const char *db_name)
 
 	PQclear(executeQueryOrDie(conn,
 							  "CREATE OR REPLACE FUNCTION "
-				 "		binary_upgrade.set_next_pg_type_oid(OID) "
+							  "binary_upgrade.set_next_pg_type_oid(OID) "
 							  "RETURNS VOID "
 							  "AS '$libdir/pg_upgrade_support' "
 							  "LANGUAGE C STRICT;"));
 	PQclear(executeQueryOrDie(conn,
 							  "CREATE OR REPLACE FUNCTION "
-		   "		binary_upgrade.set_next_array_pg_type_oid(OID) "
+							"binary_upgrade.set_next_array_pg_type_oid(OID) "
 							  "RETURNS VOID "
 							  "AS '$libdir/pg_upgrade_support' "
 							  "LANGUAGE C STRICT;"));
 	PQclear(executeQueryOrDie(conn,
 							  "CREATE OR REPLACE FUNCTION "
-		   "		binary_upgrade.set_next_toast_pg_type_oid(OID) "
+							"binary_upgrade.set_next_toast_pg_type_oid(OID) "
 							  "RETURNS VOID "
 							  "AS '$libdir/pg_upgrade_support' "
 							  "LANGUAGE C STRICT;"));
 	PQclear(executeQueryOrDie(conn,
 							  "CREATE OR REPLACE FUNCTION "
-			"		binary_upgrade.set_next_heap_pg_class_oid(OID) "
+							"binary_upgrade.set_next_heap_pg_class_oid(OID) "
 							  "RETURNS VOID "
 							  "AS '$libdir/pg_upgrade_support' "
 							  "LANGUAGE C STRICT;"));
 	PQclear(executeQueryOrDie(conn,
 							  "CREATE OR REPLACE FUNCTION "
-		   "		binary_upgrade.set_next_index_pg_class_oid(OID) "
+						   "binary_upgrade.set_next_index_pg_class_oid(OID) "
 							  "RETURNS VOID "
 							  "AS '$libdir/pg_upgrade_support' "
 							  "LANGUAGE C STRICT;"));
 	PQclear(executeQueryOrDie(conn,
 							  "CREATE OR REPLACE FUNCTION "
-		   "		binary_upgrade.set_next_toast_pg_class_oid(OID) "
+						   "binary_upgrade.set_next_toast_pg_class_oid(OID) "
 							  "RETURNS VOID "
 							  "AS '$libdir/pg_upgrade_support' "
 							  "LANGUAGE C STRICT;"));
 	PQclear(executeQueryOrDie(conn,
 							  "CREATE OR REPLACE FUNCTION "
-		 "		binary_upgrade.set_next_pg_enum_oid(OID) "
+							  "binary_upgrade.set_next_pg_enum_oid(OID) "
 							  "RETURNS VOID "
 							  "AS '$libdir/pg_upgrade_support' "
 							  "LANGUAGE C STRICT;"));
 	PQclear(executeQueryOrDie(conn,
 							  "CREATE OR REPLACE FUNCTION "
-		 "		binary_upgrade.set_next_pg_authid_oid(OID) "
+							  "binary_upgrade.set_next_pg_authid_oid(OID) "
 							  "RETURNS VOID "
 							  "AS '$libdir/pg_upgrade_support' "
 							  "LANGUAGE C STRICT;"));
+	PQclear(executeQueryOrDie(conn,
+							  "CREATE OR REPLACE FUNCTION "
+							  "binary_upgrade.create_empty_extension(text, text, bool, text, oid[], text[], text[]) "
+							  "RETURNS VOID "
+							  "AS '$libdir/pg_upgrade_support' "
+							  "LANGUAGE C;"));
 	PQfinish(conn);
 }
 
@@ -139,8 +147,8 @@ get_loadable_libraries(void)
 										"SELECT DISTINCT probin "
 										"FROM	pg_catalog.pg_proc "
 										"WHERE	prolang = 13 /* C */ AND "
-									 "		probin IS NOT NULL AND "
-										"		oid >= %u;",
+										"probin IS NOT NULL AND "
+										"oid >= %u;",
 										FirstNormalObjectId);
 		totaltups += PQntuples(ress[dbnum]);
 
@@ -231,9 +239,9 @@ check_loadable_libraries(void)
 		{
 			found = true;
 			if (script == NULL && (script = fopen(output_path, "w")) == NULL)
-				pg_log(PG_FATAL, "Could not create necessary file:  %s\n",
-					   output_path);
-			fprintf(script, "Failed to load library: %s\n%s\n",
+				pg_log(PG_FATAL, "Could not open file \"%s\": %s\n",
+					   output_path, getErrorText(errno));
+			fprintf(script, "Could not load library \"%s\"\n%s\n",
 					lib,
 					PQerrorMessage(conn));
 		}
@@ -249,12 +257,11 @@ check_loadable_libraries(void)
 		fclose(script);
 		pg_log(PG_REPORT, "fatal\n");
 		pg_log(PG_FATAL,
-		"| Your installation references loadable libraries that are missing\n"
-			 "| from the new installation.  You can add these libraries to\n"
-			   "| the new installation, or remove the functions using them\n"
-			"| from the old installation.  A list of the problem libraries\n"
-			   "| is in the file\n"
-			   "| \"%s\".\n\n", output_path);
+			   "Your installation references loadable libraries that are missing from the\n"
+			   "new installation.  You can add these libraries to the new installation,\n"
+			   "or remove the functions using them from the old installation.  A list of\n"
+			   "problem libraries is in the file:\n"
+			   "    %s\n\n", output_path);
 	}
 	else
 		check_ok();

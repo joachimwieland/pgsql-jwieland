@@ -25,6 +25,7 @@
 #include "libpq/pqformat.h"
 #include "miscadmin.h"
 #include "utils/builtins.h"
+#include "utils/datetime.h"
 #include "utils/nabstime.h"
 
 #define MIN_DAYNUM (-24856)		/* December 13, 1901 */
@@ -179,13 +180,13 @@ tm2abstime(struct pg_tm * tm, int tz)
 
 	/* validate, before going out of range on some members */
 	if (tm->tm_year < 1901 || tm->tm_year > 2038 ||
-		tm->tm_mon < 1 || tm->tm_mon > 12 ||
+		tm->tm_mon < 1 || tm->tm_mon > MONTHS_PER_YEAR ||
 		tm->tm_mday < 1 || tm->tm_mday > 31 ||
 		tm->tm_hour < 0 ||
-		tm->tm_hour > 24 ||		/* test for > 24:00:00 */
-		(tm->tm_hour == 24 && (tm->tm_min > 0 || tm->tm_sec > 0)) ||
-		tm->tm_min < 0 || tm->tm_min > 59 ||
-		tm->tm_sec < 0 || tm->tm_sec > 60)
+		tm->tm_hour > HOURS_PER_DAY ||	/* test for > 24:00:00 */
+	  (tm->tm_hour == HOURS_PER_DAY && (tm->tm_min > 0 || tm->tm_sec > 0)) ||
+		tm->tm_min < 0 || tm->tm_min > MINS_PER_HOUR - 1 ||
+		tm->tm_sec < 0 || tm->tm_sec > SECS_PER_MINUTE)
 		return INVALID_ABSTIME;
 
 	day = date2j(tm->tm_year, tm->tm_mon, tm->tm_mday) - UNIX_EPOCH_JDATE;
@@ -1163,7 +1164,7 @@ tintervalsame(PG_FUNCTION_ARGS)
  * 1. The interval length computations overflow at 2^31 seconds, causing
  * intervals longer than that to sort oddly compared to those shorter.
  * 2. infinity and minus infinity (NOEND_ABSTIME and NOSTART_ABSTIME) are
- * just ordinary integers.  Since this code doesn't handle them specially,
+ * just ordinary integers.	Since this code doesn't handle them specially,
  * it's possible for [a b] to be considered longer than [c infinity] for
  * finite abstimes a, b, c.  In combination with the previous point, the
  * interval [-infinity infinity] is treated as being shorter than many finite

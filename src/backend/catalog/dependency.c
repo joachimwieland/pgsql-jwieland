@@ -14,29 +14,28 @@
  */
 #include "postgres.h"
 
-#include "access/genam.h"
-#include "access/heapam.h"
 #include "access/sysattr.h"
 #include "access/xact.h"
 #include "catalog/dependency.h"
 #include "catalog/heap.h"
 #include "catalog/index.h"
-#include "catalog/indexing.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_amop.h"
 #include "catalog/pg_amproc.h"
 #include "catalog/pg_attrdef.h"
 #include "catalog/pg_authid.h"
 #include "catalog/pg_cast.h"
+#include "catalog/pg_collation.h"
+#include "catalog/pg_collation_fn.h"
 #include "catalog/pg_constraint.h"
 #include "catalog/pg_conversion.h"
 #include "catalog/pg_conversion_fn.h"
 #include "catalog/pg_database.h"
 #include "catalog/pg_default_acl.h"
 #include "catalog/pg_depend.h"
+#include "catalog/pg_extension.h"
 #include "catalog/pg_foreign_data_wrapper.h"
 #include "catalog/pg_foreign_server.h"
-#include "catalog/pg_foreign_table.h"
 #include "catalog/pg_language.h"
 #include "catalog/pg_largeobject.h"
 #include "catalog/pg_namespace.h"
@@ -56,6 +55,7 @@
 #include "commands/comment.h"
 #include "commands/dbcommands.h"
 #include "commands/defrem.h"
+#include "commands/extension.h"
 #include "commands/proclang.h"
 #include "commands/schemacmds.h"
 #include "commands/seclabel.h"
@@ -93,6 +93,8 @@ typedef struct
 #define DEPFLAG_NORMAL		0x0002		/* reached via normal dependency */
 #define DEPFLAG_AUTO		0x0004		/* reached via auto dependency */
 #define DEPFLAG_INTERNAL	0x0008		/* reached via internal dependency */
+#define DEPFLAG_EXTENSION	0x0010		/* reached via extension dependency */
+#define DEPFLAG_REVERSE		0x0020		/* reverse internal/extension link */
 
 
 /* expansible list of ObjectAddresses */
@@ -130,6 +132,7 @@ static const Oid object_classes[MAX_OCLASS] = {
 	ProcedureRelationId,		/* OCLASS_PROC */
 	TypeRelationId,				/* OCLASS_TYPE */
 	CastRelationId,				/* OCLASS_CAST */
+	CollationRelationId,		/* OCLASS_COLLATION */
 	ConstraintRelationId,		/* OCLASS_CONSTRAINT */
 	ConversionRelationId,		/* OCLASS_CONVERSION */
 	AttrDefaultRelationId,		/* OCLASS_DEFAULT */
@@ -153,8 +156,8 @@ static const Oid object_classes[MAX_OCLASS] = {
 	ForeignDataWrapperRelationId,		/* OCLASS_FDW */
 	ForeignServerRelationId,	/* OCLASS_FOREIGN_SERVER */
 	UserMappingRelationId,		/* OCLASS_USER_MAPPING */
-	ForeignTableRelationId,		/* OCLASS_FOREIGN_TABLE */
-	DefaultAclRelationId		/* OCLASS_DEFACL */
+	DefaultAclRelationId,		/* OCLASS_DEFACL */
+	ExtensionRelationId			/* OCLASS_EXTENSION */
 };
 
 
@@ -184,6 +187,9 @@ static void add_exact_object_address_extra(const ObjectAddress *object,
 static bool object_address_present_add_flags(const ObjectAddress *object,
 								 int flags,
 								 ObjectAddresses *addrs);
+static bool stack_address_present_add_flags(const ObjectAddress *object,
+								int flags,
+								ObjectAddressStack *stack);
 static void getRelationDescription(StringInfo buffer, Oid relid);
 static void getOpFamilyDescription(StringInfo buffer, Oid opfid);
 
@@ -453,7 +459,6 @@ findDependentObjects(const ObjectAddress *object,
 	ObjectAddress otherObject;
 	ObjectAddressStack mystack;
 	ObjectAddressExtra extra;
-	ObjectAddressStack *stackptr;
 
 	/*
 	 * If the target object is already being visited in an outer recursion
@@ -471,27 +476,8 @@ findDependentObjects(const ObjectAddress *object,
 	 * auto dependency, too, if we had to.	However there are no known cases
 	 * where that would be necessary.
 	 */
-	for (stackptr = stack; stackptr; stackptr = stackptr->next)
-	{
-		if (object->classId == stackptr->object->classId &&
-			object->objectId == stackptr->object->objectId)
-		{
-			if (object->objectSubId == stackptr->object->objectSubId)
-			{
-				stackptr->flags |= flags;
-				return;
-			}
-
-			/*
-			 * Could visit column with whole table already on stack; this is
-			 * the same case noted in object_address_present_add_flags().
-			 * (It's not clear this can really happen, but we might as well
-			 * check.)
-			 */
-			if (stackptr->object->objectSubId == 0)
-				return;
-		}
-	}
+	if (stack_address_present_add_flags(object, flags, stack))
+		return;
 
 	/*
 	 * It's also possible that the target object has already been completely
@@ -507,12 +493,13 @@ findDependentObjects(const ObjectAddress *object,
 
 	/*
 	 * The target object might be internally dependent on some other object
-	 * (its "owner").  If so, and if we aren't recursing from the owning
-	 * object, we have to transform this deletion request into a deletion
-	 * request of the owning object.  (We'll eventually recurse back to this
-	 * object, but the owning object has to be visited first so it will be
-	 * deleted after.)	The way to find out about this is to scan the
-	 * pg_depend entries that show what this object depends on.
+	 * (its "owner"), and/or be a member of an extension (also considered its
+	 * owner).  If so, and if we aren't recursing from the owning object, we
+	 * have to transform this deletion request into a deletion request of the
+	 * owning object.  (We'll eventually recurse back to this object, but the
+	 * owning object has to be visited first so it will be deleted after.)
+	 * The way to find out about this is to scan the pg_depend entries that
+	 * show what this object depends on.
 	 */
 	ScanKeyInit(&key[0],
 				Anum_pg_depend_classid,
@@ -551,15 +538,17 @@ findDependentObjects(const ObjectAddress *object,
 				/* no problem */
 				break;
 			case DEPENDENCY_INTERNAL:
+			case DEPENDENCY_EXTENSION:
 
 				/*
 				 * This object is part of the internal implementation of
-				 * another object.	We have three cases:
+				 * another object, or is part of the extension that is the
+				 * other object.  We have three cases:
 				 *
 				 * 1. At the outermost recursion level, disallow the DROP. (We
 				 * just ereport here, rather than proceeding, since no other
 				 * dependencies are likely to be interesting.)	However, if
-				 * the other object is listed in pendingObjects, just release
+				 * the owning object is listed in pendingObjects, just release
 				 * the caller's lock and return; we'll eventually complete the
 				 * DROP when we reach that entry in the pending list.
 				 */
@@ -587,31 +576,31 @@ findDependentObjects(const ObjectAddress *object,
 
 				/*
 				 * 2. When recursing from the other end of this dependency,
-				 * it's okay to continue with the deletion. This holds when
+				 * it's okay to continue with the deletion.  This holds when
 				 * recursing from a whole object that includes the nominal
-				 * other end as a component, too.
+				 * other end as a component, too.  Since there can be more
+				 * than one "owning" object, we have to allow matches that
+				 * are more than one level down in the stack.
 				 */
-				if (stack->object->classId == otherObject.classId &&
-					stack->object->objectId == otherObject.objectId &&
-					(stack->object->objectSubId == otherObject.objectSubId ||
-					 stack->object->objectSubId == 0))
+				if (stack_address_present_add_flags(&otherObject, 0, stack))
 					break;
 
 				/*
-				 * 3. When recursing from anyplace else, transform this
-				 * deletion request into a delete of the other object.
+				 * 3. Not all the owning objects have been visited, so
+				 * transform this deletion request into a delete of this
+				 * owning object.
 				 *
 				 * First, release caller's lock on this object and get
-				 * deletion lock on the other object.  (We must release
+				 * deletion lock on the owning object.  (We must release
 				 * caller's lock to avoid deadlock against a concurrent
-				 * deletion of the other object.)
+				 * deletion of the owning object.)
 				 */
 				ReleaseDeletionLock(object);
 				AcquireDeletionLock(&otherObject);
 
 				/*
-				 * The other object might have been deleted while we waited to
-				 * lock it; if so, neither it nor the current object are
+				 * The owning object might have been deleted while we waited
+				 * to lock it; if so, neither it nor the current object are
 				 * interesting anymore.  We test this by checking the
 				 * pg_depend entry (see notes below).
 				 */
@@ -623,13 +612,18 @@ findDependentObjects(const ObjectAddress *object,
 				}
 
 				/*
-				 * Okay, recurse to the other object instead of proceeding. We
-				 * treat this exactly as if the original reference had linked
-				 * to that object instead of this one; hence, pass through the
-				 * same flags and stack.
+				 * Okay, recurse to the owning object instead of proceeding.
+				 *
+				 * We do not need to stack the current object; we want the
+				 * traversal order to be as if the original reference had
+				 * linked to the owning object instead of this one.
+				 *
+				 * The dependency type is a "reverse" dependency: we need to
+				 * delete the owning object if this one is to be deleted, but
+				 * this linkage is never a reason for an automatic deletion.
 				 */
 				findDependentObjects(&otherObject,
-									 flags,
+									 DEPFLAG_REVERSE,
 									 stack,
 									 targetObjects,
 									 pendingObjects,
@@ -725,6 +719,9 @@ findDependentObjects(const ObjectAddress *object,
 				break;
 			case DEPENDENCY_INTERNAL:
 				subflags = DEPFLAG_INTERNAL;
+				break;
+			case DEPENDENCY_EXTENSION:
+				subflags = DEPFLAG_EXTENSION;
 				break;
 			case DEPENDENCY_PIN:
 
@@ -836,10 +833,12 @@ reportDependentObjects(const ObjectAddresses *targetObjects,
 
 		/*
 		 * If, at any stage of the recursive search, we reached the object via
-		 * an AUTO or INTERNAL dependency, then it's okay to delete it even in
-		 * RESTRICT mode.
+		 * an AUTO, INTERNAL, or EXTENSION dependency, then it's okay to
+		 * delete it even in RESTRICT mode.
 		 */
-		if (extra->flags & (DEPFLAG_AUTO | DEPFLAG_INTERNAL))
+		if (extra->flags & (DEPFLAG_AUTO |
+							DEPFLAG_INTERNAL |
+							DEPFLAG_EXTENSION))
 		{
 			/*
 			 * auto-cascades are reported at DEBUG2, not msglevel.	We don't
@@ -1008,8 +1007,8 @@ deleteOneObject(const ObjectAddress *object, Relation depRel)
 
 	/*
 	 * Delete any comments or security labels associated with this object.
-	 * (This is a convenient place to do these things, rather than having every
-	 * object type know to do it.)
+	 * (This is a convenient place to do these things, rather than having
+	 * every object type know to do it.)
 	 */
 	DeleteComments(object->objectId, object->classId, object->objectSubId);
 	DeleteSecurityLabel(object);
@@ -1063,6 +1062,10 @@ doDeletion(const ObjectAddress *object)
 
 		case OCLASS_CAST:
 			DropCastById(object->objectId);
+			break;
+
+		case OCLASS_COLLATION:
+			RemoveCollationById(object->objectId);
 			break;
 
 		case OCLASS_CONSTRAINT:
@@ -1154,6 +1157,10 @@ doDeletion(const ObjectAddress *object)
 			RemoveDefaultACLById(object->objectId);
 			break;
 
+		case OCLASS_EXTENSION:
+			RemoveExtensionById(object->objectId);
+			break;
+
 		default:
 			elog(ERROR, "unrecognized object class: %u",
 				 object->classId);
@@ -1242,7 +1249,7 @@ recordDependencyOnExpr(const ObjectAddress *depender,
  * whereas 'behavior' is used for everything else.
  *
  * NOTE: the caller should ensure that a whole-table dependency on the
- * specified relation is created separately, if one is needed.  In particular,
+ * specified relation is created separately, if one is needed.	In particular,
  * a whole-row Var "relation.*" will not cause this routine to emit any
  * dependency item.  This is appropriate behavior for subexpressions of an
  * ordinary query, so other cases need to cope as necessary.
@@ -1263,6 +1270,7 @@ recordDependencyOnSingleRelExpr(const ObjectAddress *depender,
 	rte.type = T_RangeTblEntry;
 	rte.rtekind = RTE_RELATION;
 	rte.relid = relId;
+	rte.relkind = RELKIND_RELATION;		/* no need for exactness here */
 
 	context.rtables = list_make1(list_make1(&rte));
 
@@ -1335,6 +1343,9 @@ recordDependencyOnSingleRelExpr(const ObjectAddress *depender,
  * on the datatype, and OpExpr nodes depend on the operator which depends on
  * the datatype.  However we do need a type dependency if there is no such
  * indirect dependency, as for example in Const and CoerceToDomain nodes.
+ *
+ * Similarly, we don't need to create dependencies on collations except where
+ * the collation is being freshly introduced to the expression.
  */
 static bool
 find_expr_references_walker(Node *node,
@@ -1358,7 +1369,7 @@ find_expr_references_walker(Node *node,
 
 		/*
 		 * A whole-row Var references no specific columns, so adds no new
-		 * dependency.  (We assume that there is a whole-table dependency
+		 * dependency.	(We assume that there is a whole-table dependency
 		 * arising from each underlying rangetable entry.  While we could
 		 * record such a dependency when finding a whole-row Var that
 		 * references a relation directly, it's quite unclear how to extend
@@ -1403,6 +1414,17 @@ find_expr_references_walker(Node *node,
 		/* A constant must depend on the constant's datatype */
 		add_object_address(OCLASS_TYPE, con->consttype, 0,
 						   context->addrs);
+
+		/*
+		 * We must also depend on the constant's collation: it could be
+		 * different from the datatype's, if a CollateExpr was const-folded to
+		 * a simple constant.  However we can save work in the most common
+		 * case where the collation is "default", since we know that's pinned.
+		 */
+		if (OidIsValid(con->constcollid) &&
+			con->constcollid != DEFAULT_COLLATION_OID)
+			add_object_address(OCLASS_COLLATION, con->constcollid, 0,
+							   context->addrs);
 
 		/*
 		 * If it's a regclass or similar literal referring to an existing
@@ -1469,6 +1491,11 @@ find_expr_references_walker(Node *node,
 		/* A parameter must depend on the parameter's datatype */
 		add_object_address(OCLASS_TYPE, param->paramtype, 0,
 						   context->addrs);
+		/* and its collation, just as for Consts */
+		if (OidIsValid(param->paramcollid) &&
+			param->paramcollid != DEFAULT_COLLATION_OID)
+			add_object_address(OCLASS_COLLATION, param->paramcollid, 0,
+							   context->addrs);
 	}
 	else if (IsA(node, FuncExpr))
 	{
@@ -1494,19 +1521,19 @@ find_expr_references_walker(Node *node,
 						   context->addrs);
 		/* fall through to examine arguments */
 	}
-	else if (IsA(node, ScalarArrayOpExpr))
-	{
-		ScalarArrayOpExpr *opexpr = (ScalarArrayOpExpr *) node;
-
-		add_object_address(OCLASS_OPERATOR, opexpr->opno, 0,
-						   context->addrs);
-		/* fall through to examine arguments */
-	}
 	else if (IsA(node, NullIfExpr))
 	{
 		NullIfExpr *nullifexpr = (NullIfExpr *) node;
 
 		add_object_address(OCLASS_OPERATOR, nullifexpr->opno, 0,
+						   context->addrs);
+		/* fall through to examine arguments */
+	}
+	else if (IsA(node, ScalarArrayOpExpr))
+	{
+		ScalarArrayOpExpr *opexpr = (ScalarArrayOpExpr *) node;
+
+		add_object_address(OCLASS_OPERATOR, opexpr->opno, 0,
 						   context->addrs);
 		/* fall through to examine arguments */
 	}
@@ -1538,6 +1565,11 @@ find_expr_references_walker(Node *node,
 		/* since there is no function dependency, need to depend on type */
 		add_object_address(OCLASS_TYPE, relab->resulttype, 0,
 						   context->addrs);
+		/* the collation might not be referenced anywhere else, either */
+		if (OidIsValid(relab->resultcollid) &&
+			relab->resultcollid != DEFAULT_COLLATION_OID)
+			add_object_address(OCLASS_COLLATION, relab->resultcollid, 0,
+							   context->addrs);
 	}
 	else if (IsA(node, CoerceViaIO))
 	{
@@ -1564,6 +1596,13 @@ find_expr_references_walker(Node *node,
 
 		/* since there is no function dependency, need to depend on type */
 		add_object_address(OCLASS_TYPE, cvt->resulttype, 0,
+						   context->addrs);
+	}
+	else if (IsA(node, CollateExpr))
+	{
+		CollateExpr *coll = (CollateExpr *) node;
+
+		add_object_address(OCLASS_COLLATION, coll->collOid, 0,
 						   context->addrs);
 	}
 	else if (IsA(node, RowExpr))
@@ -1617,10 +1656,16 @@ find_expr_references_walker(Node *node,
 
 		/*
 		 * Add whole-relation refs for each plain relation mentioned in the
-		 * subquery's rtable, as well as datatype refs for any datatypes used
-		 * as a RECORD function's output.  (Note: query_tree_walker takes care
-		 * of recursing into RTE_FUNCTION RTEs, subqueries, etc, so no need to
-		 * do that here.  But keep it from looking at join alias lists.)
+		 * subquery's rtable, as well as refs for any datatypes and collations
+		 * used in a RECORD function's output.
+		 *
+		 * Note: query_tree_walker takes care of recursing into RTE_FUNCTION
+		 * RTEs, subqueries, etc, so no need to do that here.  But keep it
+		 * from looking at join alias lists.
+		 *
+		 * Note: we don't need to worry about collations mentioned in
+		 * RTE_VALUES or RTE_CTE RTEs, because those must just duplicate
+		 * collations referenced in other parts of the Query.
 		 */
 		foreach(lc, query->rtable)
 		{
@@ -1638,6 +1683,15 @@ find_expr_references_walker(Node *node,
 					{
 						add_object_address(OCLASS_TYPE, lfirst_oid(ct), 0,
 										   context->addrs);
+					}
+					foreach(ct, rte->funccolcollations)
+					{
+						Oid			collid = lfirst_oid(ct);
+
+						if (OidIsValid(collid) &&
+							collid != DEFAULT_COLLATION_OID)
+							add_object_address(OCLASS_COLLATION, collid, 0,
+											   context->addrs);
 					}
 					break;
 				default:
@@ -1949,6 +2003,43 @@ object_address_present_add_flags(const ObjectAddress *object,
 }
 
 /*
+ * Similar to above, except we search an ObjectAddressStack.
+ */
+static bool
+stack_address_present_add_flags(const ObjectAddress *object,
+								int flags,
+								ObjectAddressStack *stack)
+{
+	ObjectAddressStack *stackptr;
+
+	for (stackptr = stack; stackptr; stackptr = stackptr->next)
+	{
+		const ObjectAddress *thisobj = stackptr->object;
+
+		if (object->classId == thisobj->classId &&
+			object->objectId == thisobj->objectId)
+		{
+			if (object->objectSubId == thisobj->objectSubId)
+			{
+				stackptr->flags |= flags;
+				return true;
+			}
+
+			/*
+			 * Could visit column with whole table already on stack; this is
+			 * the same case noted in object_address_present_add_flags(), and
+			 * as in that case, we don't propagate flags for the component to
+			 * the whole object.
+			 */
+			if (thisobj->objectSubId == 0)
+				return true;
+		}
+	}
+
+	return false;
+}
+
+/*
  * Record multiple dependencies from an ObjectAddresses array, after first
  * removing any duplicates.
  */
@@ -2004,6 +2095,9 @@ getObjectClass(const ObjectAddress *object)
 
 		case CastRelationId:
 			return OCLASS_CAST;
+
+		case CollationRelationId:
+			return OCLASS_COLLATION;
 
 		case ConstraintRelationId:
 			return OCLASS_CONSTRAINT;
@@ -2074,12 +2168,11 @@ getObjectClass(const ObjectAddress *object)
 		case UserMappingRelationId:
 			return OCLASS_USER_MAPPING;
 
-		case ForeignTableRelationId:
-			Assert(object->objectSubId == 0);
-			return OCLASS_FOREIGN_TABLE;
-
 		case DefaultAclRelationId:
 			return OCLASS_DEFACL;
+
+		case ExtensionRelationId:
+			return OCLASS_EXTENSION;
 	}
 
 	/* shouldn't get here */
@@ -2151,6 +2244,23 @@ getObjectDescription(const ObjectAddress *object)
 
 				systable_endscan(rcscan);
 				heap_close(castDesc, AccessShareLock);
+				break;
+			}
+
+		case OCLASS_COLLATION:
+			{
+				HeapTuple	collTup;
+				Form_pg_collation coll;
+
+				collTup = SearchSysCache1(COLLOID,
+										  ObjectIdGetDatum(object->objectId));
+				if (!HeapTupleIsValid(collTup))
+					elog(ERROR, "cache lookup failed for collation %u",
+						 object->objectId);
+				coll = (Form_pg_collation) GETSTRUCT(collTup);
+				appendStringInfo(&buffer, _("collation %s"),
+								 NameStr(coll->collname));
+				ReleaseSysCache(collTup);
 				break;
 			}
 
@@ -2337,12 +2447,11 @@ getObjectDescription(const ObjectAddress *object)
 				initStringInfo(&opfam);
 				getOpFamilyDescription(&opfam, amopForm->amopfamily);
 
-				/*
-				 * translator: %d is the operator strategy (a number), the
-				 * first two %s's are data type names, the third %s is the
-				 * description of the operator family, and the last %s is the
-				 * textual form of the operator with arguments.
-				 */
+				/*------
+				   translator: %d is the operator strategy (a number), the
+				   first two %s's are data type names, the third %s is the
+				   description of the operator family, and the last %s is the
+				   textual form of the operator with arguments.  */
 				appendStringInfo(&buffer, _("operator %d (%s, %s) of %s: %s"),
 								 amopForm->amopstrategy,
 								 format_type_be(amopForm->amoplefttype),
@@ -2388,12 +2497,11 @@ getObjectDescription(const ObjectAddress *object)
 				initStringInfo(&opfam);
 				getOpFamilyDescription(&opfam, amprocForm->amprocfamily);
 
-				/*
-				 * translator: %d is the function number, the first two %s's
-				 * are data type names, the third %s is the description of the
-				 * operator family, and the last %s is the textual form of the
-				 * function with arguments.
-				 */
+				/*------
+				   translator: %d is the function number, the first two %s's
+				   are data type names, the third %s is the description of the
+				   operator family, and the last %s is the textual form of the
+				   function with arguments.  */
 				appendStringInfo(&buffer, _("function %d (%s, %s) of %s: %s"),
 								 amprocForm->amprocnum,
 								 format_type_be(amprocForm->amproclefttype),
@@ -2687,6 +2795,18 @@ getObjectDescription(const ObjectAddress *object)
 				break;
 			}
 
+		case OCLASS_EXTENSION:
+			{
+				char	   *extname;
+
+				extname = get_extension_name(object->objectId);
+				if (!extname)
+					elog(ERROR, "cache lookup failed for extension %u",
+						 object->objectId);
+				appendStringInfo(&buffer, _("extension %s"), extname);
+				break;
+			}
+
 		default:
 			appendStringInfo(&buffer, "unrecognized object %u %u %d",
 							 object->classId,
@@ -2704,7 +2824,7 @@ getObjectDescription(const ObjectAddress *object)
 char *
 getObjectDescriptionOids(Oid classid, Oid objid)
 {
-	ObjectAddress	address;
+	ObjectAddress address;
 
 	address.classId = classid;
 	address.objectId = objid;

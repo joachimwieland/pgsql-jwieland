@@ -163,6 +163,22 @@
 ;; Add more here if needed...
 
 
+;; Replace a sequence of whitespace in a string by a single space
+(define (normalize-whitespace str #!optional (whitespace '(#\space #\U-000D)))
+  (let loop ((characters (string->list str))
+             (result '())
+             (prev-was-space #f))
+    (if (null? characters)
+        (list->string (reverse result))
+        (let ((c (car characters))
+              (rest (cdr characters)))
+          (if (member c whitespace)
+              (if prev-was-space
+                  (loop rest result #t)
+                  (loop rest (cons #\space result) #t))
+              (loop rest (cons c result) #f))))))
+
+
 <!-- HTML output customization ..................................... -->
 
 <![ %output-html; [
@@ -282,8 +298,6 @@
 				      (nav-banner elemnode)))))
 	 (r2? (or (not (node-list-empty? prev))
 		  (not (node-list-empty? next))
-		  (not (node-list-empty? prevsib))
-		  (not (node-list-empty? nextsib))
 		  (nav-context? elemnode)))
 	 (r2-sosofo (make element gi: "TR"
 			  (make element gi: "TD"
@@ -307,15 +321,9 @@
 					     (list "WIDTH" "10%")
 					     (list "ALIGN" "left")
 					     (list "VALIGN" "top"))
-				(if (node-list-empty? prevsib)
-				    (make entity-ref name: "nbsp")
-				    (make element gi: "A"
-					  attributes: (list
-						       (list "TITLE" (element-title-string prevsib))
-						       (list "HREF"
-							     (href-to
-							      prevsib)))
-					  (gentext-nav-prev-sibling prevsib))))
+				(if (nav-up? elemnode)
+				    (nav-up elemnode)
+				    (nav-home-link elemnode)))
 			  (make element gi: "TD"
 				attributes: (list
 					     (list "WIDTH" "60%")
@@ -324,21 +332,7 @@
 				(nav-context elemnode))
 			  (make element gi: "TD"
 				attributes: (list
-					     (list "WIDTH" "10%")
-					     (list "ALIGN" "right")
-					     (list "VALIGN" "top"))
-				(if (node-list-empty? nextsib)
-				    (make entity-ref name: "nbsp")
-				    (make element gi: "A"
-					  attributes: (list
-						       (list "TITLE" (element-title-string nextsib))
-						       (list "HREF"
-							     (href-to
-							      nextsib)))
-					  (gentext-nav-next-sibling nextsib))))
-			  (make element gi: "TD"
-				attributes: (list
-					     (list "WIDTH" "10%")
+					     (list "WIDTH" "20%")
 					     (list "ALIGN" "right")
 					     (list "VALIGN" "top"))
 				(if (node-list-empty? next)
@@ -412,6 +406,26 @@
       (if (not (last-sibling?))
 	  (literal " | ")
 	  (literal "")))))
+
+
+;; Changed to strip and normalize index term content (overrides
+;; dbindex.dsl)
+(define (htmlindexterm)
+  (let* ((attr    (gi (current-node)))
+         (content (data (current-node)))
+         (string  (strip (normalize-whitespace content))) ;; changed
+         (sortas  (attribute-string (normalize "sortas"))))
+    (make sequence
+      (make formatting-instruction data: attr)
+      (if sortas
+          (make sequence
+            (make formatting-instruction data: "[")
+            (make formatting-instruction data: sortas)
+            (make formatting-instruction data: "]"))
+          (empty-sosofo))
+      (make formatting-instruction data: " ")
+      (make formatting-instruction data: string)
+      (htmlnewline))))
 
 
 ]]> <!-- %output-html -->

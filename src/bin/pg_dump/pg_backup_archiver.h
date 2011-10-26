@@ -152,28 +152,6 @@ typedef size_t (*CustomOutPtr) (struct _archiveHandle * AH, const void *buf, siz
 
 typedef enum
 {
-	SQL_SCAN = 0,				/* normal */
-	SQL_IN_SQL_COMMENT,			/* -- comment */
-	SQL_IN_EXT_COMMENT,			/* slash-star comment */
-	SQL_IN_SINGLE_QUOTE,		/* '...' literal */
-	SQL_IN_E_QUOTE,				/* E'...' literal */
-	SQL_IN_DOUBLE_QUOTE,		/* "..." identifier */
-	SQL_IN_DOLLAR_TAG,			/* possible dollar-quote starting tag */
-	SQL_IN_DOLLAR_QUOTE			/* body of dollar quote */
-} sqlparseState;
-
-typedef struct
-{
-	sqlparseState state;		/* see above */
-	char		lastChar;		/* preceding char, or '\0' initially */
-	bool		backSlash;		/* next char is backslash quoted? */
-	int			braceDepth;		/* parenthesis nesting depth */
-	PQExpBuffer tagBuf;			/* dollar quote tag (NULL if not created) */
-	int			minTagEndPos;	/* first possible end position of $-quote */
-} sqlparseInfo;
-
-typedef enum
-{
 	STAGE_NONE = 0,
 	STAGE_INITIALIZING,
 	STAGE_PROCESSING,
@@ -206,9 +184,6 @@ typedef struct _archiveHandle
 	size_t		offSize;		/* Size of a file offset in the archive -
 								 * Added V1.7 */
 	ArchiveFormat format;		/* Archive format */
-
-	sqlparseInfo sqlparse;
-	PQExpBuffer sqlBuf;
 
 	time_t		createDate;		/* Date archive created */
 
@@ -269,8 +244,6 @@ typedef struct _archiveHandle
 								 * required */
 	bool		writingCopyData;	/* True when we are sending COPY data */
 	bool		pgCopyIn;		/* Currently in libpq 'COPY IN' mode. */
-	PQExpBuffer pgCopyBuf;		/* Left-over data from incomplete lines in
-								 * COPY IN */
 
 	int			loFd;			/* BLOB fd */
 	int			writingBlob;	/* Flag */
@@ -286,11 +259,10 @@ typedef struct _archiveHandle
 	DumpId		maxDumpId;		/* largest DumpId among all TOC entries */
 
 	struct _tocEntry *currToc;	/* Used when dumping data */
-	int			compression;	/* Compression requested on open
-								 * Possible values for compression:
-								 *  -1   Z_DEFAULT_COMPRESSION
-								 *   0	COMPRESSION_NONE
-								 *  1-9	levels for gzip compression */
+	int			compression;	/* Compression requested on open Possible
+								 * values for compression: -1
+								 * Z_DEFAULT_COMPRESSION 0	COMPRESSION_NONE
+								 * 1-9 levels for gzip compression */
 	ArchiveMode mode;			/* File mode - r or w */
 	void	   *formatData;		/* Header data specific to file format */
 
@@ -422,9 +394,9 @@ extern PGconn **g_conn_child;
 /* Used everywhere */
 extern const char *progname;
 
-extern void die_horribly(ArchiveHandle *AH, const char *modulename, const char *fmt,...) __attribute__((format(printf, 3, 4)));
-extern void warn_or_die_horribly(ArchiveHandle *AH, const char *modulename, const char *fmt,...) __attribute__((format(printf, 3, 4)));
-extern void write_msg(const char *modulename, const char *fmt,...) __attribute__((format(printf, 2, 3)));
+extern void die_horribly(ArchiveHandle *AH, const char *modulename, const char *fmt,...) __attribute__((format(PG_PRINTF_ATTRIBUTE, 3, 4)));
+extern void warn_or_die_horribly(ArchiveHandle *AH, const char *modulename, const char *fmt,...) __attribute__((format(PG_PRINTF_ATTRIBUTE, 3, 4)));
+extern void write_msg(const char *modulename, const char *fmt,...) __attribute__((format(PG_PRINTF_ATTRIBUTE, 2, 3)));
 
 extern void WriteTOC(ArchiveHandle *AH);
 extern void ReadTOC(ArchiveHandle *AH);
@@ -478,9 +450,9 @@ extern int	ReconnectToServer(ArchiveHandle *AH, const char *dbname, const char *
 extern void DropBlobIfExists(ArchiveHandle *AH, Oid oid);
 
 int			ahwrite(const void *ptr, size_t size, size_t nmemb, ArchiveHandle *AH);
-int			ahprintf(ArchiveHandle *AH, const char *fmt,...) __attribute__((format(printf, 2, 3)));
+int			ahprintf(ArchiveHandle *AH, const char *fmt,...) __attribute__((format(PG_PRINTF_ATTRIBUTE, 2, 3)));
 
-void		ahlog(ArchiveHandle *AH, int level, const char *fmt,...) __attribute__((format(printf, 3, 4)));
+void		ahlog(ArchiveHandle *AH, int level, const char *fmt,...) __attribute__((format(PG_PRINTF_ATTRIBUTE, 3, 4)));
 
 #ifdef USE_ASSERT_CHECKING
 #define Assert(condition) \

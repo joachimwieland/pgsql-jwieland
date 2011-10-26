@@ -432,7 +432,7 @@ buildSubPlanHash(SubPlanState *node, ExprContext *econtext)
 	int			ncols = list_length(subplan->paramIds);
 	ExprContext *innerecontext = node->innerecontext;
 	MemoryContext oldcontext;
-	int			nbuckets;
+	long		nbuckets;
 	TupleTableSlot *slot;
 
 	Assert(subplan->subLinkType == ANY_SUBLINK);
@@ -458,7 +458,7 @@ buildSubPlanHash(SubPlanState *node, ExprContext *econtext)
 	node->havehashrows = false;
 	node->havenullrows = false;
 
-	nbuckets = (int) ceil(planstate->plan->plan_rows);
+	nbuckets = (long) Min(planstate->plan->plan_rows, (double) LONG_MAX);
 	if (nbuckets < 1)
 		nbuckets = 1;
 
@@ -831,7 +831,7 @@ ExecInitSubPlan(SubPlan *subplan, PlanState *parent)
 
 			/* Lookup the equality function (potentially cross-type) */
 			fmgr_info(opexpr->opfuncid, &sstate->cur_eq_funcs[i - 1]);
-			sstate->cur_eq_funcs[i - 1].fn_expr = (Node *) opexpr;
+			fmgr_info_set_expr((Node *) opexpr, &sstate->cur_eq_funcs[i - 1]);
 
 			/* Look up the equality function for the RHS type */
 			if (!get_compatible_hash_operators(opexpr->opno,

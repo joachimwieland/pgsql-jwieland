@@ -127,7 +127,12 @@ MemoryContextReset(MemoryContext context)
 	if (context->firstchild != NULL)
 		MemoryContextResetChildren(context);
 
-	(*context->methods->reset) (context);
+	/* Nothing to do if no pallocs since startup or last reset */
+	if (!context->isReset)
+	{
+		(*context->methods->reset) (context);
+		context->isReset = true;
+	}
 }
 
 /*
@@ -173,26 +178,8 @@ MemoryContextDelete(MemoryContext context)
 	 * there's an error we won't have deleted/busted contexts still attached
 	 * to the context tree.  Better a leak than a crash.
 	 */
-	if (context->parent)
-	{
-		MemoryContext parent = context->parent;
+	MemoryContextSetParent(context, NULL);
 
-		if (context == parent->firstchild)
-			parent->firstchild = context->nextchild;
-		else
-		{
-			MemoryContext child;
-
-			for (child = parent->firstchild; child; child = child->nextchild)
-			{
-				if (context == child->nextchild)
-				{
-					child->nextchild = context->nextchild;
-					break;
-				}
-			}
-		}
-	}
 	(*context->methods->delete_context) (context);
 	pfree(context);
 }
@@ -229,7 +216,68 @@ MemoryContextResetAndDeleteChildren(MemoryContext context)
 	AssertArg(MemoryContextIsValid(context));
 
 	MemoryContextDeleteChildren(context);
-	(*context->methods->reset) (context);
+	MemoryContextReset(context);
+}
+
+/*
+ * MemoryContextSetParent
+ *		Change a context to belong to a new parent (or no parent).
+ *
+ * We provide this as an API function because it is sometimes useful to
+ * change a context's lifespan after creation.  For example, a context
+ * might be created underneath a transient context, filled with data,
+ * and then reparented underneath CacheMemoryContext to make it long-lived.
+ * In this way no special effort is needed to get rid of the context in case
+ * a failure occurs before its contents are completely set up.
+ *
+ * Callers often assume that this function cannot fail, so don't put any
+ * elog(ERROR) calls in it.
+ *
+ * A possible caller error is to reparent a context under itself, creating
+ * a loop in the context graph.  We assert here that context != new_parent,
+ * but checking for multi-level loops seems more trouble than it's worth.
+ */
+void
+MemoryContextSetParent(MemoryContext context, MemoryContext new_parent)
+{
+	AssertArg(MemoryContextIsValid(context));
+	AssertArg(context != new_parent);
+
+	/* Delink from existing parent, if any */
+	if (context->parent)
+	{
+		MemoryContext parent = context->parent;
+
+		if (context == parent->firstchild)
+			parent->firstchild = context->nextchild;
+		else
+		{
+			MemoryContext child;
+
+			for (child = parent->firstchild; child; child = child->nextchild)
+			{
+				if (context == child->nextchild)
+				{
+					child->nextchild = context->nextchild;
+					break;
+				}
+			}
+		}
+	}
+
+	/* And relink */
+	if (new_parent)
+	{
+		AssertArg(MemoryContextIsValid(new_parent));
+		context->parent = new_parent;
+		context->nextchild = new_parent->firstchild;
+		new_parent->firstchild = context;
+	}
+	else
+	{
+		context->parent = NULL;
+		context->nextchild = NULL;
+	}
 }
 
 /*
@@ -292,6 +340,18 @@ GetMemoryChunkContext(void *pointer)
 	AssertArg(MemoryContextIsValid(header->context));
 
 	return header->context;
+}
+
+/*
+ * MemoryContextGetParent
+ *		Get the parent context (if any) of the specified context
+ */
+MemoryContext
+MemoryContextGetParent(MemoryContext context)
+{
+	AssertArg(MemoryContextIsValid(context));
+
+	return context->parent;
 }
 
 /*
@@ -476,6 +536,7 @@ MemoryContextCreate(NodeTag tag, Size size,
 	node->parent = NULL;		/* for the moment */
 	node->firstchild = NULL;
 	node->nextchild = NULL;
+	node->isReset = true;
 	node->name = ((char *) node) + size;
 	strcpy(node->name, name);
 
@@ -483,6 +544,7 @@ MemoryContextCreate(NodeTag tag, Size size,
 	(*node->methods->init) (node);
 
 	/* OK to link node to parent (if any) */
+	/* Could use MemoryContextSetParent here, but doesn't seem worthwhile */
 	if (parent)
 	{
 		node->parent = parent;
@@ -510,6 +572,8 @@ MemoryContextAlloc(MemoryContext context, Size size)
 		elog(ERROR, "invalid memory alloc request size %lu",
 			 (unsigned long) size);
 
+	context->isReset = false;
+
 	return (*context->methods->alloc) (context, size);
 }
 
@@ -530,6 +594,8 @@ MemoryContextAllocZero(MemoryContext context, Size size)
 	if (!AllocSizeIsValid(size))
 		elog(ERROR, "invalid memory alloc request size %lu",
 			 (unsigned long) size);
+
+	context->isReset = false;
 
 	ret = (*context->methods->alloc) (context, size);
 
@@ -555,6 +621,8 @@ MemoryContextAllocZeroAligned(MemoryContext context, Size size)
 	if (!AllocSizeIsValid(size))
 		elog(ERROR, "invalid memory alloc request size %lu",
 			 (unsigned long) size);
+
+	context->isReset = false;
 
 	ret = (*context->methods->alloc) (context, size);
 
@@ -619,6 +687,9 @@ repalloc(void *pointer, Size size)
 	if (!AllocSizeIsValid(size))
 		elog(ERROR, "invalid memory alloc request size %lu",
 			 (unsigned long) size);
+
+	/* isReset must be false already */
+	Assert(!header->context->isReset);
 
 	return (*header->context->methods->realloc) (header->context,
 												 pointer, size);

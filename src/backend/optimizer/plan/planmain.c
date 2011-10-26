@@ -98,7 +98,6 @@ query_planner(PlannerInfo *root, List *tlist,
 	Path	   *cheapestpath;
 	Path	   *sortedpath;
 	Index		rti;
-	ListCell   *lc;
 	double		total_pages;
 
 	/* Make tuple_fraction, limit_tuples accessible to lower-level routines */
@@ -128,15 +127,11 @@ query_planner(PlannerInfo *root, List *tlist,
 	}
 
 	/*
-	 * Init planner lists to empty, and set up the array to hold RelOptInfos
-	 * for "simple" rels.
+	 * Init planner lists to empty.
 	 *
 	 * NOTE: append_rel_list was set up by subquery_planner, so do not touch
 	 * here; eq_classes and minmax_aggs may contain data already, too.
 	 */
-	root->simple_rel_array_size = list_length(parse->rtable) + 1;
-	root->simple_rel_array = (RelOptInfo **)
-		palloc0(root->simple_rel_array_size * sizeof(RelOptInfo *));
 	root->join_rel_list = NIL;
 	root->join_rel_hash = NULL;
 	root->join_rel_level = NULL;
@@ -151,17 +146,10 @@ query_planner(PlannerInfo *root, List *tlist,
 
 	/*
 	 * Make a flattened version of the rangetable for faster access (this is
-	 * OK because the rangetable won't change any more).
+	 * OK because the rangetable won't change any more), and set up an
+	 * empty array for indexing base relations.
 	 */
-	root->simple_rte_array = (RangeTblEntry **)
-		palloc0(root->simple_rel_array_size * sizeof(RangeTblEntry *));
-	rti = 1;
-	foreach(lc, parse->rtable)
-	{
-		RangeTblEntry *rte = (RangeTblEntry *) lfirst(lc);
-
-		root->simple_rte_array[rti++] = rte;
-	}
+	setup_simple_rel_arrays(root);
 
 	/*
 	 * Construct RelOptInfo nodes for all base relations in query, and
@@ -179,12 +167,12 @@ query_planner(PlannerInfo *root, List *tlist,
 	/*
 	 * Examine the targetlist and join tree, adding entries to baserel
 	 * targetlists for all referenced Vars, and generating PlaceHolderInfo
-	 * entries for all referenced PlaceHolderVars.  Restrict and join clauses
-	 * are added to appropriate lists belonging to the mentioned relations.
-	 * We also build EquivalenceClasses for provably equivalent expressions.
-	 * The SpecialJoinInfo list is also built to hold information about join
-	 * order restrictions.  Finally, we form a target joinlist for
-	 * make_one_rel() to work from.
+	 * entries for all referenced PlaceHolderVars.	Restrict and join clauses
+	 * are added to appropriate lists belonging to the mentioned relations. We
+	 * also build EquivalenceClasses for provably equivalent expressions. The
+	 * SpecialJoinInfo list is also built to hold information about join order
+	 * restrictions.  Finally, we form a target joinlist for make_one_rel() to
+	 * work from.
 	 */
 	build_base_rel_tlists(root, tlist);
 
@@ -216,7 +204,7 @@ query_planner(PlannerInfo *root, List *tlist,
 	/*
 	 * Examine any "placeholder" expressions generated during subquery pullup.
 	 * Make sure that the Vars they need are marked as needed at the relevant
-	 * join level.  This must be done before join removal because it might
+	 * join level.	This must be done before join removal because it might
 	 * cause Vars or placeholders to be needed above a join when they weren't
 	 * so marked before.
 	 */
@@ -440,18 +428,9 @@ query_planner(PlannerInfo *root, List *tlist,
 static void
 canonicalize_all_pathkeys(PlannerInfo *root)
 {
-	ListCell   *lc;
-
 	root->query_pathkeys = canonicalize_pathkeys(root, root->query_pathkeys);
 	root->group_pathkeys = canonicalize_pathkeys(root, root->group_pathkeys);
 	root->window_pathkeys = canonicalize_pathkeys(root, root->window_pathkeys);
 	root->distinct_pathkeys = canonicalize_pathkeys(root, root->distinct_pathkeys);
 	root->sort_pathkeys = canonicalize_pathkeys(root, root->sort_pathkeys);
-
-	foreach(lc, root->minmax_aggs)
-	{
-		MinMaxAggInfo *mminfo = (MinMaxAggInfo *) lfirst(lc);
-
-		mminfo->pathkeys = canonicalize_pathkeys(root, mminfo->pathkeys);
-	}
 }

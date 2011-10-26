@@ -39,6 +39,7 @@
 #include "access/xact.h"
 #include "miscadmin.h"
 #include "postmaster/autovacuum.h"
+#include "replication/syncrep.h"
 #include "storage/ipc.h"
 #include "storage/lmgr.h"
 #include "storage/pmsignal.h"
@@ -46,6 +47,7 @@
 #include "storage/procarray.h"
 #include "storage/procsignal.h"
 #include "storage/spin.h"
+#include "utils/timestamp.h"
 
 
 /* GUC variables */
@@ -66,7 +68,7 @@ PGPROC	   *MyProc = NULL;
 NON_EXEC_STATIC slock_t *ProcStructLock = NULL;
 
 /* Pointers to shared-memory structures */
-NON_EXEC_STATIC PROC_HDR *ProcGlobal = NULL;
+PROC_HDR *ProcGlobal = NULL;
 NON_EXEC_STATIC PGPROC *AuxiliaryProcs = NULL;
 
 /* If we are waiting for a lock, this points to the associated LOCALLOCK */
@@ -110,8 +112,6 @@ ProcGlobalShmemSize(void)
 	size = add_size(size, mul_size(MaxBackends, sizeof(PGPROC)));
 	/* ProcStructLock */
 	size = add_size(size, sizeof(slock_t));
-	/* startupBufferPinWaitBufId */
-	size = add_size(size, sizeof(NBuffers));
 
 	return size;
 }
@@ -159,6 +159,7 @@ InitProcGlobal(void)
 	PGPROC	   *procs;
 	int			i;
 	bool		found;
+	uint32		TotalProcs = MaxBackends + NUM_AUXILIARY_PROCS;
 
 	/* Create the ProcGlobal shared structure */
 	ProcGlobal = (PROC_HDR *)
@@ -166,65 +167,68 @@ InitProcGlobal(void)
 	Assert(!found);
 
 	/*
-	 * Create the PGPROC structures for auxiliary (bgwriter) processes, too.
-	 * These do not get linked into the freeProcs list.
-	 */
-	AuxiliaryProcs = (PGPROC *)
-		ShmemInitStruct("AuxiliaryProcs", NUM_AUXILIARY_PROCS * sizeof(PGPROC),
-						&found);
-	Assert(!found);
-
-	/*
 	 * Initialize the data structures.
 	 */
+	ProcGlobal->spins_per_delay = DEFAULT_SPINS_PER_DELAY;
 	ProcGlobal->freeProcs = NULL;
 	ProcGlobal->autovacFreeProcs = NULL;
-
-	ProcGlobal->spins_per_delay = DEFAULT_SPINS_PER_DELAY;
-
-	/*
-	 * Pre-create the PGPROC structures and create a semaphore for each.
-	 */
-	procs = (PGPROC *) ShmemAlloc((MaxConnections) * sizeof(PGPROC));
-	if (!procs)
-		ereport(FATAL,
-				(errcode(ERRCODE_OUT_OF_MEMORY),
-				 errmsg("out of shared memory")));
-	MemSet(procs, 0, MaxConnections * sizeof(PGPROC));
-	for (i = 0; i < MaxConnections; i++)
-	{
-		PGSemaphoreCreate(&(procs[i].sem));
-		procs[i].links.next = (SHM_QUEUE *) ProcGlobal->freeProcs;
-		ProcGlobal->freeProcs = &procs[i];
-	}
+	ProcGlobal->startupProc = NULL;
+	ProcGlobal->startupProcPid = 0;
+	ProcGlobal->startupBufferPinWaitBufId = -1;
 
 	/*
-	 * Likewise for the PGPROCs reserved for autovacuum.
+	 * Create and initialize all the PGPROC structures we'll need (except for
+	 * those used for 2PC, which are embedded within a GlobalTransactionData
+	 * struct).
 	 *
-	 * Note: the "+1" here accounts for the autovac launcher
+	 * There are three separate consumers of PGPROC structures: (1) normal
+	 * backends, (2) autovacuum workers and the autovacuum launcher, and (3)
+	 * auxiliary processes.  Each PGPROC structure is dedicated to exactly
+	 * one of these purposes, and they do not move between groups.
 	 */
-	procs = (PGPROC *) ShmemAlloc((autovacuum_max_workers + 1) * sizeof(PGPROC));
+	procs = (PGPROC *) ShmemAlloc(TotalProcs * sizeof(PGPROC));
+	ProcGlobal->allProcs = procs;
+	ProcGlobal->allProcCount = TotalProcs;
 	if (!procs)
 		ereport(FATAL,
 				(errcode(ERRCODE_OUT_OF_MEMORY),
 				 errmsg("out of shared memory")));
-	MemSet(procs, 0, (autovacuum_max_workers + 1) * sizeof(PGPROC));
-	for (i = 0; i < autovacuum_max_workers + 1; i++)
+	MemSet(procs, 0, TotalProcs * sizeof(PGPROC));
+	for (i = 0; i < TotalProcs; i++)
 	{
+		/* Common initialization for all PGPROCs, regardless of type. */
+
+		/* Set up per-PGPROC semaphore, latch, and backendLock */
 		PGSemaphoreCreate(&(procs[i].sem));
-		procs[i].links.next = (SHM_QUEUE *) ProcGlobal->autovacFreeProcs;
-		ProcGlobal->autovacFreeProcs = &procs[i];
+		InitSharedLatch(&(procs[i].procLatch));
+		procs[i].backendLock = LWLockAssign();
+
+		/*
+		 * Newly created PGPROCs for normal backends or for autovacuum must
+		 * be queued up on the appropriate free list.  Because there can only
+		 * ever be a small, fixed number of auxiliary processes, no free
+		 * list is used in that case; InitAuxiliaryProcess() instead uses a
+		 * linear search.
+		 */
+		if (i < MaxConnections)
+		{
+			/* PGPROC for normal backend, add to freeProcs list */
+			procs[i].links.next = (SHM_QUEUE *) ProcGlobal->freeProcs;
+			ProcGlobal->freeProcs = &procs[i];
+		}
+		else if (i < MaxBackends)
+		{
+			/* PGPROC for AV launcher/worker, add to autovacFreeProcs list */
+			procs[i].links.next = (SHM_QUEUE *) ProcGlobal->autovacFreeProcs;
+			ProcGlobal->autovacFreeProcs = &procs[i];
+		}
 	}
 
 	/*
-	 * And auxiliary procs.
+	 * Save a pointer to the block of PGPROC structures reserved for
+	 * auxiliary proceses.
 	 */
-	MemSet(AuxiliaryProcs, 0, NUM_AUXILIARY_PROCS * sizeof(PGPROC));
-	for (i = 0; i < NUM_AUXILIARY_PROCS; i++)
-	{
-		AuxiliaryProcs[i].pid = 0;		/* marks auxiliary proc as not in use */
-		PGSemaphoreCreate(&(AuxiliaryProcs[i].sem));
-	}
+	AuxiliaryProcs = &procs[MaxBackends];
 
 	/* Create ProcStructLock spinlock, too */
 	ProcStructLock = (slock_t *) ShmemAlloc(sizeof(slock_t));
@@ -299,8 +303,8 @@ InitProcess(void)
 		MarkPostmasterChildActive();
 
 	/*
-	 * Initialize all fields of MyProc, except for the semaphore which was
-	 * prepared for us by InitProcGlobal.
+	 * Initialize all fields of MyProc, except for the semaphore and latch,
+	 * which were prepared for us by InitProcGlobal.
 	 */
 	SHMQueueElemInit(&(MyProc->links));
 	MyProc->waitStatus = STATUS_OK;
@@ -325,6 +329,18 @@ InitProcess(void)
 	for (i = 0; i < NUM_LOCK_PARTITIONS; i++)
 		SHMQueueInit(&(MyProc->myProcLocks[i]));
 	MyProc->recoveryConflictPending = false;
+
+	/* Initialize fields for sync rep */
+	MyProc->waitLSN.xlogid = 0;
+	MyProc->waitLSN.xrecoff = 0;
+	MyProc->syncRepState = SYNC_REP_NOT_WAITING;
+	SHMQueueElemInit(&(MyProc->syncRepLinks));
+
+	/*
+	 * Acquire ownership of the PGPROC's latch, so that we can use WaitLatch.
+	 * Note that there's no particular need to do ResetLatch here.
+	 */
+	OwnLatch(&MyProc->procLatch);
 
 	/*
 	 * We might be reusing a semaphore that belonged to a failed process. So
@@ -439,8 +455,8 @@ InitAuxiliaryProcess(void)
 	SpinLockRelease(ProcStructLock);
 
 	/*
-	 * Initialize all fields of MyProc, except for the semaphore which was
-	 * prepared for us by InitProcGlobal.
+	 * Initialize all fields of MyProc, except for the semaphore and latch,
+	 * which were prepared for us by InitProcGlobal.
 	 */
 	SHMQueueElemInit(&(MyProc->links));
 	MyProc->waitStatus = STATUS_OK;
@@ -459,6 +475,12 @@ InitAuxiliaryProcess(void)
 	MyProc->waitProcLock = NULL;
 	for (i = 0; i < NUM_LOCK_PARTITIONS; i++)
 		SHMQueueInit(&(MyProc->myProcLocks[i]));
+
+	/*
+	 * Acquire ownership of the PGPROC's latch, so that we can use WaitLatch.
+	 * Note that there's no particular need to do ResetLatch here.
+	 */
+	OwnLatch(&MyProc->procLatch);
 
 	/*
 	 * We might be reusing a semaphore that belonged to a failed process. So
@@ -487,7 +509,6 @@ PublishStartupProcessInformation(void)
 
 	procglobal->startupProc = MyProc;
 	procglobal->startupProcPid = MyProcPid;
-	procglobal->startupBufferPinWaitBufId = 0;
 
 	SpinLockRelease(ProcStructLock);
 }
@@ -514,14 +535,10 @@ SetStartupBufferPinWaitBufId(int bufid)
 int
 GetStartupBufferPinWaitBufId(void)
 {
-	int			bufid;
-
 	/* use volatile pointer to prevent code rearrangement */
 	volatile PROC_HDR *procglobal = ProcGlobal;
 
-	bufid = procglobal->startupBufferPinWaitBufId;
-
-	return bufid;
+	return procglobal->startupBufferPinWaitBufId;
 }
 
 /*
@@ -629,8 +646,6 @@ LockWaitCancel(void)
  * At subtransaction abort, we release all locks held by the subtransaction;
  * this is implemented by retail releasing of the locks under control of
  * the ResourceOwner mechanism.
- *
- * Note that user locks are not released in any case.
  */
 void
 ProcReleaseLocks(bool isCommit)
@@ -641,6 +656,9 @@ ProcReleaseLocks(bool isCommit)
 	LockWaitCancel();
 	/* Release locks */
 	LockReleaseAll(DEFAULT_LOCKMETHOD, !isCommit);
+
+	/* Release transaction level advisory locks */
+	LockReleaseAll(USER_LOCKMETHOD, false);
 }
 
 
@@ -666,12 +684,18 @@ ProcKill(int code, Datum arg)
 
 	Assert(MyProc != NULL);
 
+	/* Make sure we're out of the sync rep lists */
+	SyncRepCleanupAtProcExit();
+
 	/*
 	 * Release any LW locks I am holding.  There really shouldn't be any, but
 	 * it's cheap to check again before we cut the knees off the LWLock
 	 * facility by releasing our PGPROC ...
 	 */
 	LWLockReleaseAll();
+
+	/* Release ownership of the process's latch, too */
+	DisownLatch(&MyProc->procLatch);
 
 	SpinLockAcquire(ProcStructLock);
 
@@ -727,6 +751,9 @@ AuxiliaryProcKill(int code, Datum arg)
 
 	/* Release any LW locks I am holding (see notes above) */
 	LWLockReleaseAll();
+
+	/* Release ownership of the process's latch, too */
+	DisownLatch(&MyProc->procLatch);
 
 	SpinLockAcquire(ProcStructLock);
 
@@ -929,6 +956,15 @@ ProcSleep(LOCALLOCK *locallock, LockMethod lockMethodTable)
 	 */
 	LWLockRelease(partitionLock);
 
+	/*
+	 * Also, now that we will successfully clean up after an ereport, it's
+	 * safe to check to see if there's a buffer pin deadlock against the
+	 * Startup process.  Of course, that's only necessary if we're doing
+	 * Hot Standby and are not the Startup process ourselves.
+	 */
+	if (RecoveryInProgress() && !InRecovery)
+		CheckRecoveryConflictDeadlock();
+
 	/* Reset deadlock_state before enabling the signal handler */
 	deadlock_state = DS_NOT_YET_CHECKED;
 
@@ -992,7 +1028,7 @@ ProcSleep(LOCALLOCK *locallock, LockMethod lockMethodTable)
 			{
 				int			pid = autovac->pid;
 
-				elog(DEBUG2, "sending cancel to blocking autovacuum pid = %d",
+				elog(DEBUG2, "sending cancel to blocking autovacuum PID %d",
 					 pid);
 
 				/* don't hold the lock across the kill() syscall */
@@ -1320,7 +1356,7 @@ CheckDeadLock(void)
 		 * the lock.
 		 *
 		 * If blocked by autovacuum, this wakeup will enable ProcSleep to send
-		 * the cancelling signal to the autovacuum worker.
+		 * the canceling signal to the autovacuum worker.
 		 */
 		PGSemaphoreUnlock(&MyProc->sem);
 	}
@@ -1595,6 +1631,10 @@ void
 handle_sig_alarm(SIGNAL_ARGS)
 {
 	int			save_errno = errno;
+
+	/* SIGALRM is cause for waking anything waiting on the process latch */
+	if (MyProc)
+		SetLatch(&MyProc->procLatch);
 
 	if (deadlock_timeout_active)
 	{

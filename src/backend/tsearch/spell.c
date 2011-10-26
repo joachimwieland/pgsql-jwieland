@@ -14,6 +14,7 @@
 
 #include "postgres.h"
 
+#include "catalog/pg_collation.h"
 #include "tsearch/dicts/spell.h"
 #include "tsearch/ts_locale.h"
 #include "utils/memutils.h"
@@ -74,7 +75,7 @@ NIFinishBuild(IspellDict *Conf)
  * doesn't need that.  The cpalloc and cpalloc0 macros are just documentation
  * to indicate which allocations actually require zeroing.
  */
-#define COMPACT_ALLOC_CHUNK	8192	/* must be > aset.c's allocChunkLimit */
+#define COMPACT_ALLOC_CHUNK 8192	/* amount to get from palloc at once */
 #define COMPACT_MAX_REQ		1024	/* must be < COMPACT_ALLOC_CHUNK */
 
 static void *
@@ -139,7 +140,7 @@ lowerstr_ctx(IspellDict *Conf, const char *src)
 #define MAXNORMLEN 256
 
 #define STRNCMP(s,p)	strncmp( (s), (p), strlen(p) )
-#define GETWCHAR(W,L,N,T) ( ((uint8*)(W))[ ((T)==FF_PREFIX) ? (N) : ( (L) - 1 - (N) ) ] )
+#define GETWCHAR(W,L,N,T) ( ((const uint8*)(W))[ ((T)==FF_PREFIX) ? (N) : ( (L) - 1 - (N) ) ] )
 #define GETCHAR(A,N,T)	  GETWCHAR( (A)->repl, (A)->replen, N, T )
 
 static char *VoidString = "";
@@ -147,12 +148,12 @@ static char *VoidString = "";
 static int
 cmpspell(const void *s1, const void *s2)
 {
-	return (strcmp((*(const SPELL **) s1)->word, (*(const SPELL **) s2)->word));
+	return (strcmp((*(SPELL * const *) s1)->word, (*(SPELL * const *) s2)->word));
 }
 static int
 cmpspellaffix(const void *s1, const void *s2)
 {
-	return (strncmp((*(const SPELL **) s1)->p.flag, (*(const SPELL **) s2)->p.flag, MAXFLAGLEN));
+	return (strncmp((*(SPELL * const *) s1)->p.flag, (*(SPELL * const *) s2)->p.flag, MAXFLAGLEN));
 }
 
 static char *
@@ -331,7 +332,7 @@ FindWord(IspellDict *Conf, const char *word, int affixflag, int flag)
 	SPNodeData *StopLow,
 			   *StopHigh,
 			   *StopMiddle;
-	uint8	   *ptr = (uint8 *) word;
+	const uint8 *ptr = (const uint8 *) word;
 
 	flag &= FF_DICTFLAGMASK;
 
@@ -425,7 +426,9 @@ NIAddAffix(IspellDict *Conf, int flag, char flagflags, const char *mask, const c
 		wmask = (pg_wchar *) tmpalloc((masklen + 1) * sizeof(pg_wchar));
 		wmasklen = pg_mb2wchar_with_len(tmask, wmask, masklen);
 
-		err = pg_regcomp(&(Affix->reg.regex), wmask, wmasklen, REG_ADVANCED | REG_NOSUB);
+		err = pg_regcomp(&(Affix->reg.regex), wmask, wmasklen,
+						 REG_ADVANCED | REG_NOSUB,
+						 DEFAULT_COLLATION_OID);
 		if (err)
 		{
 			char		errstr[100];

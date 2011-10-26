@@ -204,7 +204,7 @@ main(int argc, char *argv[])
 /*
  * Place platform-specific startup hacks here.	This is the right
  * place to put code that must be executed early in the launch of any new
- * server process.  Note that this code will NOT be executed when a backend
+ * server process.	Note that this code will NOT be executed when a backend
  * or sub-bootstrap process is forked, unless we are in a fork/exec
  * environment (ie EXEC_BACKEND is defined).
  *
@@ -218,8 +218,8 @@ startup_hacks(const char *progname)
 	/*
 	 * On some platforms, unaligned memory accesses result in a kernel trap;
 	 * the default kernel behavior is to emulate the memory access, but this
-	 * results in a significant performance penalty.  We want PG never to
-	 * make such unaligned memory accesses, so this code disables the kernel
+	 * results in a significant performance penalty.  We want PG never to make
+	 * such unaligned memory accesses, so this code disables the kernel
 	 * emulation: unaligned accesses will result in SIGBUS instead.
 	 */
 #ifdef NOFIXADE
@@ -230,7 +230,7 @@ startup_hacks(const char *progname)
 
 #if defined(__alpha)			/* no __alpha__ ? */
 	{
-		int		buffer[] = {SSIN_UACPROC, UAC_SIGBUS | UAC_NOPRINT};
+		int			buffer[] = {SSIN_UACPROC, UAC_SIGBUS | UAC_NOPRINT};
 
 		if (setsysinfo(SSI_NVPAIRS, buffer, 1, (caddr_t) NULL,
 					   (unsigned long) NULL) < 0)
@@ -238,7 +238,6 @@ startup_hacks(const char *progname)
 						 progname, strerror(errno));
 	}
 #endif   /* __alpha */
-
 #endif   /* NOFIXADE */
 
 	/*
@@ -284,6 +283,7 @@ help(const char *progname)
 #endif
 	printf(_("  -B NBUFFERS     number of shared buffers\n"));
 	printf(_("  -c NAME=VALUE   set run-time parameter\n"));
+	printf(_("  -C NAME         return run-time parameter\n"));
 	printf(_("  -d 1-5          debugging level\n"));
 	printf(_("  -D DATADIR      database directory\n"));
 	printf(_("  -e              use European date input format (DMY)\n"));
@@ -310,7 +310,7 @@ help(const char *progname)
 	printf(_("  -O              allow system table structure changes\n"));
 	printf(_("  -P              disable system indexes\n"));
 	printf(_("  -t pa|pl|ex     show timings after each query\n"));
-	printf(_("  -T              send SIGSTOP to all backend servers if one dies\n"));
+	printf(_("  -T              send SIGSTOP to all backend processes if one dies\n"));
 	printf(_("  -W NUM          wait NUM seconds to allow attach from a debugger\n"));
 
 	printf(_("\nOptions for single-user mode:\n"));
@@ -393,7 +393,7 @@ get_current_username(const char *progname)
 	/* Allocate new memory because later getpwuid() calls can overwrite it. */
 	return strdup(pw->pw_name);
 #else
-	long		namesize = 256 /* UNLEN */ + 1;
+	unsigned long namesize = 256 /* UNLEN */ + 1;
 	char	   *name;
 
 	name = malloc(namesize);

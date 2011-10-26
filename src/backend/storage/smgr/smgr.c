@@ -17,8 +17,6 @@
  */
 #include "postgres.h"
 
-#include "access/xlogutils.h"
-#include "catalog/catalog.h"
 #include "commands/tablespace.h"
 #include "storage/bufmgr.h"
 #include "storage/ipc.h"
@@ -48,16 +46,16 @@ typedef struct f_smgr
 	void		(*smgr_unlink) (RelFileNodeBackend rnode, ForkNumber forknum,
 											bool isRedo);
 	void		(*smgr_extend) (SMgrRelation reln, ForkNumber forknum,
-							BlockNumber blocknum, char *buffer, bool skipFsync);
+						 BlockNumber blocknum, char *buffer, bool skipFsync);
 	void		(*smgr_prefetch) (SMgrRelation reln, ForkNumber forknum,
 											  BlockNumber blocknum);
 	void		(*smgr_read) (SMgrRelation reln, ForkNumber forknum,
 										  BlockNumber blocknum, char *buffer);
 	void		(*smgr_write) (SMgrRelation reln, ForkNumber forknum,
-							BlockNumber blocknum, char *buffer, bool skipFsync);
+						 BlockNumber blocknum, char *buffer, bool skipFsync);
 	BlockNumber (*smgr_nblocks) (SMgrRelation reln, ForkNumber forknum);
 	void		(*smgr_truncate) (SMgrRelation reln, ForkNumber forknum,
-										   BlockNumber nblocks);
+											  BlockNumber nblocks);
 	void		(*smgr_immedsync) (SMgrRelation reln, ForkNumber forknum);
 	void		(*smgr_pre_ckpt) (void);		/* may be NULL */
 	void		(*smgr_sync) (void);	/* may be NULL */
@@ -165,14 +163,31 @@ smgropen(RelFileNode rnode, BackendId backend)
 		reln->smgr_targblock = InvalidBlockNumber;
 		reln->smgr_fsm_nblocks = InvalidBlockNumber;
 		reln->smgr_vm_nblocks = InvalidBlockNumber;
+		reln->smgr_transient = false;
 		reln->smgr_which = 0;	/* we only have md.c at present */
 
 		/* mark it not open */
 		for (forknum = 0; forknum <= MAX_FORKNUM; forknum++)
 			reln->md_fd[forknum] = NULL;
 	}
+	else
+		/* if it was transient before, it no longer is */
+		reln->smgr_transient = false;
 
 	return reln;
+}
+
+/*
+ * smgrsettransient() -- mark an SMgrRelation object as transaction-bound
+ *
+ * The main effect of this is that all opened files are marked to be
+ * kernel-level closed (but not necessarily VFD-closed) when the current
+ * transaction ends.
+ */
+void
+smgrsettransient(SMgrRelation reln)
+{
+	reln->smgr_transient = true;
 }
 
 /*

@@ -56,12 +56,15 @@
 #include "pg_trace.h"
 #include "pgstat.h"
 #include "replication/walsender.h"
+#include "replication/syncrep.h"
 #include "storage/fd.h"
+#include "storage/predicate.h"
 #include "storage/procarray.h"
 #include "storage/sinvaladt.h"
 #include "storage/smgr.h"
 #include "utils/builtins.h"
 #include "utils/memutils.h"
+#include "utils/timestamp.h"
 
 
 /*
@@ -118,7 +121,7 @@ typedef struct GlobalTransactionData
 	TransactionId locking_xid;	/* top-level XID of backend working on xact */
 	bool		valid;			/* TRUE if fully prepared */
 	char		gid[GIDSIZE];	/* The GID assigned to the prepared xact */
-} GlobalTransactionData;
+}	GlobalTransactionData;
 
 /*
  * Two Phase Commit shared state.  Access to this struct is protected
@@ -1027,8 +1030,8 @@ EndPrepare(GlobalTransaction gxact)
 	/* If we crash now, we have prepared: WAL replay will fix things */
 
 	/*
-	 * Wake up all walsenders to send WAL up to the PREPARE record
-	 * immediately if replication is enabled
+	 * Wake up all walsenders to send WAL up to the PREPARE record immediately
+	 * if replication is enabled
 	 */
 	if (max_wal_senders > 0)
 		WalSndWakeup();
@@ -1069,6 +1072,14 @@ EndPrepare(GlobalTransaction gxact)
 	MyProc->inCommit = false;
 
 	END_CRIT_SECTION();
+
+	/*
+	 * Wait for synchronous replication, if required.
+	 *
+	 * Note that at this stage we have marked the prepare, but still show as
+	 * running in the procarray (twice!) and continue to hold locks.
+	 */
+	SyncRepWaitForLSN(gxact->prepare_lsn);
 
 	records.tail = records.head = NULL;
 }
@@ -1346,16 +1357,18 @@ FinishPreparedTransaction(const char *gid, bool isCommit)
 	 * after we send the SI messages. See AtEOXact_Inval()
 	 */
 	if (hdr->initfileinval)
-		RelationCacheInitFileInvalidate(true);
+		RelationCacheInitFilePreInvalidate();
 	SendSharedInvalidMessages(invalmsgs, hdr->ninvalmsgs);
 	if (hdr->initfileinval)
-		RelationCacheInitFileInvalidate(false);
+		RelationCacheInitFilePostInvalidate();
 
 	/* And now do the callbacks */
 	if (isCommit)
 		ProcessRecords(bufptr, xid, twophase_postcommit_callbacks);
 	else
 		ProcessRecords(bufptr, xid, twophase_postabort_callbacks);
+
+	PredicateLockTwoPhaseFinish(xid, isCommit);
 
 	/* Count the prepared xact as committed or aborted */
 	AtEOXact_PgStat(isCommit);
@@ -2027,6 +2040,14 @@ RecordTransactionCommitPrepared(TransactionId xid,
 	MyProc->inCommit = false;
 
 	END_CRIT_SECTION();
+
+	/*
+	 * Wait for synchronous replication, if required.
+	 *
+	 * Note that at this stage we have marked clog, but still show as running
+	 * in the procarray and continue to hold locks.
+	 */
+	SyncRepWaitForLSN(recptr);
 }
 
 /*
@@ -2106,4 +2127,12 @@ RecordTransactionAbortPrepared(TransactionId xid,
 	TransactionIdAbortTree(xid, nchildren, children);
 
 	END_CRIT_SECTION();
+
+	/*
+	 * Wait for synchronous replication, if required.
+	 *
+	 * Note that at this stage we have marked clog, but still show as running
+	 * in the procarray and continue to hold locks.
+	 */
+	SyncRepWaitForLSN(recptr);
 }

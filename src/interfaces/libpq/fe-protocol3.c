@@ -1400,8 +1400,8 @@ pqGetCopyData3(PGconn *conn, char **buffer, int async)
 			/*
 			 * On end-of-copy, exit COPY_OUT or COPY_BOTH mode and let caller
 			 * read status with PQgetResult().	The normal case is that it's
-			 * Copy Done, but we let parseInput read that.  If error, we expect
-			 * the state was already changed.
+			 * Copy Done, but we let parseInput read that.	If error, we
+			 * expect the state was already changed.
 			 */
 			if (msgLength == -1)
 				conn->asyncStatus = PGASYNC_BUSY;
@@ -1932,6 +1932,9 @@ build_startup_packet(const PGconn *conn, char *packet,
 		if (val && val[0])
 			ADD_STARTUP_OPTION("application_name", val);
 	}
+
+	if (conn->client_encoding_initial && conn->client_encoding_initial[0])
+		ADD_STARTUP_OPTION("client_encoding", conn->client_encoding_initial);
 
 	/* Add any environment-driven GUC settings needed */
 	for (next_eo = options; next_eo->envName; next_eo++)

@@ -21,6 +21,7 @@
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
 #include "catalog/pg_authid.h"
+#include "catalog/pg_collation.h"
 #include "catalog/pg_conversion.h"
 #include "catalog/pg_database.h"
 #include "catalog/pg_default_acl.h"
@@ -35,6 +36,7 @@
 #include "catalog/pg_tablespace.h"
 #include "catalog/pg_type.h"
 #include "commands/dbcommands.h"
+#include "commands/collationcmds.h"
 #include "commands/conversioncmds.h"
 #include "commands/defrem.h"
 #include "commands/proclang.h"
@@ -1282,8 +1284,7 @@ shdepReassignOwned(List *roleids, Oid newrole)
 
 			ereport(ERROR,
 					(errcode(ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST),
-				   errmsg("cannot drop objects owned by %s because they are "
-						  "required by the database system",
+					 errmsg("cannot reassign ownership of objects owned by %s because they are required by the database system",
 						  getObjectDescription(&obj))));
 
 			/*
@@ -1323,6 +1324,10 @@ shdepReassignOwned(List *roleids, Oid newrole)
 			/* Issue the appropriate ALTER OWNER call */
 			switch (sdepForm->classid)
 			{
+				case CollationRelationId:
+					AlterCollationOwner_oid(sdepForm->objid, newrole);
+					break;
+
 				case ConversionRelationId:
 					AlterConversionOwner_oid(sdepForm->objid, newrole);
 					break;

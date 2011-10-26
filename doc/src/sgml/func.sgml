@@ -82,8 +82,9 @@
      <member><literal>NOT</></member>
     </simplelist>
 
-    <acronym>SQL</acronym> uses a three-valued Boolean logic where the null value represents
-    <quote>unknown</quote>.  Observe the following truth tables:
+    <acronym>SQL</acronym> uses a three-valued logic system with true,
+    false, and <literal>null</>, which represents <quote>unknown</quote>.
+    Observe the following truth tables:
 
     <informaltable>
      <tgroup cols="4">
@@ -1481,15 +1482,15 @@
          <primary>decode</primary>
         </indexterm>
         <literal><function>decode(<parameter>string</parameter> <type>text</type>,
-        <parameter>type</parameter> <type>text</type>)</function></literal>
+        <parameter>format</parameter> <type>text</type>)</function></literal>
        </entry>
        <entry><type>bytea</type></entry>
        <entry>
-        Decode binary data from <parameter>string</parameter> previously
-        encoded with <function>encode</>.  Parameter type is same as in <function>encode</>.
+        Decode binary data from textual representation in <parameter>string</>.
+        Options for <parameter>format</> are same as in <function>encode</>.
        </entry>
        <entry><literal>decode('MTIzAAE=', 'base64')</literal></entry>
-       <entry><literal>123\000\001</literal></entry>
+       <entry><literal>\x3132330001</literal></entry>
       </row>
 
       <row>
@@ -1498,13 +1499,13 @@
          <primary>encode</primary>
         </indexterm>
         <literal><function>encode(<parameter>data</parameter> <type>bytea</type>,
-        <parameter>type</parameter> <type>text</type>)</function></literal>
+        <parameter>format</parameter> <type>text</type>)</function></literal>
        </entry>
        <entry><type>text</type></entry>
        <entry>
-        Encode binary data to different representation.  Supported
-        types are: <literal>base64</>, <literal>hex</>, <literal>escape</>.
-        <literal>Escape</> merely outputs null bytes as <literal>\000</> and
+        Encode binary data into a textual representation.  Supported
+        formats are: <literal>base64</>, <literal>hex</>, <literal>escape</>.
+        <literal>escape</> merely outputs null bytes as <literal>\000</> and
         doubles backslashes.
        </entry>
        <entry><literal>encode(E'123\\000\\001', 'base64')</literal></entry>
@@ -1512,7 +1513,7 @@
       </row>
 
       <row>
-       <entry>
+       <entry id="format">
         <indexterm>
          <primary>format</primary>
         </indexterm>
@@ -1522,7 +1523,7 @@
        <entry><type>text</type></entry>
        <entry>
          Format a string.  This function is similar to the C function
-         <function>sprintf</>; but only the following conversions
+         <function>sprintf</>; but only the following conversion specifications
          are recognized: <literal>%s</literal> interpolates the corresponding
          argument as a string; <literal>%I</literal> escapes its argument as
          an SQL identifier; <literal>%L</literal> escapes its argument as an
@@ -1586,7 +1587,7 @@
       </row>
 
       <row>
-       <entry><literal><function>length(<parameter>string</parameter><type>bytea</type>,
+       <entry><literal><function>length(<parameter>string</parameter> <type>bytea</type>,
         <parameter>encoding</parameter> <type>name</type> )</function></literal></entry>
        <entry><type>int</type></entry>
        <entry>
@@ -1706,7 +1707,7 @@
         <function>quote_nullable</function> is often more suitable.
         See also <xref linkend="plpgsql-quote-literal-example">.
        </entry>
-       <entry><literal>quote_literal('O\'Reilly')</literal></entry>
+       <entry><literal>quote_literal(E'O\'Reilly')</literal></entry>
        <entry><literal>'O''Reilly'</literal></entry>
       </row>
 
@@ -2858,6 +2859,14 @@
     (see <xref linkend="functions-binarystring-other">).
    </para>
 
+   <note>
+    <para>
+     The sample results shown on this page assume that the server parameter
+     <link linkend="guc-bytea-output"><varname>bytea_output</></link> is set
+     to <literal>escape</literal> (the traditional PostgreSQL format).
+    </para>
+   </note>
+
    <table id="functions-binarystring-sql">
     <title><acronym>SQL</acronym> Binary String Functions and Operators</title>
     <tgroup cols="5">
@@ -3705,8 +3714,8 @@ substring('foobar' from 'o(.)b')   <lineannotation>o</lineannotation>
      match, the <replaceable>source</> string is returned with the
      <replaceable>replacement</> string substituted for the matching
      substring.  The <replaceable>replacement</> string can contain
-     <literal>\</><replaceable>n</>, where <replaceable>n</> is <literal>1</>
-     through <literal>9</>, to indicate that the source substring matching the
+     <literal>\</><replaceable>n</>, where <replaceable>n</> is 1
+     through 9, to indicate that the source substring matching the
      <replaceable>n</>'th parenthesized subexpression of the pattern should be
      inserted, and it can contain <literal>\&amp;</> to indicate that the
      substring matching the entire pattern should be inserted.  Write
@@ -4350,7 +4359,7 @@ SELECT foo FROM regexp_split_to_table('the quick brown fox', E'\\s*') AS foo;
    </note>
 
    <table id="posix-character-entry-escapes-table">
-    <title>Regular Expression Character-Entry Escapes</title>
+    <title>Regular Expression Character-entry Escapes</title>
 
     <tgroup cols="2">
      <thead>
@@ -4478,7 +4487,7 @@ SELECT foo FROM regexp_split_to_table('the quick brown fox', E'\\s*') AS foo;
    </para>
 
    <table id="posix-class-shorthand-escapes-table">
-    <title>Regular Expression Class-Shorthand Escapes</title>
+    <title>Regular Expression Class-shorthand Escapes</title>
 
     <tgroup cols="2">
      <thead>
@@ -4672,7 +4681,7 @@ SELECT foo FROM regexp_split_to_table('the quick brown fox', E'\\s*') AS foo;
    </para>
 
    <table id="posix-embedded-options-table">
-    <title>ARE Embedded-Option Letters</title>
+    <title>ARE Embedded-option Letters</title>
 
     <tgroup cols="2">
      <thead>
@@ -5446,7 +5455,7 @@ SELECT SUBSTRING('XY1234Z', 'Y*?([0-9]{1,3})');
       <tbody>
        <row>
         <entry><literal>FM</literal> prefix</entry>
-        <entry>fill mode (suppress padding blanks and zeroes)</entry>
+        <entry>fill mode (suppress padding blanks and trailing zeroes)</entry>
         <entry><literal>FMMonth</literal></entry>
        </row>
        <row>
@@ -5536,6 +5545,15 @@ SELECT SUBSTRING('XY1234Z', 'Y*?([0-9]{1,3})');
        Month\\"'</literal>. <!-- "" font-lock sanity :-) -->
        (Two backslashes are necessary because the backslash
        has special meaning when using the escape string syntax.)
+      </para>
+     </listitem>
+
+     <listitem>
+      <para>
+       If the year format specification is less than four digits, e.g.
+       <literal>YYY</>, and the supplied year is less than four digits,
+       the year will be adjusted to be nearest to the year 2020, e.g.
+       <literal>95</> becomes 1995.
       </para>
      </listitem>
 
@@ -5812,7 +5830,7 @@ SELECT SUBSTRING('XY1234Z', 'Y*?([0-9]{1,3})');
       <tbody>
        <row>
         <entry><literal>FM</literal> prefix</entry>
-        <entry>fill mode (suppress padding blanks and zeroes)</entry>
+        <entry>fill mode (suppress padding blanks and trailing zeroes)</entry>
         <entry><literal>FM9999</literal></entry>
        </row>
        <row>
@@ -6605,13 +6623,20 @@ SELECT EXTRACT(CENTURY FROM TIMESTAMP '2001-02-16 20:38:40');
       <term><literal>day</literal></term>
       <listitem>
        <para>
-        The day (of the month) field (1 - 31)
+        For <type>timestamp</type> values, the day (of the month) field
+        (1 - 31) ; for <type>interval</type> values, the number of days
        </para>
 
 <screen>
 SELECT EXTRACT(DAY FROM TIMESTAMP '2001-02-16 20:38:40');
 <lineannotation>Result: </lineannotation><computeroutput>16</computeroutput>
+
+SELECT EXTRACT(DAY FROM INTERVAL '40 days 1 minute');
+<lineannotation>Result: </lineannotation><computeroutput>40</computeroutput>
 </screen>
+
+
+
       </listitem>
      </varlistentry>
 
@@ -6827,7 +6852,7 @@ SELECT EXTRACT(MINUTE FROM TIMESTAMP '2001-02-16 20:38:40');
       <listitem>
        <para>
         For <type>timestamp</type> values, the number of the month
-        within the year (1 - 12) ; for <type>interval</type> values
+        within the year (1 - 12) ; for <type>interval</type> values,
         the number of months, modulo 12 (0 - 11)
        </para>
 
@@ -6882,7 +6907,9 @@ SELECT EXTRACT(SECOND FROM TIME '17:12:28.5');
        <para>
         The time zone offset from UTC, measured in seconds.  Positive values
         correspond to time zones east of UTC, negative values to
-        zones west of UTC.
+        zones west of UTC.  (Technically,
+        <productname>PostgreSQL</productname> uses <acronym>UT1</> because
+        leap seconds are not handled.)
        </para>
       </listitem>
      </varlistentry>
@@ -8710,7 +8737,7 @@ CREATE TYPE rainbow AS ENUM ('red', 'orange', 'yellow', 'green', 'blue', 'purple
    with <command>configure --with-libxml</>.
   </para>
 
-  <sect2>
+  <sect2 id="functions-producing-xml">
    <title>Producing XML Content</title>
 
    <para>
@@ -9086,7 +9113,7 @@ SELECT xmlagg(x) FROM (SELECT * FROM test ORDER BY y DESC) AS tab;
    </sect3>
    </sect2>
 
-   <sect2>
+   <sect2 id="functions-xml-predicates">
     <title>XML Predicates</title>
 
     <para>
@@ -9095,7 +9122,7 @@ SELECT xmlagg(x) FROM (SELECT * FROM test ORDER BY y DESC) AS tab;
     </para>
 
    <sect3>
-    <title>IS DOCUMENT</title>
+    <title><literal>IS DOCUMENT</literal></title>
 
     <indexterm>
      <primary>IS DOCUMENT</primary>
@@ -9114,8 +9141,8 @@ SELECT xmlagg(x) FROM (SELECT * FROM test ORDER BY y DESC) AS tab;
     </para>
    </sect3>
 
-   <sect3>
-    <title>XMLEXISTS</title>
+   <sect3 id="xml-exists">
+    <title><literal>XMLEXISTS</literal></title>
 
     <indexterm>
      <primary>XMLEXISTS</primary>
@@ -9156,8 +9183,8 @@ SELECT xmlexists('//town[text() = ''Toronto'']' PASSING BY REF '<towns><town>Tor
     </para>
    </sect3>
 
-   <sect3>
-    <title>xml_is_well_formed</title>
+   <sect3 id="xml-is-well-formed">
+    <title><literal>xml_is_well_formed</literal></title>
 
     <indexterm>
      <primary>xml_is_well_formed</primary>
@@ -9179,7 +9206,7 @@ SELECT xmlexists('//town[text() = ''Toronto'']' PASSING BY REF '<towns><town>Tor
 
     <para>
      These functions check whether a <type>text</> string is well-formed XML,
-     returning a boolean result.
+     returning a Boolean result.
      <function>xml_is_well_formed_document</function> checks for a well-formed
      document, while <function>xml_is_well_formed_content</function> checks
      for well-formed content.  <function>xml_is_well_formed</function> does
@@ -9259,6 +9286,8 @@ SELECT xml_is_well_formed_document('<pg:foo xmlns:pg="http://postgresql.org/stuf
     against the XML value
     <replaceable>xml</replaceable>.  It returns an array of XML values
     corresponding to the node set produced by the XPath expression.
+    If the XPath expression returns a scalar value rather than a node set,
+    a single-element array is returned.
    </para>
 
   <para>
@@ -9316,7 +9345,7 @@ SELECT xpath('//mydefns:b/text()', '<a xmlns="http://example.com"><b>test</b></a
     The function <function>xpath_exists</function> is a specialized form
     of the <function>xpath</function> function.  Instead of returning the
     individual XML values that satisfy the XPath, this function returns a
-    boolean indicating whether the query was satisfied or not.  This
+    Boolean indicating whether the query was satisfied or not.  This
     function is equivalent to the standard <literal>XMLEXISTS</> predicate,
     except that it also offers support for a namespace mapping argument.
    </para>
@@ -9688,7 +9717,7 @@ nextval('foo')              <lineannotation>searches search path for <literal>fo
     Before <productname>PostgreSQL</productname> 8.1, the arguments of the
     sequence functions were of type <type>text</>, not <type>regclass</>, and
     the above-described conversion from a text string to an OID value would
-    happen at run time during each call.  For backwards compatibility, this
+    happen at run time during each call.  For backward compatibility, this
     facility still exists, but internally it is now handled as an implicit
     coercion from <type>text</> to <type>regclass</> before the function is
     invoked.
@@ -9847,7 +9876,7 @@ SELECT setval('foo', 42, false);    <lineannotation>Next <function>nextval</> wi
    </para>
   </tip>
 
-  <sect2>
+  <sect2 id="functions-case">
    <title><literal>CASE</></title>
 
   <para>
@@ -9959,7 +9988,7 @@ SELECT ... WHERE CASE WHEN x &lt;&gt; 0 THEN y/x &gt; 1.5 ELSE false END;
    </para>
   </sect2>
 
-  <sect2>
+  <sect2 id="functions-coalesce-nvl-ifnull">
    <title><literal>COALESCE</></title>
 
   <indexterm>
@@ -9986,6 +10015,8 @@ SELECT ... WHERE CASE WHEN x &lt;&gt; 0 THEN y/x &gt; 1.5 ELSE false END;
 <programlisting>
 SELECT COALESCE(description, short_description, '(none)') ...
 </programlisting>
+   This returns <varname>description</> if it is not null, otherwise
+   <varname>short_description</> if it is not null, otherwise <literal>(none)</>.
   </para>
 
    <para>
@@ -9998,7 +10029,7 @@ SELECT COALESCE(description, short_description, '(none)') ...
    </para>
   </sect2>
 
-  <sect2>
+  <sect2 id="functions-nullif">
    <title><literal>NULLIF</></title>
 
   <indexterm>
@@ -10027,7 +10058,7 @@ SELECT NULLIF(value, '(none)') ...
 
   </sect2>
 
-  <sect2>
+  <sect2 id="functions-greatest-least">
    <title><literal>GREATEST</literal> and <literal>LEAST</literal></title>
 
   <indexterm>
@@ -11485,7 +11516,7 @@ SELECT xmlagg(x) FROM (SELECT x FROM test ORDER BY y DESC) AS tab;
    Boolean (true/false) results.
   </para>
 
-  <sect2>
+  <sect2 id="functions-subquery-exists">
    <title><literal>EXISTS</literal></title>
 
 <synopsis>
@@ -11535,7 +11566,7 @@ WHERE EXISTS (SELECT 1 FROM tab2 WHERE col2 = tab1.col2);
   </para>
   </sect2>
 
-  <sect2>
+  <sect2 id="functions-subquery-in">
    <title><literal>IN</literal></title>
 
 <synopsis>
@@ -11591,7 +11622,7 @@ WHERE EXISTS (SELECT 1 FROM tab2 WHERE col2 = tab1.col2);
   </para>
   </sect2>
 
-  <sect2>
+  <sect2 id="functions-subquery-notin">
    <title><literal>NOT IN</literal></title>
 
 <synopsis>
@@ -11647,7 +11678,7 @@ WHERE EXISTS (SELECT 1 FROM tab2 WHERE col2 = tab1.col2);
   </para>
   </sect2>
 
-  <sect2>
+  <sect2 id="functions-subquery-any-some">
    <title><literal>ANY</literal>/<literal>SOME</literal></title>
 
 <synopsis>
@@ -11712,7 +11743,7 @@ WHERE EXISTS (SELECT 1 FROM tab2 WHERE col2 = tab1.col2);
   </para>
   </sect2>
 
-  <sect2>
+  <sect2 id="functions-subquery-all">
    <title><literal>ALL</literal></title>
 
 <synopsis>
@@ -12502,6 +12533,10 @@ postgres=# SELECT * FROM unnest2(ARRAY[[1,2],[3,4]]);
    </indexterm>
 
    <indexterm>
+    <primary>session_user</primary>
+   </indexterm>
+
+   <indexterm>
     <primary>user</primary>
     <secondary>current</secondary>
    </indexterm>
@@ -12760,21 +12795,6 @@ SET search_path TO <replaceable>schema</> <optional>, <replaceable>schema</>, ..
        <entry>does current user have privilege for schema</entry>
       </row>
       <row>
-       <entry><literal><function>has_server_privilege</function>(<parameter>user</parameter>,
-                                  <parameter>server</parameter>,
-                                  <parameter>privilege</parameter>)</literal>
-       </entry>
-       <entry><type>boolean</type></entry>
-       <entry>does user have privilege for foreign server</entry>
-      </row>
-      <row>
-       <entry><literal><function>has_server_privilege</function>(<parameter>server</parameter>,
-                                  <parameter>privilege</parameter>)</literal>
-       </entry>
-       <entry><type>boolean</type></entry>
-       <entry>does current user have privilege for foreign server</entry>
-      </row>
-      <row>
        <entry><literal><function>has_sequence_privilege</function>(<parameter>user</parameter>,
                                   <parameter>sequence</parameter>,
                                   <parameter>privilege</parameter>)</literal>
@@ -12788,6 +12808,21 @@ SET search_path TO <replaceable>schema</> <optional>, <replaceable>schema</>, ..
        </entry>
        <entry><type>boolean</type></entry>
        <entry>does current user have privilege for sequence</entry>
+      </row>
+      <row>
+       <entry><literal><function>has_server_privilege</function>(<parameter>user</parameter>,
+                                  <parameter>server</parameter>,
+                                  <parameter>privilege</parameter>)</literal>
+       </entry>
+       <entry><type>boolean</type></entry>
+       <entry>does user have privilege for foreign server</entry>
+      </row>
+      <row>
+       <entry><literal><function>has_server_privilege</function>(<parameter>server</parameter>,
+                                  <parameter>privilege</parameter>)</literal>
+       </entry>
+       <entry><type>boolean</type></entry>
+       <entry>does current user have privilege for foreign server</entry>
       </row>
       <row>
        <entry><literal><function>has_table_privilege</function>(<parameter>user</parameter>,
@@ -13060,6 +13095,12 @@ SELECT relname FROM pg_class WHERE pg_table_is_visible(oid);
 
      <tbody>
       <row>
+       <entry><literal><function>pg_collation_is_visible(<parameter>collation_oid</parameter>)</function></literal>
+       </entry>
+       <entry><type>boolean</type></entry>
+       <entry>is collation visible in search path</entry>
+      </row>
+      <row>
        <entry><literal><function>pg_conversion_is_visible(<parameter>conversion_oid</parameter>)</function></literal>
        </entry>
        <entry><type>boolean</type></entry>
@@ -13082,6 +13123,12 @@ SELECT relname FROM pg_class WHERE pg_table_is_visible(oid);
        </entry>
        <entry><type>boolean</type></entry>
        <entry>is operator visible in search path</entry>
+      </row>
+      <row>
+       <entry><literal><function>pg_opfamily_is_visible(<parameter>opclass_oid</parameter>)</function></literal>
+       </entry>
+       <entry><type>boolean</type></entry>
+       <entry>is operator family visible in search path</entry>
       </row>
       <row>
        <entry><literal><function>pg_table_is_visible(<parameter>table_oid</parameter>)</function></literal>
@@ -13124,6 +13171,9 @@ SELECT relname FROM pg_class WHERE pg_table_is_visible(oid);
    </table>
 
    <indexterm>
+    <primary>pg_collation_is_visible</primary>
+   </indexterm>
+   <indexterm>
     <primary>pg_conversion_is_visible</primary>
    </indexterm>
    <indexterm>
@@ -13134,6 +13184,9 @@ SELECT relname FROM pg_class WHERE pg_table_is_visible(oid);
    </indexterm>
    <indexterm>
     <primary>pg_operator_is_visible</primary>
+   </indexterm>
+   <indexterm>
+    <primary>pg_opfamily_is_visible</primary>
    </indexterm>
    <indexterm>
     <primary>pg_table_is_visible</primary>
@@ -13180,6 +13233,10 @@ SELECT pg_type_is_visible('myschema.widget'::regtype);
 
    <indexterm>
     <primary>format_type</primary>
+   </indexterm>
+
+   <indexterm>
+    <primary>pg_describe_object</primary>
    </indexterm>
 
    <indexterm>
@@ -13235,6 +13292,10 @@ SELECT pg_type_is_visible('myschema.widget'::regtype);
    </indexterm>
 
    <indexterm>
+    <primary>pg_options_to_table</primary>
+   </indexterm>
+
+   <indexterm>
     <primary>pg_tablespace_databases</primary>
    </indexterm>
 
@@ -13259,6 +13320,11 @@ SELECT pg_type_is_visible('myschema.widget'::regtype);
        <entry><literal><function>format_type(<parameter>type_oid</parameter>, <parameter>typemod</>)</function></literal></entry>
        <entry><type>text</type></entry>
        <entry>get SQL name of a data type</entry>
+      </row>
+      <row>
+       <entry><literal><function>pg_describe_object(<parameter>catalog_id</parameter>, <parameter>object_id</parameter>, <parameter>object_sub_id</parameter>)</function></literal></entry>
+       <entry><type>text</type></entry>
+       <entry>get description of a database object</entry>
       </row>
       <row>
        <entry><literal><function>pg_get_constraintdef(<parameter>constraint_oid</parameter>)</function></literal></entry>
@@ -13332,7 +13398,7 @@ SELECT pg_type_is_visible('myschema.widget'::regtype);
       <row>
        <entry><literal><function>pg_get_serial_sequence(<parameter>table_name</parameter>, <parameter>column_name</parameter>)</function></literal></entry>
        <entry><type>text</type></entry>
-       <entry>get name of the sequence that a <type>serial</type> or <type>bigserial</type> column
+       <entry>get name of the sequence that a <type>serial</type>, <type>smallserial</type> or <type>bigserial</type> column
        uses</entry>
       </row>
       <row>
@@ -13371,14 +13437,14 @@ SELECT pg_type_is_visible('myschema.widget'::regtype);
        <entry>get underlying <command>SELECT</command> command for view</entry>
       </row>
       <row>
+       <entry><literal><function>pg_options_to_table(<parameter>reloptions</parameter>)</function></literal></entry>
+       <entry><type>setof record</type></entry>
+       <entry>get the set of storage option name/value pairs</entry>
+      </row>
+      <row>
        <entry><literal><function>pg_tablespace_databases(<parameter>tablespace_oid</parameter>)</function></literal></entry>
        <entry><type>setof oid</type></entry>
        <entry>get the set of database OIDs that have objects in the tablespace</entry>
-      </row>
-      <row>
-       <entry><literal><function>pg_describe_object(<parameter>catalog_id</parameter>, <parameter>object_id</parameter>, <parameter>object_sub_id</parameter>)</function>)</literal></entry>
-       <entry><type>text</type></entry>
-       <entry>get description of a database object</entry>
       </row>
       <row>
        <entry><literal><function>pg_typeof(<parameter>any</parameter>)</function></literal></entry>
@@ -13461,6 +13527,14 @@ SELECT pg_type_is_visible('myschema.widget'::regtype);
   <para>
    <function>pg_get_userbyid</function> extracts a role's name given
    its OID.
+  </para>
+
+  <para>
+   <function>pg_options_to_table</function> returns the set of storage
+   option name/value pairs
+   (<literal>option_name</>/<literal>option_value</>) when passed
+   <structname>pg_class</>.<structfield>reloptions</> or
+   <structname>pg_attribute</>.<structfield>attoptions</>.
   </para>
 
   <para>
@@ -13560,10 +13634,10 @@ SELECT typlen FROM pg_type WHERE oid = pg_typeof(33);
    </table>
 
    <para>
-    <function>col_description</function> returns the comment for a table column,
-    which is specified by the OID of its table and its column number.
-    <function>obj_description</function> cannot be used for table columns since
-    columns do not have OIDs of their own.
+    <function>col_description</function> returns the comment for a table
+    column, which is specified by the OID of its table and its column number.
+    (<function>obj_description</function> cannot be used for table columns
+    since columns do not have OIDs of their own.)
    </para>
 
    <para>
@@ -13582,8 +13656,8 @@ SELECT typlen FROM pg_type WHERE oid = pg_typeof(33);
     <function>shobj_description</function> is used just like
     <function>obj_description</function> except it is used for retrieving
     comments on shared objects.  Some system catalogs are global to all
-    databases within each cluster and their descriptions are stored globally
-    as well.
+    databases within each cluster, and the descriptions for objects in them
+    are stored globally as well.
    </para>
 
    <indexterm>
@@ -13643,12 +13717,12 @@ SELECT typlen FROM pg_type WHERE oid = pg_typeof(33);
       <row>
        <entry><literal><function>txid_snapshot_xmax(<parameter>txid_snapshot</parameter>)</function></literal></entry>
        <entry><type>bigint</type></entry>
-       <entry>get xmax of snapshot</entry>
+       <entry>get <literal>xmax</literal> of snapshot</entry>
       </row>
       <row>
        <entry><literal><function>txid_snapshot_xmin(<parameter>txid_snapshot</parameter>)</function></literal></entry>
        <entry><type>bigint</type></entry>
-       <entry>get xmin of snapshot</entry>
+       <entry>get <literal>xmin</literal> of snapshot</entry>
       </row>
       <row>
        <entry><literal><function>txid_visible_in_snapshot(<parameter>bigint</parameter>, <parameter>txid_snapshot</parameter>)</function></literal></entry>
@@ -13727,6 +13801,14 @@ SELECT typlen FROM pg_type WHERE oid = pg_typeof(33);
 
   <sect1 id="functions-admin">
    <title>System Administration Functions</title>
+
+   <para>
+    The functions described in this section are used to control and
+    monitor a <productname>PostgreSQL</> installation.
+   </para>
+
+  <sect2 id="functions-admin-set">
+   <title>Configuration Settings Functions</title>
 
    <para>
     <xref linkend="functions-admin-set-table"> shows the functions
@@ -13814,6 +13896,11 @@ SELECT set_config('log_statement_stats', 'off', false);
 (1 row)
 </programlisting>
    </para>
+
+  </sect2>
+
+  <sect2 id="functions-admin-signal">
+   <title>Server Signalling Functions</title>
 
    <indexterm>
     <primary>pg_cancel_backend</primary>
@@ -13911,8 +13998,16 @@ SELECT set_config('log_statement_stats', 'off', false);
     subprocess.
    </para>
 
+  </sect2>
+
+  <sect2 id="functions-admin-backup">
+   <title>Backup Control Functions</title>
+
    <indexterm>
     <primary>backup</primary>
+   </indexterm>
+   <indexterm>
+    <primary>pg_create_restore_point</primary>
    </indexterm>
    <indexterm>
     <primary>pg_current_xlog_insert_location</primary>
@@ -13951,6 +14046,13 @@ SELECT set_config('log_statement_stats', 'off', false);
      </thead>
 
      <tbody>
+      <row>
+       <entry>
+        <literal><function>pg_create_restore_point(<parameter>name</> <type>text</>)</function></literal>
+        </entry>
+       <entry><type>text</type></entry>
+       <entry>Create a named point for performing restore (restricted to superusers)</entry>
+      </row>
       <row>
        <entry>
         <literal><function>pg_current_xlog_insert_location()</function></literal>
@@ -14049,6 +14151,16 @@ postgres=# select pg_start_backup('label_goes_here');
    </para>
 
    <para>
+    <function>pg_create_restore_point</> creates a named transaction log
+    record that can be used as recovery target, and returns the corresponding
+    transaction log location.  The given name can then be used with
+    <xref linkend="recovery-target-name"> to specify the point up to which
+    recovery will proceed.  Avoid creating multiple restore points with the
+    same name, since recovery will stop at the first one whose name matches
+    the recovery target.
+   </para>
+
+   <para>
     <function>pg_current_xlog_location</> displays the current transaction log write
     location in the same format used by the above functions.  Similarly,
     <function>pg_current_xlog_insert_location</> displays the current transaction log
@@ -14087,6 +14199,11 @@ postgres=# SELECT * FROM pg_xlogfile_name_offset(pg_stop_backup());
     <xref linkend="continuous-archiving">.
    </para>
 
+  </sect2>
+
+  <sect2 id="functions-recovery-control">
+   <title>Recovery Control Functions</title>
+
    <indexterm>
     <primary>pg_is_in_recovery</primary>
    </indexterm>
@@ -14104,7 +14221,7 @@ postgres=# SELECT * FROM pg_xlogfile_name_offset(pg_stop_backup());
     The functions shown in <xref
     linkend="functions-recovery-info-table"> provide information
     about the current status of the standby.
-    These functions may be executed during both recovery and in normal running.
+    These functions may be executed both during recovery and in normal running.
    </para>
 
    <table id="functions-recovery-info-table">
@@ -14131,10 +14248,8 @@ postgres=# SELECT * FROM pg_xlogfile_name_offset(pg_stop_backup());
        <entry><type>text</type></entry>
        <entry>Get last transaction log location received and synced to disk by
         streaming replication. While streaming replication is in progress
-        this will increase monotonically. But when streaming replication is
-        restarted this will back off to the replication starting position,
-        typically the beginning of the WAL file containing the current
-        replay location.  If recovery has completed this will remain static at
+        this will increase monotonically. If recovery has completed this will
+        remain static at
         the value of the last WAL record received and synced to disk during
         recovery. If streaming replication is disabled, or if it has not yet
         started, the function returns NULL.
@@ -14158,9 +14273,9 @@ postgres=# SELECT * FROM pg_xlogfile_name_offset(pg_stop_backup());
         <literal><function>pg_last_xact_replay_timestamp()</function></literal>
         </entry>
        <entry><type>timestamp with time zone</type></entry>
-       <entry>Get timestamp of last transaction replayed during recovery.
+       <entry>Get time stamp of last transaction replayed during recovery.
         This is the time at which the commit or abort WAL record for that
-        transaction was generated.
+        transaction was generated on the primary.
         If no transactions have been replayed during recovery, this function
         returns NULL.  Otherwise, if recovery is still in progress this will
         increase monotonically.  If recovery has completed then this value will
@@ -14172,6 +14287,155 @@ postgres=# SELECT * FROM pg_xlogfile_name_offset(pg_stop_backup());
      </tbody>
     </tgroup>
    </table>
+
+   <indexterm>
+    <primary>pg_is_xlog_replay_paused</primary>
+   </indexterm>
+   <indexterm>
+    <primary>pg_xlog_replay_pause</primary>
+   </indexterm>
+   <indexterm>
+    <primary>pg_xlog_replay_resume</primary>
+   </indexterm>
+
+   <para>
+    The functions shown in <xref
+    linkend="functions-recovery-control-table"> control the progress of recovery.
+    These functions may be executed only during recovery.
+   </para>
+
+   <table id="functions-recovery-control-table">
+    <title>Recovery Control Functions</title>
+    <tgroup cols="3">
+     <thead>
+      <row><entry>Name</entry> <entry>Return Type</entry> <entry>Description</entry>
+      </row>
+     </thead>
+
+     <tbody>
+      <row>
+       <entry>
+        <literal><function>pg_is_xlog_replay_paused()</function></literal>
+        </entry>
+       <entry><type>bool</type></entry>
+       <entry>True if recovery is paused.
+       </entry>
+      </row>
+      <row>
+       <entry>
+        <literal><function>pg_xlog_replay_pause()</function></literal>
+        </entry>
+       <entry><type>void</type></entry>
+       <entry>Pauses recovery immediately.
+       </entry>
+      </row>
+      <row>
+       <entry>
+        <literal><function>pg_xlog_replay_resume()</function></literal>
+        </entry>
+       <entry><type>void</type></entry>
+       <entry>Restarts recovery if it was paused.
+       </entry>
+      </row>
+     </tbody>
+    </tgroup>
+   </table>
+
+   <para>
+    While recovery is paused no further database changes are applied.
+    If in hot standby, all new queries will see the same consistent snapshot
+    of the database, and no further query conflicts will be generated until
+    recovery is resumed.
+   </para>
+
+   <para>
+    If streaming replication is disabled, the paused state may continue
+    indefinitely without problem. While streaming replication is in
+    progress WAL records will continue to be received, which will
+    eventually fill available disk space, depending upon the duration of
+    the pause, the rate of WAL generation and available disk space.
+   </para>
+
+  </sect2>
+
+  <sect2 id="functions-snapshot-synchronization">
+   <title>Snapshot Synchronization Functions</title>
+
+   <indexterm>
+     <primary>pg_export_snapshot</primary>
+   </indexterm>
+
+   <para>
+    <productname>PostgreSQL</> allows database sessions to synchronize their
+    snapshots. A <firstterm>snapshot</> determines which data is visible to the
+    transaction that is using the snapshot. Synchronized snapshots are
+    necessary when two or more sessions need to see identical content in the
+    database. If two sessions just start their transactions independently,
+    there is always a possibility that some third transaction commits
+    between the executions of the two <command>START TRANSACTION</> commands,
+    so that one session sees the effects of that transaction and the other
+    does not.
+   </para>
+
+   <para>
+    To solve this problem, <productname>PostgreSQL</> allows a transaction to
+    <firstterm>export</> the snapshot it is using.  As long as the exporting
+    transaction remains open, other transactions can <firstterm>import</> its
+    snapshot, and thereby be guaranteed that they see exactly the same view
+    of the database that the first transaction sees.  But note that any
+    database changes made by any one of these transactions remain invisible
+    to the other transactions, as is usual for changes made by uncommitted
+    transactions.  So the transactions are synchronized with respect to
+    pre-existing data, but act normally for changes they make themselves.
+   </para>
+
+   <para>
+    Snapshots are exported with the <function>pg_export_snapshot</> function,
+    shown in <xref linkend="functions-snapshot-synchronization-table">, and
+    imported with the <xref linkend="sql-set-transaction"> command.
+   </para>
+
+   <table id="functions-snapshot-synchronization-table">
+    <title>Snapshot Synchronization Functions</title>
+    <tgroup cols="3">
+     <thead>
+      <row><entry>Name</entry> <entry>Return Type</entry> <entry>Description</entry>
+      </row>
+     </thead>
+
+     <tbody>
+      <row>
+       <entry>
+        <literal><function>pg_export_snapshot()</function></literal>
+       </entry>
+       <entry><type>text</type></entry>
+       <entry>Save the current snapshot and return its identifier</entry>
+      </row>
+     </tbody>
+    </tgroup>
+   </table>
+
+   <para>
+    The function <function>pg_export_snapshot</> saves the current snapshot
+    and returns a <type>text</> string identifying the snapshot.  This string
+    must be passed (outside the database) to clients that want to import the
+    snapshot.  The snapshot is available for import only until the end of the
+    transaction that exported it.  A transaction can export more than one
+    snapshot, if needed.  Note that doing so is only useful in <literal>READ
+    COMMITTED</> transactions, since in <literal>REPEATABLE READ</> and
+    higher isolation levels, transactions use the same snapshot throughout
+    their lifetime.  Once a transaction has exported any snapshots, it cannot
+    be prepared with <xref linkend="sql-prepare-transaction">.
+   </para>
+
+   <para>
+    See  <xref linkend="sql-set-transaction"> for details of how to use an
+    exported snapshot.
+   </para>
+  </sect2>
+
+  <sect2 id="functions-admin-dbobject">
+   <title>Database Object Management Functions</title>
 
    <para>
     The functions shown in <xref linkend="functions-admin-dbsize"> calculate
@@ -14237,8 +14501,7 @@ postgres=# SELECT * FROM pg_xlogfile_name_offset(pg_stop_backup());
         </entry>
        <entry><type>bigint</type></entry>
        <entry>
-        Total disk space used by indexes attached to the table with the
-        specified OID or name
+        Total disk space used by indexes attached to the specified table
        </entry>
       </row>
       <row>
@@ -14249,7 +14512,7 @@ postgres=# SELECT * FROM pg_xlogfile_name_offset(pg_stop_backup());
        <entry>
         Disk space used by the specified fork (<literal>'main'</literal>,
         <literal>'fsm'</literal> or <literal>'vm'</>)
-        of the table or index with the specified OID or name
+        of the specified table or index
        </entry>
       </row>
       <row>
@@ -14274,9 +14537,8 @@ postgres=# SELECT * FROM pg_xlogfile_name_offset(pg_stop_backup());
         </entry>
        <entry><type>bigint</type></entry>
        <entry>
-        Disk space used by the table with the specified OID or name,
-        excluding indexes (but including TOAST, free space map, and visibility
-        map)
+        Disk space used by the specified table, excluding indexes
+        (but including TOAST, free space map, and visibility map)
        </entry>
       </row>
       <row>
@@ -14299,7 +14561,7 @@ postgres=# SELECT * FROM pg_xlogfile_name_offset(pg_stop_backup());
         </entry>
        <entry><type>bigint</type></entry>
        <entry>
-        Total disk space used by the table with the specified OID or name,
+        Total disk space used by the specified table,
         including all indexes and <acronym>TOAST</> data
        </entry>
       </row>
@@ -14360,6 +14622,18 @@ postgres=# SELECT * FROM pg_xlogfile_name_offset(pg_stop_backup());
    </para>
 
    <para>
+    The functions above that operate on tables or indexes accept a
+    <type>regclass</> argument, which is simply the OID of the table or index
+    in the <structname>pg_class</> system catalog.  You do not have to look up
+    the OID by hand, however, since the <type>regclass</> data type's input
+    converter will do the work for you.  Just write the table name enclosed in
+    single quotes so that it looks like a literal constant.  For compatibility
+    with the handling of ordinary <acronym>SQL</acronym> names, the string
+    will be converted to lower case unless it contains double quotes around
+    the table name.
+   </para>
+
+   <para>
     The functions shown in <xref linkend="functions-admin-dblocation"> assist
     in identifying the specific disk files associated with database objects.
    </para>
@@ -14386,7 +14660,7 @@ postgres=# SELECT * FROM pg_xlogfile_name_offset(pg_stop_backup());
         </entry>
        <entry><type>oid</type></entry>
        <entry>
-        Filenode number of the relation with the specified OID or name
+        Filenode number of the specified relation
        </entry>
       </row>
       <row>
@@ -14395,7 +14669,7 @@ postgres=# SELECT * FROM pg_xlogfile_name_offset(pg_stop_backup());
         </entry>
        <entry><type>text</type></entry>
        <entry>
-        File path name of the relation with the specified OID or name
+        File path name of the specified relation
        </entry>
       </row>
      </tbody>
@@ -14421,9 +14695,14 @@ postgres=# SELECT * FROM pg_xlogfile_name_offset(pg_stop_backup());
     the relation.
    </para>
 
+  </sect2>
+
+  <sect2 id="functions-admin-genfile">
+   <title>Generic File Access Functions</title>
+
    <para>
     The functions shown in <xref
-    linkend="functions-admin-genfile"> provide native access to
+    linkend="functions-admin-genfile-table"> provide native access to
     files on the machine hosting the server. Only files within the
     database cluster directory and the <varname>log_directory</> can be
     accessed.  Use a relative path for files in the cluster directory,
@@ -14431,7 +14710,7 @@ postgres=# SELECT * FROM pg_xlogfile_name_offset(pg_stop_backup());
     for log files.  Use of these functions is restricted to superusers.
    </para>
 
-   <table id="functions-admin-genfile">
+   <table id="functions-admin-genfile-table">
     <title>Generic File Access Functions</title>
     <tgroup cols="3">
      <thead>
@@ -14500,13 +14779,13 @@ postgres=# SELECT * FROM pg_xlogfile_name_offset(pg_stop_backup());
    </indexterm>
    <para>
     <function>pg_read_binary_file</> is similar to
-    <function>pg_read_file</>, except that the result is a bytea value;
+    <function>pg_read_file</>, except that the result is a <type>bytea</type> value;
     accordingly, no encoding checks are performed.
     In combination with the <function>convert_from</> function, this function
     can be used to read a file in a specified encoding:
 <programlisting>
 SELECT convert_from(pg_read_binary_file('file_in_utf8.txt'), 'UTF8');
-</programlisting>    
+</programlisting>
    </para>
 
    <indexterm>
@@ -14524,13 +14803,18 @@ SELECT (pg_stat_file('filename')).modification;
 </programlisting>
    </para>
 
+  </sect2>
+
+  <sect2 id="functions-advisory-locks">
+   <title>Advisory Lock Functions</title>
+
    <para>
-    The functions shown in <xref linkend="functions-advisory-locks"> manage
-    advisory locks.  For details about proper use of these functions, see
-    <xref linkend="advisory-locks">.
+    The functions shown in <xref linkend="functions-advisory-locks-table">
+    manage advisory locks.  For details about proper use of these functions,
+    see <xref linkend="advisory-locks">.
    </para>
 
-   <table id="functions-advisory-locks">
+   <table id="functions-advisory-locks-table">
     <title>Advisory Lock Functions</title>
     <tgroup cols="3">
      <thead>
@@ -14544,91 +14828,147 @@ SELECT (pg_stat_file('filename')).modification;
         <literal><function>pg_advisory_lock(<parameter>key</> <type>bigint</>)</function></literal>
        </entry>
        <entry><type>void</type></entry>
-       <entry>Obtain exclusive advisory lock</entry>
+       <entry>Obtain exclusive session level advisory lock</entry>
       </row>
       <row>
        <entry>
         <literal><function>pg_advisory_lock(<parameter>key1</> <type>int</>, <parameter>key2</> <type>int</>)</function></literal>
        </entry>
        <entry><type>void</type></entry>
-       <entry>Obtain exclusive advisory lock</entry>
+       <entry>Obtain exclusive session level advisory lock</entry>
       </row>
       <row>
        <entry>
         <literal><function>pg_advisory_lock_shared(<parameter>key</> <type>bigint</>)</function></literal>
        </entry>
        <entry><type>void</type></entry>
-       <entry>Obtain shared advisory lock</entry>
+       <entry>Obtain shared session level advisory lock</entry>
       </row>
       <row>
        <entry>
         <literal><function>pg_advisory_lock_shared(<parameter>key1</> <type>int</>, <parameter>key2</> <type>int</>)</function></literal>
        </entry>
        <entry><type>void</type></entry>
-       <entry>Obtain shared advisory lock</entry>
+       <entry>Obtain shared session level advisory lock</entry>
       </row>
       <row>
        <entry>
         <literal><function>pg_advisory_unlock(<parameter>key</> <type>bigint</>)</function></literal>
        </entry>
        <entry><type>boolean</type></entry>
-       <entry>Release an exclusive advisory lock</entry>
+       <entry>Release an exclusive session level advisory lock</entry>
       </row>
       <row>
        <entry>
         <literal><function>pg_advisory_unlock(<parameter>key1</> <type>int</>, <parameter>key2</> <type>int</>)</function></literal>
        </entry>
        <entry><type>boolean</type></entry>
-       <entry>Release an exclusive advisory lock</entry>
+       <entry>Release an exclusive session level advisory lock</entry>
       </row>
       <row>
        <entry>
         <literal><function>pg_advisory_unlock_all()</function></literal>
        </entry>
        <entry><type>void</type></entry>
-       <entry>Release all advisory locks held by the current session</entry>
+       <entry>Release all session level advisory locks held by the current session</entry>
       </row>
       <row>
        <entry>
         <literal><function>pg_advisory_unlock_shared(<parameter>key</> <type>bigint</>)</function></literal>
        </entry>
        <entry><type>boolean</type></entry>
-       <entry>Release a shared advisory lock</entry>
+       <entry>Release a shared session level advisory lock</entry>
       </row>
       <row>
        <entry>
         <literal><function>pg_advisory_unlock_shared(<parameter>key1</> <type>int</>, <parameter>key2</> <type>int</>)</function></literal>
        </entry>
        <entry><type>boolean</type></entry>
-       <entry>Release a shared advisory lock</entry>
+       <entry>Release a shared session level advisory lock</entry>
+      </row>
+      <row>
+       <entry>
+        <literal><function>pg_advisory_xact_lock(<parameter>key</> <type>bigint</>)</function></literal>
+       </entry>
+       <entry><type>void</type></entry>
+       <entry>Obtain exclusive transaction level advisory lock</entry>
+      </row>
+      <row>
+       <entry>
+        <literal><function>pg_advisory_xact_lock(<parameter>key1</> <type>int</>, <parameter>key2</> <type>int</>)</function></literal>
+       </entry>
+       <entry><type>void</type></entry>
+       <entry>Obtain exclusive transaction level advisory lock</entry>
+      </row>
+      <row>
+       <entry>
+        <literal><function>pg_advisory_xact_lock_shared(<parameter>key</> <type>bigint</>)</function></literal>
+       </entry>
+       <entry><type>void</type></entry>
+       <entry>Obtain shared transaction level advisory lock</entry>
+      </row>
+      <row>
+       <entry>
+        <literal><function>pg_advisory_xact_lock_shared(<parameter>key1</> <type>int</>, <parameter>key2</> <type>int</>)</function></literal>
+       </entry>
+       <entry><type>void</type></entry>
+       <entry>Obtain shared advisory lock for the current transaction</entry>
       </row>
       <row>
        <entry>
         <literal><function>pg_try_advisory_lock(<parameter>key</> <type>bigint</>)</function></literal>
        </entry>
        <entry><type>boolean</type></entry>
-       <entry>Obtain exclusive advisory lock if available</entry>
+       <entry>Obtain exclusive session level advisory lock if available</entry>
       </row>
       <row>
        <entry>
         <literal><function>pg_try_advisory_lock(<parameter>key1</> <type>int</>, <parameter>key2</> <type>int</>)</function></literal>
        </entry>
        <entry><type>boolean</type></entry>
-       <entry>Obtain exclusive advisory lock if available</entry>
+       <entry>Obtain exclusive session level advisory lock if available</entry>
       </row>
       <row>
        <entry>
         <literal><function>pg_try_advisory_lock_shared(<parameter>key</> <type>bigint</>)</function></literal>
        </entry>
        <entry><type>boolean</type></entry>
-       <entry>Obtain shared advisory lock if available</entry>
+       <entry>Obtain shared session level advisory lock if available</entry>
       </row>
       <row>
        <entry>
         <literal><function>pg_try_advisory_lock_shared(<parameter>key1</> <type>int</>, <parameter>key2</> <type>int</>)</function></literal>
        </entry>
        <entry><type>boolean</type></entry>
-       <entry>Obtain shared advisory lock if available</entry>
+       <entry>Obtain shared session level advisory lock if available</entry>
+      </row>
+      <row>
+       <entry>
+        <literal><function>pg_try_advisory_xact_lock(<parameter>key</> <type>bigint</>)</function></literal>
+       </entry>
+       <entry><type>boolean</type></entry>
+       <entry>Obtain exclusive transaction level advisory lock if available</entry>
+      </row>
+      <row>
+       <entry>
+        <literal><function>pg_try_advisory_xact_lock(<parameter>key1</> <type>int</>, <parameter>key2</> <type>int</>)</function></literal>
+       </entry>
+       <entry><type>boolean</type></entry>
+       <entry>Obtain exclusive transaction level advisory lock if available</entry>
+      </row>
+      <row>
+       <entry>
+        <literal><function>pg_try_advisory_xact_lock_shared(<parameter>key</> <type>bigint</>)</function></literal>
+       </entry>
+       <entry><type>boolean</type></entry>
+       <entry>Obtain shared transaction level advisory lock if available</entry>
+      </row>
+      <row>
+       <entry>
+        <literal><function>pg_try_advisory_xact_lock_shared(<parameter>key1</> <type>int</>, <parameter>key2</> <type>int</>)</function></literal>
+       </entry>
+       <entry><type>boolean</type></entry>
+       <entry>Obtain shared transaction level advisory lock if available</entry>
       </row>
      </tbody>
     </tgroup>
@@ -14680,11 +15020,49 @@ SELECT (pg_stat_file('filename')).modification;
    </para>
 
    <indexterm>
+    <primary>pg_advisory_xact_lock</primary>
+   </indexterm>
+   <para>
+    <function>pg_advisory_xact_lock</> works the same as
+    <function>pg_advisory_lock</>, expect the lock is automatically released
+    at the end of the current transaction and can not be released explicitly.
+   </para>
+
+   <indexterm>
+    <primary>pg_advisory_xact_lock_shared</primary>
+   </indexterm>
+   <para>
+    <function>pg_advisory_xact_lock_shared</> works the same as
+    <function>pg_advisory_lock_shared</>, expect the lock is automatically released
+    at the end of the current transaction and can not be released explicitly.
+   </para>
+
+   <indexterm>
+    <primary>pg_try_advisory_xact_lock</primary>
+   </indexterm>
+   <para>
+    <function>pg_try_advisory_xact_lock</> works the same as
+    <function>pg_try_advisory_lock</>, expect the lock, if acquired,
+    is automatically released at the end of the current transaction and
+    can not be released explicitly.
+   </para>
+
+   <indexterm>
+    <primary>pg_try_advisory_xact_lock_shared</primary>
+   </indexterm>
+   <para>
+    <function>pg_try_advisory_xact_lock_shared</> works the same as
+    <function>pg_try_advisory_lock_shared</>, expect the lock, if acquired,
+    is automatically released at the end of the current transaction and
+    can not be released explicitly.
+   </para>
+
+   <indexterm>
     <primary>pg_advisory_unlock</primary>
    </indexterm>
    <para>
     <function>pg_advisory_unlock</> will release a previously-acquired
-    exclusive advisory lock.  It
+    exclusive session level advisory lock.  It
     returns <literal>true</> if the lock is successfully released.
     If the lock was not held, it will return <literal>false</>,
     and in addition, an SQL warning will be raised by the server.
@@ -14696,17 +15074,19 @@ SELECT (pg_stat_file('filename')).modification;
    <para>
     <function>pg_advisory_unlock_shared</> works the same as
     <function>pg_advisory_unlock</>,
-    except it releases a shared advisory lock.
+    except it releases a shared session level advisory lock.
    </para>
 
    <indexterm>
     <primary>pg_advisory_unlock_all</primary>
    </indexterm>
    <para>
-    <function>pg_advisory_unlock_all</> will release all advisory locks
-    held by the current session.  (This function is implicitly invoked
+    <function>pg_advisory_unlock_all</> will release all session level advisory
+    locks held by the current session.  (This function is implicitly invoked
     at session end, even if the client disconnects ungracefully.)
    </para>
+
+  </sect2>
 
   </sect1>
 

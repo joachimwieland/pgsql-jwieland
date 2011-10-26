@@ -183,7 +183,7 @@ rt__int_size(ArrayType *a, float *size)
 	*size = (float) ARRNELEMS(a);
 }
 
-/* Sort the given data (len >= 2).  Return true if any duplicates found */
+/* Sort the given data (len >= 2).	Return true if any duplicates found */
 bool
 isort(int4 *a, int len)
 {
@@ -195,7 +195,7 @@ isort(int4 *a, int len)
 	bool		r = FALSE;
 
 	/*
-	 * We use a simple insertion sort.  While this is O(N^2) in the worst
+	 * We use a simple insertion sort.	While this is O(N^2) in the worst
 	 * case, it's quite fast if the input is already sorted or nearly so.
 	 * Also, for not-too-large inputs it's faster than more complex methods
 	 * anyhow.
@@ -388,15 +388,15 @@ int_to_intset(int32 n)
 int
 compASC(const void *a, const void *b)
 {
-	if (*(int4 *) a == *(int4 *) b)
+	if (*(const int4 *) a == *(const int4 *) b)
 		return 0;
-	return (*(int4 *) a > *(int4 *) b) ? 1 : -1;
+	return (*(const int4 *) a > *(const int4 *) b) ? 1 : -1;
 }
 
 int
 compDESC(const void *a, const void *b)
 {
-	if (*(int4 *) a == *(int4 *) b)
+	if (*(const int4 *) a == *(const int4 *) b)
 		return 0;
-	return (*(int4 *) a < *(int4 *) b) ? 1 : -1;
+	return (*(const int4 *) a < *(const int4 *) b) ? 1 : -1;
 }

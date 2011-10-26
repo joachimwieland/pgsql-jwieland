@@ -18,9 +18,7 @@
 
 #include "miscadmin.h"
 #include "tsearch/ts_locale.h"
-#include "tsearch/ts_public.h"
 #include "tsearch/ts_utils.h"
-#include "utils/builtins.h"
 
 
 /*
@@ -64,7 +62,7 @@ get_tsearch_config_filename(const char *basename,
 static int
 comparestr(const void *a, const void *b)
 {
-	return strcmp(*(char **) a, *(char **) b);
+	return strcmp(*(char * const *) a, *(char * const *) b);
 }
 
 /*

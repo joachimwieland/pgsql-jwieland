@@ -36,7 +36,6 @@
 #include "access/slru.h"
 #include "access/transam.h"
 #include "pg_trace.h"
-#include "postmaster/bgwriter.h"
 
 /*
  * Defines for CLOG page sizes.  A page is the same BLCKSZ as is used
@@ -431,8 +430,8 @@ CLOGShmemInit(void)
 /*
  * This func must be called ONCE on system install.  It creates
  * the initial CLOG segment.  (The CLOG directory is assumed to
- * have been created by the initdb shell script, and CLOGShmemInit
- * must have been called already.)
+ * have been created by initdb, and CLOGShmemInit must have been
+ * called already.)
  */
 void
 BootStrapCLOG(void)
@@ -607,7 +606,7 @@ TruncateCLOG(TransactionId oldestXact)
 	cutoffPage = TransactionIdToPage(oldestXact);
 
 	/* Check to see if there's any files that could be removed */
-	if (!SlruScanDirectory(ClogCtl, cutoffPage, false))
+	if (!SlruScanDirectory(ClogCtl, SlruScanDirCbReportPresence, &cutoffPage))
 		return;					/* nothing to remove */
 
 	/* Write XLOG record and flush XLOG to disk */

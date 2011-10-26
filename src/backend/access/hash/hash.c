@@ -25,6 +25,7 @@
 #include "optimizer/cost.h"
 #include "optimizer/plancat.h"
 #include "storage/bufmgr.h"
+#include "utils/rel.h"
 
 
 /* Working state for hashbuild and its callback */
@@ -54,6 +55,7 @@ hashbuild(PG_FUNCTION_ARGS)
 	IndexBuildResult *result;
 	BlockNumber relpages;
 	double		reltuples;
+	double		allvisfrac;
 	uint32		num_buckets;
 	HashBuildState buildstate;
 
@@ -66,7 +68,7 @@ hashbuild(PG_FUNCTION_ARGS)
 			 RelationGetRelationName(index));
 
 	/* Estimate the number of rows currently present in the table */
-	estimate_rel_size(heap, NULL, &relpages, &reltuples);
+	estimate_rel_size(heap, NULL, &relpages, &reltuples, &allvisfrac);
 
 	/* Initialize the hash index metadata page and initial buckets */
 	num_buckets = _hash_metapinit(index, reltuples, MAIN_FORKNUM);
@@ -413,6 +415,7 @@ hashrescan(PG_FUNCTION_ARGS)
 {
 	IndexScanDesc scan = (IndexScanDesc) PG_GETARG_POINTER(0);
 	ScanKey		scankey = (ScanKey) PG_GETARG_POINTER(1);
+
 	/* remaining arguments are ignored */
 	HashScanOpaque so = (HashScanOpaque) scan->opaque;
 	Relation	rel = scan->indexRelation;

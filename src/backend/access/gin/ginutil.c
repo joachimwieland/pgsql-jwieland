@@ -16,10 +16,9 @@
 
 #include "access/gin_private.h"
 #include "access/reloptions.h"
+#include "catalog/pg_collation.h"
 #include "catalog/pg_type.h"
 #include "miscadmin.h"
-#include "storage/bufmgr.h"
-#include "storage/freespace.h"
 #include "storage/indexfsm.h"
 #include "storage/lmgr.h"
 
@@ -55,6 +54,8 @@ initGinState(GinState *state, Relation index)
 							   origTupdesc->attrs[i]->atttypid,
 							   origTupdesc->attrs[i]->atttypmod,
 							   origTupdesc->attrs[i]->attndims);
+			TupleDescInitEntryCollation(state->tupdesc[i], (AttrNumber) 2,
+										origTupdesc->attrs[i]->attcollation);
 		}
 
 		fmgr_info_copy(&(state->compareFn[i]),
@@ -78,13 +79,29 @@ initGinState(GinState *state, Relation index)
 			fmgr_info_copy(&(state->comparePartialFn[i]),
 				   index_getprocinfo(index, i + 1, GIN_COMPARE_PARTIAL_PROC),
 						   CurrentMemoryContext);
-
 			state->canPartialMatch[i] = true;
 		}
 		else
 		{
 			state->canPartialMatch[i] = false;
 		}
+
+		/*
+		 * If the index column has a specified collation, we should honor that
+		 * while doing comparisons.  However, we may have a collatable storage
+		 * type for a noncollatable indexed data type (for instance, hstore
+		 * uses text index entries).  If there's no index collation then
+		 * specify default collation in case the support functions need
+		 * collation.  This is harmless if the support functions don't care
+		 * about collation, so we just do it unconditionally.  (We could
+		 * alternatively call get_typcollation, but that seems like expensive
+		 * overkill --- there aren't going to be any cases where a GIN storage
+		 * type has a nondefault collation.)
+		 */
+		if (OidIsValid(index->rd_indcollation[i]))
+			state->supportCollation[i] = index->rd_indcollation[i];
+		else
+			state->supportCollation[i] = DEFAULT_COLLATION_OID;
 	}
 }
 
@@ -273,8 +290,9 @@ ginCompareEntries(GinState *ginstate, OffsetNumber attnum,
 		return 0;
 
 	/* both not null, so safe to call the compareFn */
-	return DatumGetInt32(FunctionCall2(&ginstate->compareFn[attnum - 1],
-									   a, b));
+	return DatumGetInt32(FunctionCall2Coll(&ginstate->compareFn[attnum - 1],
+									  ginstate->supportCollation[attnum - 1],
+										   a, b));
 }
 
 /*
@@ -309,6 +327,7 @@ typedef struct
 typedef struct
 {
 	FmgrInfo   *cmpDatumFunc;
+	Oid			collation;
 	bool		haveDups;
 } cmpEntriesArg;
 
@@ -330,13 +349,14 @@ cmpEntries(const void *a, const void *b, void *arg)
 	else if (bb->isnull)
 		res = -1;				/* not-NULL "<" NULL */
 	else
-		res = DatumGetInt32(FunctionCall2(data->cmpDatumFunc,
-										  aa->datum, bb->datum));
+		res = DatumGetInt32(FunctionCall2Coll(data->cmpDatumFunc,
+											  data->collation,
+											  aa->datum, bb->datum));
 
 	/*
-	 * Detect if we have any duplicates.  If there are equal keys, qsort
-	 * must compare them at some point, else it wouldn't know whether one
-	 * should go before or after the other.
+	 * Detect if we have any duplicates.  If there are equal keys, qsort must
+	 * compare them at some point, else it wouldn't know whether one should go
+	 * before or after the other.
 	 */
 	if (res == 0)
 		data->haveDups = true;
@@ -377,10 +397,11 @@ ginExtractEntries(GinState *ginstate, OffsetNumber attnum,
 	/* OK, call the opclass's extractValueFn */
 	nullFlags = NULL;			/* in case extractValue doesn't set it */
 	entries = (Datum *)
-		DatumGetPointer(FunctionCall3(&ginstate->extractValueFn[attnum - 1],
-									  value,
-									  PointerGetDatum(nentries),
-									  PointerGetDatum(&nullFlags)));
+		DatumGetPointer(FunctionCall3Coll(&ginstate->extractValueFn[attnum - 1],
+									  ginstate->supportCollation[attnum - 1],
+										  value,
+										  PointerGetDatum(nentries),
+										  PointerGetDatum(&nullFlags)));
 
 	/*
 	 * Generate a placeholder if the item contained no keys.
@@ -397,9 +418,9 @@ ginExtractEntries(GinState *ginstate, OffsetNumber attnum,
 
 	/*
 	 * If the extractValueFn didn't create a nullFlags array, create one,
-	 * assuming that everything's non-null.  Otherwise, run through the
-	 * array and make sure each value is exactly 0 or 1; this ensures
-	 * binary compatibility with the GinNullCategory representation.
+	 * assuming that everything's non-null.  Otherwise, run through the array
+	 * and make sure each value is exactly 0 or 1; this ensures binary
+	 * compatibility with the GinNullCategory representation.
 	 */
 	if (nullFlags == NULL)
 		nullFlags = (bool *) palloc0(*nentries * sizeof(bool));
@@ -415,8 +436,8 @@ ginExtractEntries(GinState *ginstate, OffsetNumber attnum,
 	 * If there's more than one key, sort and unique-ify.
 	 *
 	 * XXX Using qsort here is notationally painful, and the overhead is
-	 * pretty bad too.  For small numbers of keys it'd likely be better to
-	 * use a simple insertion sort.
+	 * pretty bad too.	For small numbers of keys it'd likely be better to use
+	 * a simple insertion sort.
 	 */
 	if (*nentries > 1)
 	{
@@ -431,6 +452,7 @@ ginExtractEntries(GinState *ginstate, OffsetNumber attnum,
 		}
 
 		arg.cmpDatumFunc = &ginstate->compareFn[attnum - 1];
+		arg.collation = ginstate->supportCollation[attnum - 1];
 		arg.haveDups = false;
 		qsort_arg(keydata, *nentries, sizeof(keyEntryData),
 				  cmpEntries, (void *) &arg);
@@ -445,7 +467,7 @@ ginExtractEntries(GinState *ginstate, OffsetNumber attnum,
 			j = 1;
 			for (i = 1; i < *nentries; i++)
 			{
-				if (cmpEntries(&keydata[i-1], &keydata[i], &arg) != 0)
+				if (cmpEntries(&keydata[i - 1], &keydata[i], &arg) != 0)
 				{
 					entries[j] = keydata[i].datum;
 					nullFlags[j] = keydata[i].isnull;
@@ -508,9 +530,9 @@ ginoptions(PG_FUNCTION_ARGS)
 void
 ginGetStats(Relation index, GinStatsData *stats)
 {
-	Buffer			metabuffer;
-	Page			metapage;
-	GinMetaPageData	*metadata;
+	Buffer		metabuffer;
+	Page		metapage;
+	GinMetaPageData *metadata;
 
 	metabuffer = ReadBuffer(index, GIN_METAPAGE_BLKNO);
 	LockBuffer(metabuffer, GIN_SHARE);
@@ -535,9 +557,9 @@ ginGetStats(Relation index, GinStatsData *stats)
 void
 ginUpdateStats(Relation index, const GinStatsData *stats)
 {
-	Buffer			metabuffer;
-	Page			metapage;
-	GinMetaPageData	*metadata;
+	Buffer		metabuffer;
+	Page		metapage;
+	GinMetaPageData *metadata;
 
 	metabuffer = ReadBuffer(index, GIN_METAPAGE_BLKNO);
 	LockBuffer(metabuffer, GIN_EXCLUSIVE);
@@ -555,9 +577,9 @@ ginUpdateStats(Relation index, const GinStatsData *stats)
 
 	if (RelationNeedsWAL(index))
 	{
-		XLogRecPtr			recptr;
-		ginxlogUpdateMeta	data;
-		XLogRecData			rdata;
+		XLogRecPtr	recptr;
+		ginxlogUpdateMeta data;
+		XLogRecData rdata;
 
 		data.node = index->rd_node;
 		data.ntuples = 0;

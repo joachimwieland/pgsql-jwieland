@@ -15,19 +15,19 @@
 
 #include "postgres.h"
 
-#include "access/heapam.h"
 #include "access/sysattr.h"
 #include "catalog/catalog.h"
-#include "catalog/dependency.h"
 #include "catalog/indexing.h"
-#include "catalog/namespace.h"
 #include "catalog/objectaddress.h"
 #include "catalog/pg_authid.h"
 #include "catalog/pg_cast.h"
-#include "catalog/pg_class.h"
+#include "catalog/pg_collation.h"
 #include "catalog/pg_constraint.h"
 #include "catalog/pg_conversion.h"
 #include "catalog/pg_database.h"
+#include "catalog/pg_extension.h"
+#include "catalog/pg_foreign_data_wrapper.h"
+#include "catalog/pg_foreign_server.h"
 #include "catalog/pg_language.h"
 #include "catalog/pg_largeobject.h"
 #include "catalog/pg_largeobject_metadata.h"
@@ -46,9 +46,13 @@
 #include "catalog/pg_type.h"
 #include "commands/dbcommands.h"
 #include "commands/defrem.h"
+#include "commands/extension.h"
 #include "commands/proclang.h"
 #include "commands/tablespace.h"
 #include "commands/trigger.h"
+#include "foreign/foreign.h"
+#include "libpq/be-fsstubs.h"
+#include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "parser/parse_func.h"
 #include "parser/parse_oper.h"
@@ -60,20 +64,192 @@
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
-#include "utils/rel.h"
 #include "utils/tqual.h"
 
+/*
+ * ObjectProperty
+ *
+ * This array provides a common part of system object structure; to help
+ * consolidate routines to handle various kind of object classes.
+ */
+typedef struct
+{
+	Oid			class_oid;			/* oid of catalog */
+	Oid			oid_index_oid; 		/* oid of index on system oid column */
+	int			oid_catcache_id;	/* id of catcache on system oid column  */
+	AttrNumber	attnum_namespace;	/* attnum of namespace field */
+} ObjectPropertyType;
+
+static ObjectPropertyType ObjectProperty[] =
+{
+	{
+		CastRelationId,
+		CastOidIndexId,
+		-1,
+		InvalidAttrNumber
+	},
+	{
+		CollationRelationId,
+		CollationOidIndexId,
+		COLLOID,
+		Anum_pg_collation_collnamespace
+	},
+	{
+		ConstraintRelationId,
+		ConstraintOidIndexId,
+		CONSTROID,
+		Anum_pg_constraint_connamespace
+	},
+	{
+		ConversionRelationId,
+		ConversionOidIndexId,
+		CONVOID,
+		Anum_pg_conversion_connamespace
+	},
+	{
+		DatabaseRelationId,
+		DatabaseOidIndexId,
+		DATABASEOID,
+		InvalidAttrNumber
+	},
+	{
+		ExtensionRelationId,
+		ExtensionOidIndexId,
+		-1,
+		InvalidAttrNumber		/* extension doesn't belong to extnamespace */
+	},
+	{
+		ForeignDataWrapperRelationId,
+		ForeignDataWrapperOidIndexId,
+		FOREIGNDATAWRAPPEROID,
+		InvalidAttrNumber
+	},
+	{
+		ForeignServerRelationId,
+		ForeignServerOidIndexId,
+		FOREIGNSERVEROID,
+		InvalidAttrNumber
+	},
+	{
+		ProcedureRelationId,
+		ProcedureOidIndexId,
+		PROCOID,
+		Anum_pg_proc_pronamespace
+	},
+	{
+		LanguageRelationId,
+		LanguageOidIndexId,
+		LANGOID,
+		InvalidAttrNumber,
+	},
+	{
+		LargeObjectMetadataRelationId,
+		LargeObjectMetadataOidIndexId,
+		-1,
+		InvalidAttrNumber
+	},
+	{
+		OperatorClassRelationId,
+		OpclassOidIndexId,
+		CLAOID,
+		Anum_pg_opclass_opcnamespace,
+	},
+	{
+		OperatorRelationId,
+		OperatorOidIndexId,
+		OPEROID,
+		Anum_pg_operator_oprnamespace
+	},
+	{
+		OperatorFamilyRelationId,
+		OpfamilyOidIndexId,
+		OPFAMILYOID,
+		Anum_pg_opfamily_opfnamespace
+	},
+	{
+		AuthIdRelationId,
+		AuthIdOidIndexId,
+		AUTHOID,
+		InvalidAttrNumber
+	},
+	{
+		RewriteRelationId,
+		RewriteOidIndexId,
+		-1,
+		InvalidAttrNumber
+	},
+	{
+		NamespaceRelationId,
+		NamespaceOidIndexId,
+		NAMESPACEOID,
+		InvalidAttrNumber
+	},
+	{
+		RelationRelationId,
+		ClassOidIndexId,
+		RELOID,
+		Anum_pg_class_relnamespace
+	},
+	{
+		TableSpaceRelationId,
+		TablespaceOidIndexId,
+		TABLESPACEOID,
+		InvalidAttrNumber
+	},
+	{
+		TriggerRelationId,
+		TriggerOidIndexId,
+		-1,
+		InvalidAttrNumber
+	},
+	{
+		TSConfigRelationId,
+		TSConfigOidIndexId,
+		TSCONFIGOID,
+		Anum_pg_ts_config_cfgnamespace
+	},
+	{
+		TSDictionaryRelationId,
+		TSDictionaryOidIndexId,
+		TSDICTOID,
+		Anum_pg_ts_dict_dictnamespace
+	},
+	{
+		TSParserRelationId,
+		TSParserOidIndexId,
+		TSPARSEROID,
+		Anum_pg_ts_parser_prsnamespace
+	},
+	{
+		TSTemplateRelationId,
+		TSTemplateOidIndexId,
+		TSTEMPLATEOID,
+		Anum_pg_ts_template_tmplnamespace,
+	},
+	{
+		TypeRelationId,
+		TypeOidIndexId,
+		TYPEOID,
+		Anum_pg_type_typnamespace
+	}
+};
+
 static ObjectAddress get_object_address_unqualified(ObjectType objtype,
-							   List *qualname);
-static Relation get_relation_by_qualified_name(ObjectType objtype,
-							   List *objname, LOCKMODE lockmode);
+							   List *qualname, bool missing_ok);
+static ObjectAddress get_relation_by_qualified_name(ObjectType objtype,
+							   List *objname, Relation *relp,
+							   LOCKMODE lockmode, bool missing_ok);
 static ObjectAddress get_object_address_relobject(ObjectType objtype,
-							 List *objname, Relation *relp);
+							 List *objname, Relation *relp, bool missing_ok);
 static ObjectAddress get_object_address_attribute(ObjectType objtype,
-							 List *objname, Relation *relp, LOCKMODE lockmode);
+							 List *objname, Relation *relp,
+							 LOCKMODE lockmode, bool missing_ok);
+static ObjectAddress get_object_address_type(ObjectType objtype,
+						List *objname, bool missing_ok);
 static ObjectAddress get_object_address_opcf(ObjectType objtype, List *objname,
-						List *objargs);
+						List *objargs, bool missing_ok);
 static bool object_exists(ObjectAddress address);
+static ObjectPropertyType *get_object_property_data(Oid class_id);
 
 /*
  * Translate an object name and arguments (as passed by the parser) to an
@@ -97,10 +273,10 @@ static bool object_exists(ObjectAddress address);
  */
 ObjectAddress
 get_object_address(ObjectType objtype, List *objname, List *objargs,
-				   Relation *relp, LOCKMODE lockmode)
+				   Relation *relp, LOCKMODE lockmode, bool missing_ok)
 {
-	ObjectAddress	address;
-	Relation		relation = NULL;
+	ObjectAddress address;
+	Relation	relation = NULL;
 
 	/* Some kind of lock must be taken. */
 	Assert(lockmode != NoLock);
@@ -112,43 +288,48 @@ get_object_address(ObjectType objtype, List *objname, List *objargs,
 		case OBJECT_TABLE:
 		case OBJECT_VIEW:
 		case OBJECT_FOREIGN_TABLE:
-			relation =
-				get_relation_by_qualified_name(objtype, objname, lockmode);
-			address.classId = RelationRelationId;
-			address.objectId = RelationGetRelid(relation);
-			address.objectSubId = 0;
+			address =
+				get_relation_by_qualified_name(objtype, objname,
+											   &relation, lockmode,
+											   missing_ok);
 			break;
 		case OBJECT_COLUMN:
 			address =
-				get_object_address_attribute(objtype, objname, &relation,
-					lockmode);
+				get_object_address_attribute(objtype, objname,
+											 &relation, lockmode,
+											 missing_ok);
 			break;
 		case OBJECT_RULE:
 		case OBJECT_TRIGGER:
 		case OBJECT_CONSTRAINT:
-			address = get_object_address_relobject(objtype, objname, &relation);
+			address = get_object_address_relobject(objtype, objname,
+												   &relation, missing_ok);
 			break;
 		case OBJECT_DATABASE:
+		case OBJECT_EXTENSION:
 		case OBJECT_TABLESPACE:
 		case OBJECT_ROLE:
 		case OBJECT_SCHEMA:
 		case OBJECT_LANGUAGE:
-			address = get_object_address_unqualified(objtype, objname);
+		case OBJECT_FDW:
+		case OBJECT_FOREIGN_SERVER:
+			address = get_object_address_unqualified(objtype,
+													 objname, missing_ok);
 			break;
 		case OBJECT_TYPE:
-			address.classId = TypeRelationId;
-			address.objectId =
-				typenameTypeId(NULL, makeTypeNameFromNameList(objname));
-			address.objectSubId = 0;
+		case OBJECT_DOMAIN:
+			address = get_object_address_type(objtype, objname, missing_ok);
 			break;
 		case OBJECT_AGGREGATE:
 			address.classId = ProcedureRelationId;
-			address.objectId = LookupAggNameTypeNames(objname, objargs, false);
+			address.objectId =
+				LookupAggNameTypeNames(objname, objargs, missing_ok);
 			address.objectSubId = 0;
 			break;
 		case OBJECT_FUNCTION:
 			address.classId = ProcedureRelationId;
-			address.objectId = LookupFuncNameTypeNames(objname, objargs, false);
+			address.objectId =
+				LookupFuncNameTypeNames(objname, objargs, missing_ok);
 			address.objectSubId = 0;
 			break;
 		case OBJECT_OPERATOR:
@@ -158,17 +339,23 @@ get_object_address(ObjectType objtype, List *objname, List *objargs,
 				LookupOperNameTypeNames(NULL, objname,
 										(TypeName *) linitial(objargs),
 										(TypeName *) lsecond(objargs),
-										false, -1);
+										missing_ok, -1);
+			address.objectSubId = 0;
+			break;
+		case OBJECT_COLLATION:
+			address.classId = CollationRelationId;
+			address.objectId = get_collation_oid(objname, missing_ok);
 			address.objectSubId = 0;
 			break;
 		case OBJECT_CONVERSION:
 			address.classId = ConversionRelationId;
-			address.objectId = get_conversion_oid(objname, false);
+			address.objectId = get_conversion_oid(objname, missing_ok);
 			address.objectSubId = 0;
 			break;
 		case OBJECT_OPCLASS:
 		case OBJECT_OPFAMILY:
-			address = get_object_address_opcf(objtype, objname, objargs);
+			address = get_object_address_opcf(objtype,
+											  objname, objargs, missing_ok);
 			break;
 		case OBJECT_LARGEOBJECT:
 			Assert(list_length(objname) == 1);
@@ -176,42 +363,45 @@ get_object_address(ObjectType objtype, List *objname, List *objargs,
 			address.objectId = oidparse(linitial(objname));
 			address.objectSubId = 0;
 			if (!LargeObjectExists(address.objectId))
+			{
+				if (!missing_ok)
 				ereport(ERROR,
 						(errcode(ERRCODE_UNDEFINED_OBJECT),
 						 errmsg("large object %u does not exist",
 								address.objectId)));
+			}
 			break;
 		case OBJECT_CAST:
 			{
-				TypeName *sourcetype = (TypeName *) linitial(objname);
-				TypeName *targettype = (TypeName *) linitial(objargs);
-				Oid sourcetypeid = typenameTypeId(NULL, sourcetype);
-				Oid targettypeid = typenameTypeId(NULL, targettype);
+				TypeName   *sourcetype = (TypeName *) linitial(objname);
+				TypeName   *targettype = (TypeName *) linitial(objargs);
+				Oid			sourcetypeid = typenameTypeId(NULL, sourcetype);
+				Oid			targettypeid = typenameTypeId(NULL, targettype);
 
 				address.classId = CastRelationId;
 				address.objectId =
-					get_cast_oid(sourcetypeid, targettypeid, false);
+					get_cast_oid(sourcetypeid, targettypeid, missing_ok);
 				address.objectSubId = 0;
 			}
 			break;
 		case OBJECT_TSPARSER:
 			address.classId = TSParserRelationId;
-			address.objectId = get_ts_parser_oid(objname, false);
+			address.objectId = get_ts_parser_oid(objname, missing_ok);
 			address.objectSubId = 0;
 			break;
 		case OBJECT_TSDICTIONARY:
 			address.classId = TSDictionaryRelationId;
-			address.objectId = get_ts_dict_oid(objname, false);
+			address.objectId = get_ts_dict_oid(objname, missing_ok);
 			address.objectSubId = 0;
 			break;
 		case OBJECT_TSTEMPLATE:
 			address.classId = TSTemplateRelationId;
-			address.objectId = get_ts_template_oid(objname, false);
+			address.objectId = get_ts_template_oid(objname, missing_ok);
 			address.objectSubId = 0;
 			break;
 		case OBJECT_TSCONFIGURATION:
 			address.classId = TSConfigRelationId;
-			address.objectId = get_ts_config_oid(objname, false);
+			address.objectId = get_ts_config_oid(objname, missing_ok);
 			address.objectSubId = 0;
 			break;
 		default:
@@ -223,9 +413,18 @@ get_object_address(ObjectType objtype, List *objname, List *objargs,
 	}
 
 	/*
+	 * If we could not find the supplied object, return without locking.
+	 */
+	if (!OidIsValid(address.objectId))
+	{
+		Assert(missing_ok);
+		return address;
+	}
+
+	/*
 	 * If we're dealing with a relation or attribute, then the relation is
-	 * already locked.  If we're dealing with any other type of object, we need
-	 * to lock it and then verify that it still exists.
+	 * already locked.	If we're dealing with any other type of object, we
+	 * need to lock it and then verify that it still exists.
 	 */
 	if (address.classId != RelationRelationId)
 	{
@@ -249,7 +448,8 @@ get_object_address(ObjectType objtype, List *objname, List *objargs,
  * unqualified name.
  */
 static ObjectAddress
-get_object_address_unqualified(ObjectType objtype, List *qualname)
+get_object_address_unqualified(ObjectType objtype,
+							   List *qualname, bool missing_ok)
 {
 	const char *name;
 	ObjectAddress address;
@@ -267,6 +467,9 @@ get_object_address_unqualified(ObjectType objtype, List *qualname)
 			case OBJECT_DATABASE:
 				msg = gettext_noop("database name cannot be qualified");
 				break;
+			case OBJECT_EXTENSION:
+				msg = gettext_noop("extension name cannot be qualified");
+				break;
 			case OBJECT_TABLESPACE:
 				msg = gettext_noop("tablespace name cannot be qualified");
 				break;
@@ -279,9 +482,15 @@ get_object_address_unqualified(ObjectType objtype, List *qualname)
 			case OBJECT_LANGUAGE:
 				msg = gettext_noop("language name cannot be qualified");
 				break;
+			case OBJECT_FDW:
+				msg = gettext_noop("foreign-data wrapper name cannot be qualified");
+				break;
+			case OBJECT_FOREIGN_SERVER:
+				msg = gettext_noop("server name cannot be qualified");
+				break;
 			default:
 				elog(ERROR, "unrecognized objtype: %d", (int) objtype);
-				msg = NULL;			/* placate compiler */
+				msg = NULL;		/* placate compiler */
 		}
 		ereport(ERROR,
 				(errcode(ERRCODE_SYNTAX_ERROR),
@@ -296,27 +505,42 @@ get_object_address_unqualified(ObjectType objtype, List *qualname)
 	{
 		case OBJECT_DATABASE:
 			address.classId = DatabaseRelationId;
-			address.objectId = get_database_oid(name, false);
+			address.objectId = get_database_oid(name, missing_ok);
+			address.objectSubId = 0;
+			break;
+		case OBJECT_EXTENSION:
+			address.classId = ExtensionRelationId;
+			address.objectId = get_extension_oid(name, missing_ok);
 			address.objectSubId = 0;
 			break;
 		case OBJECT_TABLESPACE:
 			address.classId = TableSpaceRelationId;
-			address.objectId = get_tablespace_oid(name, false);
+			address.objectId = get_tablespace_oid(name, missing_ok);
 			address.objectSubId = 0;
 			break;
 		case OBJECT_ROLE:
 			address.classId = AuthIdRelationId;
-			address.objectId = get_role_oid(name, false);
+			address.objectId = get_role_oid(name, missing_ok);
 			address.objectSubId = 0;
 			break;
 		case OBJECT_SCHEMA:
 			address.classId = NamespaceRelationId;
-			address.objectId = get_namespace_oid(name, false);
+			address.objectId = get_namespace_oid(name, missing_ok);
 			address.objectSubId = 0;
 			break;
 		case OBJECT_LANGUAGE:
 			address.classId = LanguageRelationId;
-			address.objectId = get_language_oid(name, false);
+			address.objectId = get_language_oid(name, missing_ok);
+			address.objectSubId = 0;
+			break;
+		case OBJECT_FDW:
+			address.classId = ForeignDataWrapperRelationId;
+			address.objectId = get_foreign_data_wrapper_oid(name, missing_ok);
+			address.objectSubId = 0;
+			break;
+		case OBJECT_FOREIGN_SERVER:
+			address.classId = ForeignServerRelationId;
+			address.objectId = get_foreign_server_oid(name, missing_ok);
 			address.objectSubId = 0;
 			break;
 		default:
@@ -333,13 +557,23 @@ get_object_address_unqualified(ObjectType objtype, List *qualname)
 /*
  * Locate a relation by qualified name.
  */
-static Relation
+static ObjectAddress
 get_relation_by_qualified_name(ObjectType objtype, List *objname,
-							   LOCKMODE lockmode)
+							   Relation *relp, LOCKMODE lockmode,
+							   bool missing_ok)
 {
-	Relation relation;
+	Relation	relation;
+	ObjectAddress	address;
 
-	relation = relation_openrv(makeRangeVarFromNameList(objname), lockmode);
+	address.classId = RelationRelationId;
+	address.objectId = InvalidOid;
+	address.objectSubId = 0;
+
+	relation = relation_openrv_extended(makeRangeVarFromNameList(objname),
+										lockmode, missing_ok);
+	if (!relation)
+		return address;
+
 	switch (objtype)
 	{
 		case OBJECT_INDEX:
@@ -382,7 +616,11 @@ get_relation_by_qualified_name(ObjectType objtype, List *objname,
 			break;
 	}
 
-	return relation;
+	/* Done. */
+	address.objectId = RelationGetRelid(relation);
+	*relp = relation;
+
+	return address;
 }
 
 /*
@@ -393,7 +631,8 @@ get_relation_by_qualified_name(ObjectType objtype, List *objname,
  * mode for the object itself, not the relation to which it is attached.
  */
 static ObjectAddress
-get_object_address_relobject(ObjectType objtype, List *objname, Relation *relp)
+get_object_address_relobject(ObjectType objtype, List *objname,
+							 Relation *relp, bool missing_ok)
 {
 	ObjectAddress address;
 	Relation	relation = NULL;
@@ -407,7 +646,7 @@ get_object_address_relobject(ObjectType objtype, List *objname, Relation *relp)
 	nnames = list_length(objname);
 	if (nnames < 2)
 	{
-		Oid		reloid;
+		Oid			reloid;
 
 		/*
 		 * For compatibility with very old releases, we sometimes allow users
@@ -419,9 +658,16 @@ get_object_address_relobject(ObjectType objtype, List *objname, Relation *relp)
 		if (objtype != OBJECT_RULE)
 			elog(ERROR, "must specify relation and object name");
 		address.classId = RewriteRelationId;
-		address.objectId = get_rewrite_oid_without_relid(depname, &reloid);
+		address.objectId =
+			get_rewrite_oid_without_relid(depname, &reloid, missing_ok);
 		address.objectSubId = 0;
-		relation = heap_open(reloid, AccessShareLock);
+
+		/*
+		 * Caller is expecting to get back the relation, even though we
+		 * didn't end up using it to find the rule.
+		 */
+		if (OidIsValid(address.objectId))
+			relation = heap_open(reloid, AccessShareLock);
 	}
 	else
 	{
@@ -438,17 +684,18 @@ get_object_address_relobject(ObjectType objtype, List *objname, Relation *relp)
 		{
 			case OBJECT_RULE:
 				address.classId = RewriteRelationId;
-				address.objectId = get_rewrite_oid(reloid, depname, false);
+				address.objectId = get_rewrite_oid(reloid, depname, missing_ok);
 				address.objectSubId = 0;
 				break;
 			case OBJECT_TRIGGER:
 				address.classId = TriggerRelationId;
-				address.objectId = get_trigger_oid(reloid, depname, false);
+				address.objectId = get_trigger_oid(reloid, depname, missing_ok);
 				address.objectSubId = 0;
 				break;
 			case OBJECT_CONSTRAINT:
 				address.classId = ConstraintRelationId;
-				address.objectId = get_constraint_oid(reloid, depname, false);
+				address.objectId =
+					get_constraint_oid(reloid, depname, missing_ok);
 				address.objectSubId = 0;
 				break;
 			default:
@@ -457,6 +704,14 @@ get_object_address_relobject(ObjectType objtype, List *objname, Relation *relp)
 				address.classId = InvalidOid;
 				address.objectId = InvalidOid;
 				address.objectSubId = 0;
+		}
+
+		/* Avoid relcache leak when object not found. */
+		if (!OidIsValid(address.objectId))
+		{
+			heap_close(relation, AccessShareLock);
+			relation = NULL;		/* department of accident prevention */
+			return address;
 		}
 	}
 
@@ -470,13 +725,15 @@ get_object_address_relobject(ObjectType objtype, List *objname, Relation *relp)
  */
 static ObjectAddress
 get_object_address_attribute(ObjectType objtype, List *objname,
-							 Relation *relp, LOCKMODE lockmode)
+							 Relation *relp, LOCKMODE lockmode,
+							 bool missing_ok)
 {
-	ObjectAddress	address;
+	ObjectAddress address;
 	List	   *relname;
 	Oid			reloid;
 	Relation	relation;
 	const char *attname;
+	AttrNumber	attnum;
 
 	/* Extract relation name and open relation. */
 	attname = strVal(lfirst(list_tail(objname)));
@@ -485,16 +742,68 @@ get_object_address_attribute(ObjectType objtype, List *objname,
 	reloid = RelationGetRelid(relation);
 
 	/* Look up attribute and construct return value. */
+	attnum = get_attnum(reloid, attname);
+	if (attnum == InvalidAttrNumber)
+	{
+		if (!missing_ok)
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_COLUMN),
+					 errmsg("column \"%s\" of relation \"%s\" does not exist",
+							attname, NameListToString(relname))));
+
+		address.classId = RelationRelationId;
+		address.objectId = InvalidOid;
+		address.objectSubId = InvalidAttrNumber;
+		return address;
+	}
+
 	address.classId = RelationRelationId;
 	address.objectId = reloid;
-	address.objectSubId = get_attnum(reloid, attname);
-	if (address.objectSubId == InvalidAttrNumber)
-		ereport(ERROR,
-				(errcode(ERRCODE_UNDEFINED_COLUMN),
-				 errmsg("column \"%s\" of relation \"%s\" does not exist",
-				 attname, RelationGetRelationName(relation))));
+	address.objectSubId = attnum;
 
 	*relp = relation;
+	return address;
+}
+
+/*
+ * Find the ObjectAddress for a type or domain
+ */
+static ObjectAddress
+get_object_address_type(ObjectType objtype,
+						List *objname, bool missing_ok)
+{
+	ObjectAddress   address;
+	TypeName   *typename;
+	Type        tup;
+	typename = makeTypeNameFromNameList(objname);
+
+	address.classId = TypeRelationId;
+	address.objectId = InvalidOid;
+	address.objectSubId = 0;
+
+	tup = LookupTypeName(NULL, typename, NULL);
+	if (!HeapTupleIsValid(tup))
+	{
+		if (!missing_ok)
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_OBJECT),
+					 errmsg("type \"%s\" does not exist",
+							TypeNameToString(typename))));
+		return address;
+	}
+	address.objectId = typeTypeId(tup);
+
+	if (objtype == OBJECT_DOMAIN)
+	{
+		if (((Form_pg_type) GETSTRUCT(tup))->typtype != TYPTYPE_DOMAIN)
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("\"%s\" is not a domain",
+							TypeNameToString(typename))));
+	}
+
+	ReleaseSysCache(tup);
+
 	return address;
 }
 
@@ -502,7 +811,8 @@ get_object_address_attribute(ObjectType objtype, List *objname,
  * Find the ObjectAddress for an opclass or opfamily.
  */
 static ObjectAddress
-get_object_address_opcf(ObjectType objtype, List *objname, List *objargs)
+get_object_address_opcf(ObjectType objtype,
+						List *objname, List *objargs, bool missing_ok)
 {
 	Oid			amoid;
 	ObjectAddress address;
@@ -514,12 +824,12 @@ get_object_address_opcf(ObjectType objtype, List *objname, List *objargs)
 	{
 		case OBJECT_OPCLASS:
 			address.classId = OperatorClassRelationId;
-			address.objectId = get_opclass_oid(amoid, objname, false);
+			address.objectId = get_opclass_oid(amoid, objname, missing_ok);
 			address.objectSubId = 0;
 			break;
 		case OBJECT_OPFAMILY:
 			address.classId = OperatorFamilyRelationId;
-			address.objectId = get_opfamily_oid(amoid, objname, false);
+			address.objectId = get_opfamily_oid(amoid, objname, missing_ok);
 			address.objectSubId = 0;
 			break;
 		default:
@@ -542,9 +852,10 @@ object_exists(ObjectAddress address)
 	int			cache = -1;
 	Oid			indexoid = InvalidOid;
 	Relation	rel;
-	ScanKeyData	skey[1];
-	SysScanDesc	sd;
+	ScanKeyData skey[1];
+	SysScanDesc sd;
 	bool		found;
+	ObjectPropertyType	   *property;
 
 	/* Sub-objects require special treatment. */
 	if (address.objectSubId != 0)
@@ -566,86 +877,20 @@ object_exists(ObjectAddress address)
 	}
 
 	/*
-	 * For object types that have a relevant syscache, we use it; for
-	 * everything else, we'll have to do an index-scan.  This switch
-	 * sets either the cache to be used for the syscache lookup, or the
-	 * index to be used for the index scan.
+	 * Weird backward compatibility hack: ObjectAddress notation uses
+	 * LargeObjectRelationId for large objects, but since PostgreSQL
+	 * 9.0, the relevant catalog is actually LargeObjectMetadataRelationId.
 	 */
-	switch (address.classId)
-	{
-		case RelationRelationId:
-			cache = RELOID;
-			break;
-		case RewriteRelationId:
-			indexoid = RewriteOidIndexId;
-			break;
-		case TriggerRelationId:
-			indexoid = TriggerOidIndexId;
-			break;
-		case ConstraintRelationId:
-			cache = CONSTROID;
-			break;
-		case DatabaseRelationId:
-			cache = DATABASEOID;
-			break;
-		case TableSpaceRelationId:
-			cache = TABLESPACEOID;
-			break;
-		case AuthIdRelationId:
-			cache = AUTHOID;
-			break;
-		case NamespaceRelationId:
-			cache = NAMESPACEOID;
-			break;
-		case LanguageRelationId:
-			cache = LANGOID;
-			break;
-		case TypeRelationId:
-			cache = TYPEOID;
-			break;
-		case ProcedureRelationId:
-			cache = PROCOID;
-			break;
-		case OperatorRelationId:
-			cache = OPEROID;
-			break;
-		case ConversionRelationId:
-			cache = CONVOID;
-			break;
-		case OperatorClassRelationId:
-			cache = CLAOID;
-			break;
-		case OperatorFamilyRelationId:
-			cache = OPFAMILYOID;
-			break;
-		case LargeObjectRelationId:
-			/*
-			 * Weird backward compatibility hack: ObjectAddress notation uses
-			 * LargeObjectRelationId for large objects, but since PostgreSQL
-			 * 9.0, the relevant catalog is actually
-			 * LargeObjectMetadataRelationId.
-			 */
-			address.classId = LargeObjectMetadataRelationId;
-			indexoid = LargeObjectMetadataOidIndexId;
-			break;
-		case CastRelationId:
-			indexoid = CastOidIndexId;
-			break;
-		case TSParserRelationId:
-			cache = TSPARSEROID;
-			break;
-		case TSDictionaryRelationId:
-			cache = TSDICTOID;
-			break;
-		case TSTemplateRelationId:
-			cache = TSTEMPLATEOID;
-			break;
-		case TSConfigRelationId:
-			cache = TSCONFIGOID;
-			break;
-		default:
-			elog(ERROR, "unrecognized classid: %u", address.classId);
-	}
+	if (address.classId == LargeObjectRelationId)
+		address.classId = LargeObjectMetadataRelationId;
+
+	/*
+	 * For object types that have a relevant syscache, we use it; for
+	 * everything else, we'll have to do an index-scan.
+	 */
+	property = get_object_property_data(address.classId);
+	cache = property->oid_catcache_id;
+	indexoid = property->oid_index_oid;
 
 	/* Found a syscache? */
 	if (cache != -1)
@@ -663,4 +908,224 @@ object_exists(ObjectAddress address)
 	systable_endscan(sd);
 	heap_close(rel, AccessShareLock);
 	return found;
+}
+
+/*
+ * Check ownership of an object previously identified by get_object_address.
+ */
+void
+check_object_ownership(Oid roleid, ObjectType objtype, ObjectAddress address,
+					   List *objname, List *objargs, Relation relation)
+{
+	switch (objtype)
+	{
+		case OBJECT_INDEX:
+		case OBJECT_SEQUENCE:
+		case OBJECT_TABLE:
+		case OBJECT_VIEW:
+		case OBJECT_FOREIGN_TABLE:
+		case OBJECT_COLUMN:
+		case OBJECT_RULE:
+		case OBJECT_TRIGGER:
+		case OBJECT_CONSTRAINT:
+			if (!pg_class_ownercheck(RelationGetRelid(relation), roleid))
+				aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_CLASS,
+							   RelationGetRelationName(relation));
+			break;
+		case OBJECT_DATABASE:
+			if (!pg_database_ownercheck(address.objectId, roleid))
+				aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_DATABASE,
+							   NameListToString(objname));
+			break;
+		case OBJECT_TYPE:
+		case OBJECT_DOMAIN:
+		case OBJECT_ATTRIBUTE:
+			if (!pg_type_ownercheck(address.objectId, roleid))
+				aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_TYPE,
+							   format_type_be(address.objectId));
+			break;
+		case OBJECT_AGGREGATE:
+		case OBJECT_FUNCTION:
+			if (!pg_proc_ownercheck(address.objectId, roleid))
+				aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_PROC,
+							   NameListToString(objname));
+			break;
+		case OBJECT_OPERATOR:
+			if (!pg_oper_ownercheck(address.objectId, roleid))
+				aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_OPER,
+							   NameListToString(objname));
+			break;
+		case OBJECT_SCHEMA:
+			if (!pg_namespace_ownercheck(address.objectId, roleid))
+				aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_NAMESPACE,
+							   NameListToString(objname));
+			break;
+		case OBJECT_COLLATION:
+			if (!pg_collation_ownercheck(address.objectId, roleid))
+				aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_COLLATION,
+							   NameListToString(objname));
+			break;
+		case OBJECT_CONVERSION:
+			if (!pg_conversion_ownercheck(address.objectId, roleid))
+				aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_CONVERSION,
+							   NameListToString(objname));
+			break;
+		case OBJECT_EXTENSION:
+			if (!pg_extension_ownercheck(address.objectId, roleid))
+				aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_EXTENSION,
+							   NameListToString(objname));
+			break;
+		case OBJECT_FDW:
+			if (!pg_foreign_data_wrapper_ownercheck(address.objectId, roleid))
+				aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_FDW,
+							   NameListToString(objname));
+			break;
+		case OBJECT_FOREIGN_SERVER:
+			if (!pg_foreign_server_ownercheck(address.objectId, roleid))
+				aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_FOREIGN_SERVER,
+							   NameListToString(objname));
+			break;
+		case OBJECT_LANGUAGE:
+			if (!pg_language_ownercheck(address.objectId, roleid))
+				aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_LANGUAGE,
+							   NameListToString(objname));
+			break;
+		case OBJECT_OPCLASS:
+			if (!pg_opclass_ownercheck(address.objectId, roleid))
+				aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_OPCLASS,
+							   NameListToString(objname));
+			break;
+		case OBJECT_OPFAMILY:
+			if (!pg_opfamily_ownercheck(address.objectId, roleid))
+				aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_OPFAMILY,
+							   NameListToString(objname));
+			break;
+		case OBJECT_LARGEOBJECT:
+			if (!lo_compat_privileges &&
+				!pg_largeobject_ownercheck(address.objectId, roleid))
+				ereport(ERROR,
+						(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+						 errmsg("must be owner of large object %u",
+								address.objectId)));
+			break;
+		case OBJECT_CAST:
+			{
+				/* We can only check permissions on the source/target types */
+				TypeName   *sourcetype = (TypeName *) linitial(objname);
+				TypeName   *targettype = (TypeName *) linitial(objargs);
+				Oid			sourcetypeid = typenameTypeId(NULL, sourcetype);
+				Oid			targettypeid = typenameTypeId(NULL, targettype);
+
+				if (!pg_type_ownercheck(sourcetypeid, roleid)
+					&& !pg_type_ownercheck(targettypeid, roleid))
+					ereport(ERROR,
+							(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+							 errmsg("must be owner of type %s or type %s",
+									format_type_be(sourcetypeid),
+									format_type_be(targettypeid))));
+			}
+			break;
+		case OBJECT_TABLESPACE:
+			if (!pg_tablespace_ownercheck(address.objectId, roleid))
+				aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_TABLESPACE,
+							   NameListToString(objname));
+			break;
+		case OBJECT_TSDICTIONARY:
+			if (!pg_ts_dict_ownercheck(address.objectId, roleid))
+				aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_TSDICTIONARY,
+							   NameListToString(objname));
+			break;
+		case OBJECT_TSCONFIGURATION:
+			if (!pg_ts_config_ownercheck(address.objectId, roleid))
+				aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_TSCONFIGURATION,
+							   NameListToString(objname));
+			break;
+		case OBJECT_ROLE:
+
+			/*
+			 * We treat roles as being "owned" by those with CREATEROLE priv,
+			 * except that superusers are only owned by superusers.
+			 */
+			if (superuser_arg(address.objectId))
+			{
+				if (!superuser_arg(roleid))
+					ereport(ERROR,
+							(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+							 errmsg("must be superuser")));
+			}
+			else
+			{
+				if (!has_createrole_privilege(roleid))
+					ereport(ERROR,
+							(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+							 errmsg("must have CREATEROLE privilege")));
+			}
+			break;
+		case OBJECT_TSPARSER:
+		case OBJECT_TSTEMPLATE:
+			/* We treat these object types as being owned by superusers */
+			if (!superuser_arg(roleid))
+				ereport(ERROR,
+						(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+						 errmsg("must be superuser")));
+			break;
+		default:
+			elog(ERROR, "unrecognized object type: %d",
+				 (int) objtype);
+	}
+}
+
+/*
+ * get_object_namespace
+ *
+ * Find the schema containing the specified object.  For non-schema objects,
+ * this function returns InvalidOid.
+ */
+Oid
+get_object_namespace(const ObjectAddress *address)
+{
+	int			cache;
+	HeapTuple	tuple;
+	bool		isnull;
+	Oid			oid;
+	ObjectPropertyType	   *property;
+
+	/* If not owned by a namespace, just return InvalidOid. */
+	property = get_object_property_data(address->classId);
+	if (property->attnum_namespace == InvalidAttrNumber)
+		return InvalidOid;
+
+	/* Currently, we can only handle object types with system caches. */
+	cache = property->oid_catcache_id;
+	Assert(cache != -1);
+
+	/* Fetch tuple from syscache and extract namespace attribute. */
+	tuple = SearchSysCache1(cache, ObjectIdGetDatum(address->objectId));
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache lookup failed for cache %d oid %u",
+			 cache, address->objectId);
+	oid = DatumGetObjectId(SysCacheGetAttr(cache,
+										   tuple,
+										   property->attnum_namespace,
+										   &isnull));
+	Assert(!isnull);
+	ReleaseSysCache(tuple);
+
+	return oid;
+}
+
+/*
+ * Find ObjectProperty structure by class_id.
+ */
+static ObjectPropertyType *
+get_object_property_data(Oid class_id)
+{
+	int			index;
+
+	for (index = 0; index < lengthof(ObjectProperty); index++)
+		if (ObjectProperty[index].class_oid == class_id)
+			return &ObjectProperty[index];
+
+	elog(ERROR, "unrecognized class id: %u", class_id);
+	return NULL;		/* not reached */
 }

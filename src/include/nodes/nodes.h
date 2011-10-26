@@ -52,6 +52,7 @@ typedef enum NodeTag
 	T_Scan,
 	T_SeqScan,
 	T_IndexScan,
+	T_IndexOnlyScan,
 	T_BitmapIndexScan,
 	T_BitmapHeapScan,
 	T_TidScan,
@@ -60,6 +61,8 @@ typedef enum NodeTag
 	T_ValuesScan,
 	T_CteScan,
 	T_WorkTableScan,
+	T_ForeignScan,
+	T_FdwPlan,
 	T_Join,
 	T_NestLoop,
 	T_MergeJoin,
@@ -95,6 +98,7 @@ typedef enum NodeTag
 	T_ScanState,
 	T_SeqScanState,
 	T_IndexScanState,
+	T_IndexOnlyScanState,
 	T_BitmapIndexScanState,
 	T_BitmapHeapScanState,
 	T_TidScanState,
@@ -103,6 +107,7 @@ typedef enum NodeTag
 	T_ValuesScanState,
 	T_CteScanState,
 	T_WorkTableScanState,
+	T_ForeignScanState,
 	T_JoinState,
 	T_NestLoopState,
 	T_MergeJoinState,
@@ -134,6 +139,7 @@ typedef enum NodeTag
 	T_NamedArgExpr,
 	T_OpExpr,
 	T_DistinctExpr,
+	T_NullIfExpr,
 	T_ScalarArrayOpExpr,
 	T_BoolExpr,
 	T_SubLink,
@@ -145,6 +151,7 @@ typedef enum NodeTag
 	T_CoerceViaIO,
 	T_ArrayCoerceExpr,
 	T_ConvertRowtypeExpr,
+	T_CollateExpr,
 	T_CaseExpr,
 	T_CaseWhen,
 	T_CaseTestExpr,
@@ -154,7 +161,6 @@ typedef enum NodeTag
 	T_CoalesceExpr,
 	T_MinMaxExpr,
 	T_XmlExpr,
-	T_NullIfExpr,
 	T_NullTest,
 	T_BooleanTest,
 	T_CoerceToDomain,
@@ -216,6 +222,7 @@ typedef enum NodeTag
 	T_MergePath,
 	T_HashPath,
 	T_TidPath,
+	T_ForeignPath,
 	T_AppendPath,
 	T_MergeAppendPath,
 	T_ResultPath,
@@ -354,6 +361,9 @@ typedef enum NodeTag
 	T_AlterTableSpaceOptionsStmt,
 	T_SecLabelStmt,
 	T_CreateForeignTableStmt,
+	T_CreateExtensionStmt,
+	T_AlterExtensionStmt,
+	T_AlterExtensionContentsStmt,
 
 	/*
 	 * TAGS FOR PARSE TREE NODES (parsenodes.h)
@@ -369,6 +379,7 @@ typedef enum NodeTag
 	T_A_ArrayExpr,
 	T_ResTarget,
 	T_TypeCast,
+	T_CollateClause,
 	T_SortBy,
 	T_WindowDef,
 	T_RangeSubselect,
@@ -394,6 +405,13 @@ typedef enum NodeTag
 	T_CommonTableExpr,
 
 	/*
+	 * TAGS FOR REPLICATION GRAMMAR PARSE NODES (replnodes.h)
+	 */
+	T_IdentifySystemCmd,
+	T_BaseBackupCmd,
+	T_StartReplicationCmd,
+
+	/*
 	 * TAGS FOR RANDOM OTHER STUFF
 	 *
 	 * These are objects that aren't part of parse/plan/execute node tree
@@ -405,7 +423,8 @@ typedef enum NodeTag
 	T_ReturnSetInfo,			/* in nodes/execnodes.h */
 	T_WindowObjectData,			/* private in nodeWindowAgg.c */
 	T_TIDBitmap,				/* in nodes/tidbitmap.h */
-	T_InlineCodeBlock			/* in nodes/parsenodes.h */
+	T_InlineCodeBlock,			/* in nodes/parsenodes.h */
+	T_FdwRoutine				/* in foreign/fdwapi.h */
 } NodeTag;
 
 /*

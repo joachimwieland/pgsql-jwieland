@@ -15,19 +15,18 @@
 #include "postgres.h"
 
 #include "access/gin_private.h"
-#include "storage/bufmgr.h"
 #include "utils/rel.h"
 
 int
 ginCompareItemPointers(ItemPointer a, ItemPointer b)
 {
-	BlockNumber	ba = GinItemPointerGetBlockNumber(a);
-	BlockNumber	bb = GinItemPointerGetBlockNumber(b);
+	BlockNumber ba = GinItemPointerGetBlockNumber(a);
+	BlockNumber bb = GinItemPointerGetBlockNumber(b);
 
 	if (ba == bb)
 	{
-		OffsetNumber	oa = GinItemPointerGetOffsetNumber(a);
-		OffsetNumber	ob = GinItemPointerGetOffsetNumber(b);
+		OffsetNumber oa = GinItemPointerGetOffsetNumber(a);
+		OffsetNumber ob = GinItemPointerGetOffsetNumber(b);
 
 		if (oa == ob)
 			return 0;
@@ -383,6 +382,7 @@ dataPlaceToPage(GinBtree btree, Buffer buf, OffsetNumber off, XLogRecData **prda
 	Page		page = BufferGetPage(buf);
 	int			sizeofitem = GinSizeOfDataPageItem(page);
 	int			cnt = 0;
+
 	/* these must be static so they can be returned to caller */
 	static XLogRecData rdata[3];
 	static ginxlogInsert data;
@@ -474,6 +474,7 @@ dataSplitPage(GinBtree btree, Buffer lbuf, Buffer rbuf, OffsetNumber off, XLogRe
 	Size		pageSize = PageGetPageSize(lpage);
 	Size		freeSpace;
 	uint32		nCopied = 1;
+
 	/* these must be static so they can be returned to caller */
 	static ginxlogSplit data;
 	static XLogRecData rdata[4];

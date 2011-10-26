@@ -15,10 +15,10 @@
  */
 #include "postgres.h"
 
-#include "access/genam.h"
 #include "catalog/index.h"
 #include "catalog/indexing.h"
 #include "executor/executor.h"
+#include "utils/rel.h"
 
 
 /*

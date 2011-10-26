@@ -5,7 +5,6 @@
 
 #include <limits.h>
 
-#include "fmgr.h"
 #include "access/skey.h"
 #include "utils/builtins.h"
 #include "utils/bytea.h"
@@ -120,8 +119,9 @@ gin_compare_prefix_##type(PG_FUNCTION_ARGS)									\
 	int32		res,														\
 				cmp;														\
 																			\
-	cmp = DatumGetInt32(DirectFunctionCall2(								\
+	cmp = DatumGetInt32(DirectFunctionCall2Coll(							\
 				TypeInfo_##type.typecmp,									\
+				PG_GET_COLLATION(),											\
 				(data->strategy == BTLessStrategyNumber ||					\
 				 data->strategy == BTLessEqualStrategyNumber)				\
 				 ? data->datum : a,											\

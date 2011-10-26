@@ -17,7 +17,6 @@
 #include "access/heapam.h"
 #include "catalog/indexing.h"
 #include "catalog/pg_enum.h"
-#include "fmgr.h"
 #include "libpq/pqformat.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
@@ -461,7 +460,7 @@ enum_range_internal(Oid enumtypoid, Oid lower, Oid upper)
 	Datum	   *elems;
 	int			max,
 				cnt;
-	bool        left_found;
+	bool		left_found;
 
 	/*
 	 * Scan the enum members in order using pg_enum_typid_sortorder_index.
@@ -486,7 +485,7 @@ enum_range_internal(Oid enumtypoid, Oid lower, Oid upper)
 
 	while (HeapTupleIsValid(enum_tuple = systable_getnext_ordered(enum_scan, ForwardScanDirection)))
 	{
-		Oid		enum_oid = HeapTupleGetOid(enum_tuple);
+		Oid			enum_oid = HeapTupleGetOid(enum_tuple);
 
 		if (!left_found && lower == enum_oid)
 			left_found = true;

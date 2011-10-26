@@ -30,6 +30,7 @@ typedef struct CookedConstraint
 	char	   *name;			/* name, or NULL if none */
 	AttrNumber	attnum;			/* which attr (only for DEFAULT) */
 	Node	   *expr;			/* transformed default or check expr */
+	bool		skip_validation;	/* skip validation? (only for CHECK) */
 	bool		is_local;		/* constraint has local (non-inherited) def */
 	int			inhcount;		/* number of times constraint is inherited */
 } CookedConstraint;
@@ -38,6 +39,7 @@ extern Relation heap_create(const char *relname,
 			Oid relnamespace,
 			Oid reltablespace,
 			Oid relid,
+			Oid relfilenode,
 			TupleDesc tupDesc,
 			char relkind,
 			char relpersistence,
@@ -63,8 +65,7 @@ extern Oid heap_create_with_catalog(const char *relname,
 						 OnCommitAction oncommit,
 						 Datum reloptions,
 						 bool use_user_acl,
-						 bool allow_system_table_mods,
-						 bool if_not_exists);
+						 bool allow_system_table_mods);
 
 extern void heap_drop_with_catalog(Oid relid);
 
@@ -117,7 +118,9 @@ extern Form_pg_attribute SystemAttributeByName(const char *attname,
 extern void CheckAttributeNamesTypes(TupleDesc tupdesc, char relkind,
 						 bool allow_system_table_mods);
 
-extern void CheckAttributeType(const char *attname, Oid atttypid,
+extern void CheckAttributeType(const char *attname,
+				   Oid atttypid, Oid attcollation,
+				   List *containing_rowtypes,
 				   bool allow_system_table_mods);
 
 #endif   /* HEAP_H */

@@ -16,7 +16,6 @@
 
 #include "access/heapam.h"
 #include "catalog/indexing.h"
-#include "catalog/pg_class.h"
 #include "catalog/pg_rewrite.h"
 #include "rewrite/rewriteSupport.h"
 #include "utils/fmgroids.h"
@@ -127,12 +126,13 @@ get_rewrite_oid(Oid relid, const char *rulename, bool missing_ok)
  * Find rule oid, given only a rule name but no rel OID.
  *
  * If there's more than one, it's an error.  If there aren't any, that's an
- * error, too.  In general, this should be avoided - it is provided to support
+ * error, too.	In general, this should be avoided - it is provided to support
  * syntax that is compatible with pre-7.3 versions of PG, where rule names
  * were unique across the entire database.
  */
 Oid
-get_rewrite_oid_without_relid(const char *rulename, Oid *reloid)
+get_rewrite_oid_without_relid(const char *rulename,
+							  Oid *reloid, bool missing_ok)
 {
 	Relation	RewriteRelation;
 	HeapScanDesc scanDesc;
@@ -151,20 +151,26 @@ get_rewrite_oid_without_relid(const char *rulename, Oid *reloid)
 
 	htup = heap_getnext(scanDesc, ForwardScanDirection);
 	if (!HeapTupleIsValid(htup))
-		ereport(ERROR,
-				(errcode(ERRCODE_UNDEFINED_OBJECT),
-				 errmsg("rule \"%s\" does not exist", rulename)));
+	{
+		if (!missing_ok)
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_OBJECT),
+					 errmsg("rule \"%s\" does not exist", rulename)));
+		ruleoid = InvalidOid;
+	}
+	else
+	{
+		ruleoid = HeapTupleGetOid(htup);
+		if (reloid != NULL)
+			*reloid = ((Form_pg_rewrite) GETSTRUCT(htup))->ev_class;
 
-	ruleoid = HeapTupleGetOid(htup);
-	if (reloid != NULL)
-		*reloid = ((Form_pg_rewrite) GETSTRUCT(htup))->ev_class;
-
-	if (HeapTupleIsValid(htup = heap_getnext(scanDesc, ForwardScanDirection)))
-		ereport(ERROR,
-				(errcode(ERRCODE_DUPLICATE_OBJECT),
-				 errmsg("there are multiple rules named \"%s\"", rulename),
-				 errhint("Specify a relation name as well as a rule name.")));
-
+		htup = heap_getnext(scanDesc, ForwardScanDirection);
+		if (HeapTupleIsValid(htup))
+			ereport(ERROR,
+					(errcode(ERRCODE_DUPLICATE_OBJECT),
+					 errmsg("there are multiple rules named \"%s\"", rulename),
+					 errhint("Specify a relation name as well as a rule name.")));
+	}
 	heap_endscan(scanDesc);
 	heap_close(RewriteRelation, AccessShareLock);
 

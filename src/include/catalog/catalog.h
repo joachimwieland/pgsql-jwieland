@@ -14,7 +14,11 @@
 #ifndef CATALOG_H
 #define CATALOG_H
 
-#include "catalog/catversion.h"
+/*
+ *	'pgrminclude ignore' needed here because CppAsString2() does not throw
+ *	an error if the symbol is not defined.
+ */
+#include "catalog/catversion.h"	/* pgrminclude ignore */
 #include "catalog/pg_class.h"
 #include "storage/relfilenode.h"
 #include "utils/relcache.h"
@@ -25,10 +29,10 @@
 
 extern const char *forkNames[];
 extern ForkNumber forkname_to_number(char *forkName);
-extern int forkname_chars(const char *str, ForkNumber *);
+extern int	forkname_chars(const char *str, ForkNumber *);
 
 extern char *relpathbackend(RelFileNode rnode, BackendId backend,
-			  ForkNumber forknum);
+			   ForkNumber forknum);
 extern char *GetDatabasePath(Oid dbNode, Oid spcNode);
 
 /* First argument is a RelFileNodeBackend */
@@ -55,7 +59,7 @@ extern bool IsSharedRelation(Oid relationId);
 extern Oid	GetNewOid(Relation relation);
 extern Oid GetNewOidWithIndex(Relation relation, Oid indexId,
 				   AttrNumber oidcolumn);
-extern Oid	GetNewRelFileNode(Oid reltablespace, Relation pg_class,
+extern Oid GetNewRelFileNode(Oid reltablespace, Relation pg_class,
 				  char relpersistence);
 
 #endif   /* CATALOG_H */

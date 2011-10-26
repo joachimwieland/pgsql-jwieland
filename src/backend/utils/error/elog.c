@@ -3,6 +3,12 @@
  * elog.c
  *	  error logging and reporting
  *
+ * Because of the extremely high rate at which log messages can be generated,
+ * we need to be mindful of the performance cost of obtaining any information
+ * that may be logged.	Also, it's important to keep in mind that this code may
+ * get called from within an aborted transaction, in which case operations
+ * such as syscache lookups are unsafe.
+ *
  * Some notes about recursion and errors during error processing:
  *
  * We need to be robust about recursive-error scenarios --- for example,
@@ -99,11 +105,12 @@ int			Log_destination = LOG_DESTINATION_STDERR;
 /*
  * Max string length to send to syslog().  Note that this doesn't count the
  * sequence-number prefix we add, and of course it doesn't count the prefix
- * added by syslog itself.	On many implementations it seems that the hard
- * limit is approximately 2K bytes including both those prefixes.
+ * added by syslog itself.  Solaris and sysklogd truncate the final message
+ * at 1024 bytes, so this value leaves 124 bytes for those prefixes.  (Most
+ * other syslog implementations seem to have limits of 2KB or so.)
  */
 #ifndef PG_SYSLOG_LIMIT
-#define PG_SYSLOG_LIMIT 1024
+#define PG_SYSLOG_LIMIT 900
 #endif
 
 static bool openlog_done = false;
@@ -837,6 +844,33 @@ errdetail(const char *fmt,...)
 
 
 /*
+ * errdetail_internal --- add a detail error message text to the current error
+ *
+ * This is exactly like errdetail() except that strings passed to
+ * errdetail_internal are not translated, and are customarily left out of the
+ * internationalization message dictionary.  This should be used for detail
+ * messages that seem not worth translating for one reason or another
+ * (typically, that they don't seem to be useful to average users).
+ */
+int
+errdetail_internal(const char *fmt,...)
+{
+	ErrorData  *edata = &errordata[errordata_stack_depth];
+	MemoryContext oldcontext;
+
+	recursion_depth++;
+	CHECK_STACK_DEPTH();
+	oldcontext = MemoryContextSwitchTo(ErrorContext);
+
+	EVALUATE_MESSAGE(detail, false, false);
+
+	MemoryContextSwitchTo(oldcontext);
+	recursion_depth--;
+	return 0;					/* return value does not matter */
+}
+
+
+/*
  * errdetail_log --- add a detail_log error message text to the current error
  */
 int
@@ -1149,6 +1183,62 @@ elog_finish(int elevel, const char *fmt,...)
 	 */
 	errfinish(0);
 }
+
+
+/*
+ * Functions to allow construction of error message strings separately from
+ * the ereport() call itself.
+ *
+ * The expected calling convention is
+ *
+ *	pre_format_elog_string(errno, domain), var = format_elog_string(format,...)
+ *
+ * which can be hidden behind a macro such as GUC_check_errdetail().  We
+ * assume that any functions called in the arguments of format_elog_string()
+ * cannot result in re-entrant use of these functions --- otherwise the wrong
+ * text domain might be used, or the wrong errno substituted for %m.  This is
+ * okay for the current usage with GUC check hooks, but might need further
+ * effort someday.
+ *
+ * The result of format_elog_string() is stored in ErrorContext, and will
+ * therefore survive until FlushErrorState() is called.
+ */
+static int	save_format_errnumber;
+static const char *save_format_domain;
+
+void
+pre_format_elog_string(int errnumber, const char *domain)
+{
+	/* Save errno before evaluation of argument functions can change it */
+	save_format_errnumber = errnumber;
+	/* Save caller's text domain */
+	save_format_domain = domain;
+}
+
+char *
+format_elog_string(const char *fmt,...)
+{
+	ErrorData	errdata;
+	ErrorData  *edata;
+	MemoryContext oldcontext;
+
+	/* Initialize a mostly-dummy error frame */
+	edata = &errdata;
+	MemSet(edata, 0, sizeof(ErrorData));
+	/* the default text domain is the backend's */
+	edata->domain = save_format_domain ? save_format_domain : PG_TEXTDOMAIN("postgres");
+	/* set the errno to be used to interpret %m */
+	edata->saved_errno = save_format_errnumber;
+
+	oldcontext = MemoryContextSwitchTo(ErrorContext);
+
+	EVALUATE_MESSAGE(message, false, true);
+
+	MemoryContextSwitchTo(oldcontext);
+
+	return edata->message;
+}
+
 
 /*
  * Actual output of the top-of-stack error message
@@ -1657,15 +1747,22 @@ write_eventlog(int level, const char *line, int len)
 static void
 write_console(const char *line, int len)
 {
+	int			rc;
+
 #ifdef WIN32
 
 	/*
-	 * WriteConsoleW() will fail of stdout is redirected, so just fall through
+	 * WriteConsoleW() will fail if stdout is redirected, so just fall through
 	 * to writing unconverted to the logfile in this case.
+	 *
+	 * Since we palloc the structure required for conversion, also fall
+	 * through to writing unconverted if we have not yet set up
+	 * CurrentMemoryContext.
 	 */
 	if (GetDatabaseEncoding() != GetPlatformEncoding() &&
 		!in_error_recursion_trouble() &&
-		!redirection_done)
+		!redirection_done &&
+		CurrentMemoryContext != NULL)
 	{
 		WCHAR	   *utf16;
 		int			utf16len;
@@ -1693,13 +1790,18 @@ write_console(const char *line, int len)
 #else
 
 	/*
-	 * Conversion on non-win32 platform is not implemented yet. It requires
+	 * Conversion on non-win32 platforms is not implemented yet. It requires
 	 * non-throw version of pg_do_encoding_conversion(), that converts
 	 * unconvertable characters to '?' without errors.
 	 */
 #endif
 
-	write(fileno(stderr), line, len);
+	/*
+	 * We ignore any error from write() here.  We have no useful way to report
+	 * it ... certainly whining on stderr isn't likely to be productive.
+	 */
+	rc = write(fileno(stderr), line, len);
+	(void) rc;
 }
 
 /*
@@ -1710,24 +1812,20 @@ setup_formatted_log_time(void)
 {
 	struct timeval tv;
 	pg_time_t	stamp_time;
-	pg_tz	   *tz;
 	char		msbuf[8];
 
 	gettimeofday(&tv, NULL);
 	stamp_time = (pg_time_t) tv.tv_sec;
 
 	/*
-	 * Normally we print log timestamps in log_timezone, but during startup we
-	 * could get here before that's set. If so, fall back to gmt_timezone
-	 * (which guc.c ensures is set up before Log_line_prefix can become
-	 * nonempty).
+	 * Note: we expect that guc.c will ensure that log_timezone is set up
+	 * (at least with a minimal GMT value) before Log_line_prefix can become
+	 * nonempty or CSV mode can be selected.
 	 */
-	tz = log_timezone ? log_timezone : gmt_timezone;
-
 	pg_strftime(formatted_log_time, FORMATTED_TS_LEN,
 	/* leave room for milliseconds... */
 				"%Y-%m-%d %H:%M:%S     %Z",
-				pg_localtime(&stamp_time, tz));
+				pg_localtime(&stamp_time, log_timezone));
 
 	/* 'paste' milliseconds into place... */
 	sprintf(msbuf, ".%03d", (int) (tv.tv_usec / 1000));
@@ -1741,19 +1839,15 @@ static void
 setup_formatted_start_time(void)
 {
 	pg_time_t	stamp_time = (pg_time_t) MyStartTime;
-	pg_tz	   *tz;
 
 	/*
-	 * Normally we print log timestamps in log_timezone, but during startup we
-	 * could get here before that's set. If so, fall back to gmt_timezone
-	 * (which guc.c ensures is set up before Log_line_prefix can become
-	 * nonempty).
+	 * Note: we expect that guc.c will ensure that log_timezone is set up
+	 * (at least with a minimal GMT value) before Log_line_prefix can become
+	 * nonempty or CSV mode can be selected.
 	 */
-	tz = log_timezone ? log_timezone : gmt_timezone;
-
 	pg_strftime(formatted_start_time, FORMATTED_TS_LEN,
 				"%Y-%m-%d %H:%M:%S %Z",
-				pg_localtime(&stamp_time, tz));
+				pg_localtime(&stamp_time, log_timezone));
 }
 
 /*
@@ -1852,14 +1946,11 @@ log_line_prefix(StringInfo buf, ErrorData *edata)
 			case 't':
 				{
 					pg_time_t	stamp_time = (pg_time_t) time(NULL);
-					pg_tz	   *tz;
 					char		strfbuf[128];
-
-					tz = log_timezone ? log_timezone : gmt_timezone;
 
 					pg_strftime(strfbuf, sizeof(strfbuf),
 								"%Y-%m-%d %H:%M:%S %Z",
-								pg_localtime(&stamp_time, tz));
+								pg_localtime(&stamp_time, log_timezone));
 					appendStringInfoString(buf, strfbuf);
 				}
 				break;
@@ -2373,13 +2464,30 @@ send_message_to_server_log(ErrorData *edata)
 
 /*
  * Send data to the syslogger using the chunked protocol
+ *
+ * Note: when there are multiple backends writing into the syslogger pipe,
+ * it's critical that each write go into the pipe indivisibly, and not
+ * get interleaved with data from other processes.  Fortunately, the POSIX
+ * spec requires that writes to pipes be atomic so long as they are not
+ * more than PIPE_BUF bytes long.  So we divide long messages into chunks
+ * that are no more than that length, and send one chunk per write() call.
+ * The collector process knows how to reassemble the chunks.
+ *
+ * Because of the atomic write requirement, there are only two possible
+ * results from write() here: -1 for failure, or the requested number of
+ * bytes.  There is not really anything we can do about a failure; retry would
+ * probably be an infinite loop, and we can't even report the error usefully.
+ * (There is noplace else we could send it!)  So we might as well just ignore
+ * the result from write().  However, on some platforms you get a compiler
+ * warning from ignoring write()'s result, so do a little dance with casting
+ * rc to void to shut up the compiler.
  */
 static void
 write_pipe_chunks(char *data, int len, int dest)
 {
 	PipeProtoChunk p;
-
 	int			fd = fileno(stderr);
+	int			rc;
 
 	Assert(len > 0);
 
@@ -2392,7 +2500,8 @@ write_pipe_chunks(char *data, int len, int dest)
 		p.proto.is_last = (dest == LOG_DESTINATION_CSVLOG ? 'F' : 'f');
 		p.proto.len = PIPE_MAX_PAYLOAD;
 		memcpy(p.proto.data, data, PIPE_MAX_PAYLOAD);
-		write(fd, &p, PIPE_HEADER_SIZE + PIPE_MAX_PAYLOAD);
+		rc = write(fd, &p, PIPE_HEADER_SIZE + PIPE_MAX_PAYLOAD);
+		(void) rc;
 		data += PIPE_MAX_PAYLOAD;
 		len -= PIPE_MAX_PAYLOAD;
 	}
@@ -2401,7 +2510,8 @@ write_pipe_chunks(char *data, int len, int dest)
 	p.proto.is_last = (dest == LOG_DESTINATION_CSVLOG ? 'T' : 't');
 	p.proto.len = len;
 	memcpy(p.proto.data, data, len);
-	write(fd, &p, PIPE_HEADER_SIZE + len);
+	rc = write(fd, &p, PIPE_HEADER_SIZE + len);
+	(void) rc;
 }
 
 

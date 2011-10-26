@@ -1,5 +1,4 @@
-/libpgtypesdll.def
-/libpgtypesddll.def
+/pgtypeslib.def
 /blibpgtypesdll.def
 /exports.list
 

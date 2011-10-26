@@ -25,10 +25,8 @@
 
 #include "access/xlog_internal.h"
 #include "replication/walreceiver.h"
-#include "storage/fd.h"
 #include "storage/pmsignal.h"
 #include "storage/shmem.h"
-#include "utils/guc.h"
 
 WalRcvData *WalRcv = NULL;
 
@@ -199,8 +197,17 @@ RequestXLogStreaming(XLogRecPtr recptr, const char *conninfo)
 	walrcv->walRcvState = WALRCV_STARTING;
 	walrcv->startTime = now;
 
-	walrcv->receivedUpto = recptr;
-	walrcv->latestChunkStart = recptr;
+	/*
+	 * If this is the first startup of walreceiver, we initialize receivedUpto
+	 * and latestChunkStart to receiveStart.
+	 */
+	if (walrcv->receiveStart.xlogid == 0 &&
+		walrcv->receiveStart.xrecoff == 0)
+	{
+		walrcv->receivedUpto = recptr;
+		walrcv->latestChunkStart = recptr;
+	}
+	walrcv->receiveStart = recptr;
 
 	SpinLockRelease(&walrcv->mutex);
 

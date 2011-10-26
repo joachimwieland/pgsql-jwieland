@@ -5,8 +5,6 @@
  *	contrib/pg_upgrade/pg_upgrade.h
  */
 
-#include "postgres.h"
-
 #include <unistd.h>
 #include <assert.h>
 #include <dirent.h>
@@ -14,6 +12,9 @@
 #include <sys/time.h>
 
 #include "libpq-fe.h"
+
+/* Use port in the private/dynamic port number range */
+#define DEF_PGUPORT			50432
 
 /* Allocate for null byte */
 #define USER_NAME_SIZE		128
@@ -58,7 +59,15 @@
 #define atooid(x)  ((Oid) strtoul((x), NULL, 10))
 
 /* OID system catalog preservation added during PG 9.0 development */
-#define TABLE_SPACE_SUBDIRS 201001111
+#define TABLE_SPACE_SUBDIRS_CAT_VER 201001111
+/* postmaster/postgres -b (binary_upgrade) flag added during PG 9.1 development */
+#define BINARY_UPGRADE_SERVER_FLAG_CAT_VER 201104251
+/*
+ * 	Visibility map changed with this 9.2 commit,
+ *	8f9fe6edce358f7904e0db119416b4d1080a83aa; pick later catalog version.
+ */
+#define VISIBILITY_MAP_CRASHSAFE_CAT_VER 201107031
+
 
 /*
  * Each relation is represented by a relinfo structure.
@@ -85,6 +94,7 @@ typedef struct
 {
 	char		old_dir[MAXPGPATH];
 	char		new_dir[MAXPGPATH];
+
 	/*
 	 * old/new relfilenodes might differ for pg_largeobject(_metadata) indexes
 	 * due to VACUUM FULL or REINDEX.  Other relfilenodes are preserved.
@@ -92,7 +102,7 @@ typedef struct
 	Oid			old_relfilenode;
 	Oid			new_relfilenode;
 	/* the rest are used only for logging and error reporting */
-	char		nspname[NAMEDATALEN];		/* namespaces */
+	char		nspname[NAMEDATALEN];	/* namespaces */
 	char		relname[NAMEDATALEN];
 } FileNameMap;
 
@@ -177,12 +187,14 @@ typedef struct
 	ControlData controldata;	/* pg_control information */
 	DbInfoArr	dbarr;			/* dbinfos array */
 	char	   *pgdata;			/* pathname for cluster's $PGDATA directory */
+	char	   *pgconfig;		/* pathname for cluster's config file directory */
 	char	   *bindir;			/* pathname for cluster's executable directory */
+	char	   *pgopts;			/* options to pass to the server, like pg_ctl -o */
 	unsigned short port;		/* port number where postmaster is waiting */
 	uint32		major_version;	/* PG_VERSION of cluster */
-	char	   major_version_str[64];		/* string PG_VERSION of cluster */
+	char		major_version_str[64];	/* string PG_VERSION of cluster */
+	uint32		bin_version;	/* version returned from pg_ctl */
 	Oid			pg_database_oid;	/* OID of pg_database relation */
-	char	   *libpath;		/* pathname for cluster's pkglibdir */
 	char	   *tablespace_suffix;		/* directory specification */
 } ClusterInfo;
 
@@ -193,6 +205,20 @@ typedef struct
 typedef struct
 {
 	char	   *filename;		/* name of log file (may be /dev/null) */
+	/*
+	 * WIN32 files do not accept writes from multiple processes
+	 *
+	 * On Win32, we can't send both pg_upgrade output and command output to the
+	 * same file because we get the error: "The process cannot access the file
+	 * because it is being used by another process." so we have to send all
+	 * other output to 'nul'.  Therefore, we set this to DEVNULL on Win32, and
+	 * it equals 'filename' on all other platforms.
+	 *
+	 * We could use the Windows pgwin32_open() flags to allow shared file
+	 * writes but is unclear how all other tools would use those flags, so
+	 * we just avoid it and log a little less on Windows.
+	 */
+	char	   *filename2;
 	FILE	   *fd;				/* log FILE */
 	bool		debug;			/* TRUE -> log more information */
 	FILE	   *debug_fd;		/* debug-level log FILE */
@@ -224,7 +250,6 @@ typedef struct
 	int			num_tablespaces;
 	char	  **libraries;		/* loadable libraries */
 	int			num_libraries;
-	pgpid_t		postmasterPID;	/* PID of currently running postmaster */
 	ClusterInfo *running_cluster;
 } OSInfo;
 
@@ -232,9 +257,10 @@ typedef struct
 /*
  * Global variables
  */
-extern LogOpts	log_opts;
+extern LogOpts log_opts;
 extern UserOpts user_opts;
-extern ClusterInfo old_cluster, new_cluster;
+extern ClusterInfo old_cluster,
+			new_cluster;
 extern OSInfo os_info;
 extern char scandir_file_pattern[];
 
@@ -246,8 +272,8 @@ void check_old_cluster(bool live_check,
 				  char **sequence_script_file_name);
 void		check_new_cluster(void);
 void		report_clusters_compatible(void);
-void issue_warnings(char *sequence_script_file_name);
-void output_completion_banner(char *deletion_script_file_name);
+void		issue_warnings(char *sequence_script_file_name);
+void		output_completion_banner(char *deletion_script_file_name);
 void		check_cluster_versions(void);
 void		check_cluster_compatibility(bool live_check);
 void		create_script_for_old_cluster_deletion(char **deletion_script_file_name);
@@ -268,8 +294,8 @@ void		split_old_dump(void);
 
 /* exec.c */
 
-int exec_prog(bool throw_error,
-		  const char *cmd,...);
+int exec_prog(bool throw_error, const char *cmd, ...)
+	__attribute__((format(PG_PRINTF_ATTRIBUTE, 2, 3)));
 void		verify_directories(void);
 bool		is_server_running(const char *datadir);
 void		rename_old_pg_control(void);
@@ -309,11 +335,11 @@ typedef void *pageCnvCtx;
 
 int			dir_matching_filenames(const struct dirent * scan_ent);
 int pg_scandir(const char *dirname, struct dirent *** namelist,
-			   int (*selector) (const struct dirent *));
+		   int (*selector) (const struct dirent *));
 const char *copyAndUpdateFile(pageCnvCtx *pageConverter, const char *src,
 				  const char *dst, bool force);
 const char *linkAndUpdateFile(pageCnvCtx *pageConverter, const char *src,
-							  const char *dst);
+				  const char *dst);
 
 void		check_hard_link(void);
 
@@ -329,14 +355,15 @@ void		check_loadable_libraries(void);
 FileNameMap *gen_db_file_maps(DbInfo *old_db,
 				 DbInfo *new_db, int *nmaps, const char *old_pgdata,
 				 const char *new_pgdata);
-void 		get_db_and_rel_infos(ClusterInfo *cluster);
+void		get_db_and_rel_infos(ClusterInfo *cluster);
 void		free_db_and_rel_infos(DbInfoArr *db_arr);
-void		print_maps(FileNameMap *maps, int n,
-				const char *db_name);
+void print_maps(FileNameMap *maps, int n,
+		   const char *db_name);
 
 /* option.c */
 
 void		parseCommandLine(int argc, char *argv[]);
+void		adjust_data_dir(ClusterInfo *cluster);
 
 /* relfilenode.c */
 
@@ -352,43 +379,48 @@ void		init_tablespaces(void);
 
 /* server.c */
 
-PGconn *connectToServer(ClusterInfo *cluster, const char *db_name);
-PGresult *executeQueryOrDie(PGconn *conn, const char *fmt,...);
+PGconn	   *connectToServer(ClusterInfo *cluster, const char *db_name);
+PGresult   *executeQueryOrDie(PGconn *conn, const char *fmt, ...)
+	__attribute__((format(PG_PRINTF_ATTRIBUTE, 2, 3)));
 
-void		start_postmaster(ClusterInfo *cluster, bool quiet);
-void		stop_postmaster(bool fast, bool quiet);
-uint32 get_major_server_version(ClusterInfo *cluster);
-void		check_for_libpq_envvars(void);
+void		start_postmaster(ClusterInfo *cluster);
+void		stop_postmaster(bool fast);
+uint32		get_major_server_version(ClusterInfo *cluster);
+void		check_pghost_envvar(void);
 
 
 /* util.c */
 
-void		exit_nicely(bool need_cleanup);
 char	   *quote_identifier(const char *s);
 int			get_user_info(char **user_name);
 void		check_ok(void);
-void		report_status(eLogType type, const char *fmt,...);
-void		pg_log(eLogType type, char *fmt,...);
-void		prep_status(const char *fmt,...);
+void		report_status(eLogType type, const char *fmt, ...)
+	__attribute__((format(PG_PRINTF_ATTRIBUTE, 2, 3)));
+void		pg_log(eLogType type, char *fmt, ...)
+	__attribute__((format(PG_PRINTF_ATTRIBUTE, 2, 3)));
+void		prep_status(const char *fmt, ...)
+	__attribute__((format(PG_PRINTF_ATTRIBUTE, 1, 2)));
 void		check_ok(void);
 char	   *pg_strdup(const char *s);
 void	   *pg_malloc(int size);
 void		pg_free(void *ptr);
 const char *getErrorText(int errNum);
 unsigned int str2uint(const char *str);
+void		pg_putenv(const char *var, const char *val);
 
 
 /* version.c */
 
 void new_9_0_populate_pg_largeobject_metadata(ClusterInfo *cluster,
-											  bool check_mode);
+										 bool check_mode);
 
 /* version_old_8_3.c */
 
 void		old_8_3_check_for_name_data_type_usage(ClusterInfo *cluster);
 void		old_8_3_check_for_tsquery_usage(ClusterInfo *cluster);
-void old_8_3_rebuild_tsvector_tables(ClusterInfo *cluster, bool check_mode);
-void old_8_3_invalidate_hash_gin_indexes(ClusterInfo *cluster, bool check_mode);
+void		old_8_3_check_ltree_usage(ClusterInfo *cluster);
+void		old_8_3_rebuild_tsvector_tables(ClusterInfo *cluster, bool check_mode);
+void		old_8_3_invalidate_hash_gin_indexes(ClusterInfo *cluster, bool check_mode);
 void old_8_3_invalidate_bpchar_pattern_ops_indexes(ClusterInfo *cluster,
-												   bool check_mode);
+											  bool check_mode);
 char	   *old_8_3_create_sequence_script(ClusterInfo *cluster);

@@ -16,22 +16,53 @@
 
 #include "access/gist.h"
 #include "access/itup.h"
+#include "fmgr.h"
 #include "storage/bufmgr.h"
+#include "storage/buffile.h"
 #include "utils/rbtree.h"
+#include "utils/hsearch.h"
 
 /* Buffer lock modes */
 #define GIST_SHARE	BUFFER_LOCK_SHARE
 #define GIST_EXCLUSIVE	BUFFER_LOCK_EXCLUSIVE
 #define GIST_UNLOCK BUFFER_LOCK_UNLOCK
 
+typedef struct
+{
+	BlockNumber prev;
+	uint32		freespace;
+	char		tupledata[1];
+} GISTNodeBufferPage;
+
+#define BUFFER_PAGE_DATA_OFFSET MAXALIGN(offsetof(GISTNodeBufferPage, tupledata))
+/* Returns free space in node buffer page */
+#define PAGE_FREE_SPACE(nbp) (nbp->freespace)
+/* Checks if node buffer page is empty */
+#define PAGE_IS_EMPTY(nbp) (nbp->freespace == BLCKSZ - BUFFER_PAGE_DATA_OFFSET)
+/* Checks if node buffers page don't contain sufficient space for index tuple */
+#define PAGE_NO_SPACE(nbp, itup) (PAGE_FREE_SPACE(nbp) < \
+										MAXALIGN(IndexTupleSize(itup)))
+
 /*
  * GISTSTATE: information needed for any GiST index operation
  *
  * This struct retains call info for the index's opclass-specific support
  * functions (per index column), plus the index's tuple descriptor.
+ *
+ * scanCxt holds the GISTSTATE itself as well as any data that lives for the
+ * lifetime of the index operation.  We pass this to the support functions
+ * via fn_mcxt, so that they can store scan-lifespan data in it.  The
+ * functions are invoked in tempCxt, which is typically short-lifespan
+ * (that is, it's reset after each tuple).  However, tempCxt can be the same
+ * as scanCxt if we're not bothering with per-tuple context resets.
  */
 typedef struct GISTSTATE
 {
+	MemoryContext scanCxt;		/* context for scan-lifespan data */
+	MemoryContext tempCxt;		/* short-term context for calling functions */
+
+	TupleDesc	tupdesc;		/* index's tuple descriptor */
+
 	FmgrInfo	consistentFn[INDEX_MAX_KEYS];
 	FmgrInfo	unionFn[INDEX_MAX_KEYS];
 	FmgrInfo	compressFn[INDEX_MAX_KEYS];
@@ -41,7 +72,8 @@ typedef struct GISTSTATE
 	FmgrInfo	equalFn[INDEX_MAX_KEYS];
 	FmgrInfo	distanceFn[INDEX_MAX_KEYS];
 
-	TupleDesc	tupdesc;
+	/* Collations to pass to the support functions */
+	Oid			supportCollation[INDEX_MAX_KEYS];
 } GISTSTATE;
 
 
@@ -79,13 +111,13 @@ typedef struct GISTSearchItem
 	BlockNumber blkno;			/* index page number, or InvalidBlockNumber */
 	union
 	{
-		GistNSN		parentlsn;		/* parent page's LSN, if index page */
+		GistNSN		parentlsn;	/* parent page's LSN, if index page */
 		/* we must store parentlsn to detect whether a split occurred */
 		GISTSearchHeapItem heap;	/* heap info, if heap tuple */
 	}			data;
-}	GISTSearchItem;
+} GISTSearchItem;
 
-#define GISTSearchItemIsHeap(item)  ((item).blkno == InvalidBlockNumber)
+#define GISTSearchItemIsHeap(item)	((item).blkno == InvalidBlockNumber)
 
 /*
  * Within a GISTSearchTreeItem's chain, heap items always appear before
@@ -110,7 +142,6 @@ typedef struct GISTScanOpaqueData
 	GISTSTATE  *giststate;		/* index information, see above */
 	RBTree	   *queue;			/* queue of unvisited items */
 	MemoryContext queueCxt;		/* context holding the queue */
-	MemoryContext tempCxt;		/* workspace context for calling functions */
 	bool		qual_ok;		/* false if qual can never be satisfied */
 	bool		firstCall;		/* true until first gistgettuple call */
 
@@ -132,9 +163,9 @@ typedef GISTScanOpaqueData *GISTScanOpaque;
 /* XLog stuff */
 
 #define XLOG_GIST_PAGE_UPDATE		0x00
-/* #define XLOG_GIST_NEW_ROOT			0x20 */ /* not used anymore */
+ /* #define XLOG_GIST_NEW_ROOT			 0x20 */	/* not used anymore */
 #define XLOG_GIST_PAGE_SPLIT		0x30
-/* #define XLOG_GIST_INSERT_COMPLETE	0x40 */ /* not used anymore */
+ /* #define XLOG_GIST_INSERT_COMPLETE	 0x40 */	/* not used anymore */
 #define XLOG_GIST_CREATE_INDEX		0x50
 #define XLOG_GIST_PAGE_DELETE		0x60
 
@@ -147,7 +178,7 @@ typedef struct gistxlogPageUpdate
 	 * If this operation completes a page split, by inserting a downlink for
 	 * the split page, leftchild points to the left half of the split.
 	 */
-	BlockNumber	leftchild;
+	BlockNumber leftchild;
 
 	/* number of deleted offsets */
 	uint16		ntodelete;
@@ -161,12 +192,13 @@ typedef struct gistxlogPageSplit
 {
 	RelFileNode node;
 	BlockNumber origblkno;		/* splitted page */
-	BlockNumber	origrlink;		/* rightlink of the page before split */
+	BlockNumber origrlink;		/* rightlink of the page before split */
 	GistNSN		orignsn;		/* NSN of the page before split */
 	bool		origleaf;		/* was splitted page a leaf page? */
 
 	BlockNumber leftchild;		/* like in gistxlogPageUpdate */
 	uint16		npage;			/* # of pages in the split */
+	bool		markfollowright;	/* set F_FOLLOW_RIGHT flags */
 
 	/*
 	 * follow: 1. gistxlogPage and array of IndexTupleData per page
@@ -210,19 +242,16 @@ typedef struct GISTInsertStack
 	Page		page;
 
 	/*
-	 * log sequence number from page->lsn to recognize page update and
-	 * compare it with page's nsn to recognize page split
+	 * log sequence number from page->lsn to recognize page update and compare
+	 * it with page's nsn to recognize page split
 	 */
 	GistNSN		lsn;
 
-	/* child's offset */
-	OffsetNumber childoffnum;
+	/* offset of the downlink in the parent page, that points to this page */
+	OffsetNumber downlinkoffnum;
 
 	/* pointer to parent */
 	struct GISTInsertStack *parent;
-
-	/* for gistFindPath */
-	struct GISTInsertStack *next;
 } GISTInsertStack;
 
 typedef struct GistSplitVector
@@ -279,18 +308,152 @@ typedef struct
 #define  GistTupleIsInvalid(itup)	( ItemPointerGetOffsetNumber( &((itup)->t_tid) ) == TUPLE_IS_INVALID )
 #define  GistTupleSetValid(itup)	ItemPointerSetOffsetNumber( &((itup)->t_tid), TUPLE_IS_VALID )
 
+
+
+
+/*
+ * A buffer attached to an internal node, used when building an index in
+ * buffering mode.
+ */
+typedef struct
+{
+	BlockNumber nodeBlocknum;	/* index block # this buffer is for */
+	int32		blocksCount;	/* current # of blocks occupied by buffer */
+
+	BlockNumber pageBlocknum;	/* temporary file block # */
+	GISTNodeBufferPage *pageBuffer;		/* in-memory buffer page */
+
+	/* is this buffer queued for emptying? */
+	bool		queuedForEmptying;
+
+	struct GISTBufferingInsertStack *path;
+} GISTNodeBuffer;
+
+/*
+ * Does specified level have buffers? (Beware of multiple evaluation of
+ * arguments.)
+ */
+#define LEVEL_HAS_BUFFERS(nlevel, gfbb) \
+	((nlevel) != 0 && (nlevel) % (gfbb)->levelStep == 0 && \
+	 (nlevel) != (gfbb)->rootitem->level)
+
+/* Is specified buffer at least half-filled (should be queued for emptying)? */
+#define BUFFER_HALF_FILLED(nodeBuffer, gfbb) \
+	((nodeBuffer)->blocksCount > (gfbb)->pagesPerBuffer / 2)
+
+/*
+ * Is specified buffer full? Our buffers can actually grow indefinitely,
+ * beyond the "maximum" size, so this just means whether the buffer has grown
+ * beyond the nominal maximum size.
+ */
+#define BUFFER_OVERFLOWED(nodeBuffer, gfbb) \
+	((nodeBuffer)->blocksCount > (gfbb)->pagesPerBuffer)
+
+/*
+ * Extended GISTInsertStack for buffering GiST index build.
+ */
+typedef struct GISTBufferingInsertStack
+{
+	/* current page */
+	BlockNumber blkno;
+
+	/* offset of the downlink in the parent page, that points to this page */
+	OffsetNumber downlinkoffnum;
+
+	/* pointer to parent */
+	struct GISTBufferingInsertStack *parent;
+
+	int			refCount;
+
+	/* level number */
+	int			level;
+} GISTBufferingInsertStack;
+
+/*
+ * Data structure with general information about build buffers.
+ */
+typedef struct GISTBuildBuffers
+{
+	/* Persistent memory context for the buffers and metadata. */
+	MemoryContext context;
+
+	BufFile    *pfile;			/* Temporary file to store buffers in */
+	long		nFileBlocks;	/* Current size of the temporary file */
+
+	/*
+	 * resizable array of free blocks.
+	 */
+	long	   *freeBlocks;
+	int			nFreeBlocks;	/* # of currently free blocks in the array */
+	int			freeBlocksLen;	/* current allocated length of the array */
+
+	/* Hash for buffers by block number */
+	HTAB	   *nodeBuffersTab;
+
+	/* List of buffers scheduled for emptying */
+	List	   *bufferEmptyingQueue;
+
+	/*
+	 * Parameters to the buffering build algorithm. levelStep determines which
+	 * levels in the tree have buffers, and pagesPerBuffer determines how
+	 * large each buffer is.
+	 */
+	int			levelStep;
+	int			pagesPerBuffer;
+
+	/* Array of lists of buffers on each level, for final emptying */
+	List	  **buffersOnLevels;
+	int			buffersOnLevelsLen;
+
+	/*
+	 * Dynamically-sized array of buffers that currently have their last page
+	 * loaded in main memory.
+	 */
+	GISTNodeBuffer **loadedBuffers;
+	int			loadedBuffersCount;		/* # of entries in loadedBuffers */
+	int			loadedBuffersLen;		/* allocated size of loadedBuffers */
+
+	/* A path item that points to the current root node */
+	GISTBufferingInsertStack *rootitem;
+} GISTBuildBuffers;
+
+/*
+ * Storage type for GiST's reloptions
+ */
+typedef struct GiSTOptions
+{
+	int32		vl_len_;		/* varlena header (do not touch directly!) */
+	int			fillfactor;		/* page fill factor in percent (0..100) */
+	int			bufferingModeOffset;	/* use buffering build? */
+}	GiSTOptions;
+
 /* gist.c */
-extern Datum gistbuild(PG_FUNCTION_ARGS);
 extern Datum gistbuildempty(PG_FUNCTION_ARGS);
 extern Datum gistinsert(PG_FUNCTION_ARGS);
 extern MemoryContext createTempGistContext(void);
-extern void initGISTstate(GISTSTATE *giststate, Relation index);
+extern GISTSTATE *initGISTstate(Relation index);
 extern void freeGISTstate(GISTSTATE *giststate);
+extern void gistdoinsert(Relation r,
+			 IndexTuple itup,
+			 Size freespace,
+			 GISTSTATE *GISTstate);
+
+/* A List of these is returned from gistplacetopage() in *splitinfo */
+typedef struct
+{
+	Buffer		buf;			/* the split page "half" */
+	IndexTuple	downlink;		/* downlink for this half. */
+} GISTPageSplitInfo;
+
+extern bool gistplacetopage(Relation rel, Size freespace, GISTSTATE *giststate,
+				Buffer buffer,
+				IndexTuple *itup, int ntup, OffsetNumber oldoffnum,
+				Buffer leftchildbuf,
+				List **splitinfo,
+				bool markleftchild);
 
 extern SplitedPageLayout *gistSplit(Relation r, Page page, IndexTuple *itup,
 		  int len, GISTSTATE *giststate);
-
-extern GISTInsertStack *gistFindPath(Relation r, BlockNumber child);
 
 /* gistxlog.c */
 extern void gist_redo(XLogRecPtr lsn, XLogRecord *record);
@@ -300,14 +463,14 @@ extern void gist_xlog_cleanup(void);
 
 extern XLogRecPtr gistXLogUpdate(RelFileNode node, Buffer buffer,
 			   OffsetNumber *todelete, int ntodelete,
-								 IndexTuple *itup, int ntup,
+			   IndexTuple *itup, int ntup,
 			   Buffer leftchild);
 
 extern XLogRecPtr gistXLogSplit(RelFileNode node,
 			  BlockNumber blkno, bool page_is_leaf,
 			  SplitedPageLayout *dist,
 			  BlockNumber origrlink, GistNSN oldnsn,
-			  Buffer leftchild);
+			  Buffer leftchild, bool markfollowright);
 
 /* gistget.c */
 extern Datum gistgettuple(PG_FUNCTION_ARGS);
@@ -381,5 +544,28 @@ extern void gistSplitByKey(Relation r, Page page, IndexTuple *itup,
 			   int len, GISTSTATE *giststate,
 			   GistSplitVector *v, GistEntryVector *entryvec,
 			   int attno);
+
+/* gistbuild.c */
+extern Datum gistbuild(PG_FUNCTION_ARGS);
+extern void gistValidateBufferingOption(char *value);
+extern void gistDecreasePathRefcount(GISTBufferingInsertStack *path);
+
+/* gistbuildbuffers.c */
+extern GISTBuildBuffers *gistInitBuildBuffers(int pagesPerBuffer, int levelStep,
+					 int maxLevel);
+extern GISTNodeBuffer *gistGetNodeBuffer(GISTBuildBuffers *gfbb,
+				  GISTSTATE *giststate,
+				  BlockNumber blkno, OffsetNumber downlinkoffnum,
+				  GISTBufferingInsertStack *parent);
+extern void gistPushItupToNodeBuffer(GISTBuildBuffers *gfbb,
+						 GISTNodeBuffer *nodeBuffer, IndexTuple item);
+extern bool gistPopItupFromNodeBuffer(GISTBuildBuffers *gfbb,
+						  GISTNodeBuffer *nodeBuffer, IndexTuple *item);
+extern void gistFreeBuildBuffers(GISTBuildBuffers *gfbb);
+extern void gistRelocateBuildBuffersOnSplit(GISTBuildBuffers *gfbb,
+								GISTSTATE *giststate, Relation r,
+								GISTBufferingInsertStack *path, Buffer buffer,
+								List *splitinfo);
+extern void gistUnloadNodeBuffers(GISTBuildBuffers *gfbb);
 
 #endif   /* GIST_PRIVATE_H */

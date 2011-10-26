@@ -158,7 +158,7 @@ slashUsage(unsigned short int pager)
 {
 	FILE	   *output;
 
-	output = PageOutput(92, pager);
+	output = PageOutput(93, pager);
 
 	/* if you add/remove a line here, change the row count above */
 
@@ -184,6 +184,7 @@ slashUsage(unsigned short int pager)
 	fprintf(output, _("  \\copy ...              perform SQL COPY with data stream to the client host\n"));
 	fprintf(output, _("  \\echo [STRING]         write string to standard output\n"));
 	fprintf(output, _("  \\i FILE                execute commands from file\n"));
+	fprintf(output, _("  \\ir FILE               as \\i, but relative to location of current script\n"));
 	fprintf(output, _("  \\o [FILE]              send all query results to file or |pipe\n"));
 	fprintf(output, _("  \\qecho [STRING]        write string to query output stream (see \\o)\n"));
 	fprintf(output, "\n");
@@ -194,11 +195,11 @@ slashUsage(unsigned short int pager)
 	fprintf(output, _("  \\d[S+]  NAME           describe table, view, sequence, or index\n"));
 	fprintf(output, _("  \\da[S]  [PATTERN]      list aggregates\n"));
 	fprintf(output, _("  \\db[+]  [PATTERN]      list tablespaces\n"));
-	fprintf(output, _("  \\dc[S]  [PATTERN]      list conversions\n"));
-	fprintf(output, _("  \\dC     [PATTERN]      list casts\n"));
-	fprintf(output, _("  \\dd[S]  [PATTERN]      show comments on objects\n"));
+	fprintf(output, _("  \\dc[S+] [PATTERN]      list conversions\n"));
+	fprintf(output, _("  \\dC[+]  [PATTERN]      list casts\n"));
+	fprintf(output, _("  \\dd[S]  [PATTERN]      show object descriptions not displayed elsewhere\n"));
 	fprintf(output, _("  \\ddp    [PATTERN]      list default privileges\n"));
-	fprintf(output, _("  \\dD[S]  [PATTERN]      list domains\n"));
+	fprintf(output, _("  \\dD[S+] [PATTERN]      list domains\n"));
 	fprintf(output, _("  \\det[+] [PATTERN]      list foreign tables\n"));
 	fprintf(output, _("  \\des[+] [PATTERN]      list foreign servers\n"));
 	fprintf(output, _("  \\deu[+] [PATTERN]      list user mappings\n"));
@@ -214,6 +215,7 @@ slashUsage(unsigned short int pager)
 	fprintf(output, _("  \\dL[S+] [PATTERN]      list procedural languages\n"));
 	fprintf(output, _("  \\dn[S+] [PATTERN]      list schemas\n"));
 	fprintf(output, _("  \\do[S]  [PATTERN]      list operators\n"));
+	fprintf(output, _("  \\dO[S+] [PATTERN]      list collations\n"));
 	fprintf(output, _("  \\dp     [PATTERN]      list table, view, and sequence access privileges\n"));
 	fprintf(output, _("  \\drds [PATRN1 [PATRN2]] list per-database role settings\n"));
 	fprintf(output, _("  \\ds[S+] [PATTERN]      list sequences\n"));
@@ -222,6 +224,7 @@ slashUsage(unsigned short int pager)
 	fprintf(output, _("  \\du[+]  [PATTERN]      list roles\n"));
 	fprintf(output, _("  \\dv[S+] [PATTERN]      list views\n"));
 	fprintf(output, _("  \\dE[S+] [PATTERN]      list foreign tables\n"));
+	fprintf(output, _("  \\dx[+]  [PATTERN]      list extensions\n"));
 	fprintf(output, _("  \\l[+]                  list all databases\n"));
 	fprintf(output, _("  \\sf[+] FUNCNAME        show a function's definition\n"));
 	fprintf(output, _("  \\z      [PATTERN]      same as \\dp\n"));

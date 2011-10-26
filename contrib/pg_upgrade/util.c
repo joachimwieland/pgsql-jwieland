@@ -7,12 +7,14 @@
  *	contrib/pg_upgrade/util.c
  */
 
+#include "postgres.h"
+
 #include "pg_upgrade.h"
 
 #include <signal.h>
 
 
-LogOpts			log_opts;
+LogOpts		log_opts;
 
 /*
  * report_status()
@@ -46,7 +48,7 @@ report_status(eLogType type, const char *fmt,...)
  *		if(( message = flarbFiles(fileCount)) == NULL)
  *		  report_status(PG_REPORT, "ok" );
  *		else
- *		  pg_log(PG_FATAL, "failed - %s", message );
+ *		  pg_log(PG_FATAL, "failed - %s\n", message );
  */
 void
 prep_status(const char *fmt,...)
@@ -97,9 +99,9 @@ pg_log(eLogType type, char *fmt,...)
 			break;
 
 		case PG_FATAL:
-			printf("%s", "\n");
-			printf("%s", _(message));
-			exit_nicely(true);
+			printf("\n%s", _(message));
+			printf("Failure, exiting\n");
+			exit(1);
 			break;
 
 		case PG_DEBUG:
@@ -184,35 +186,6 @@ get_user_info(char **user_name)
 }
 
 
-void
-exit_nicely(bool need_cleanup)
-{
-	stop_postmaster(true, true);
-
-	pg_free(log_opts.filename);
-
-	if (log_opts.fd)
-		fclose(log_opts.fd);
-
-	if (log_opts.debug_fd)
-		fclose(log_opts.debug_fd);
-
-	/* terminate any running instance of postmaster */
-	if (os_info.postmasterPID != 0)
-		kill(os_info.postmasterPID, SIGTERM);
-
-	if (need_cleanup)
-	{
-		/*
-		 * FIXME must delete intermediate files
-		 */
-		exit(1);
-	}
-	else
-		exit(0);
-}
-
-
 void *
 pg_malloc(int n)
 {
@@ -259,7 +232,7 @@ getErrorText(int errNum)
 #ifdef WIN32
 	_dosmaperr(GetLastError());
 #endif
-	return strdup(strerror(errNum));
+	return pg_strdup(strerror(errNum));
 }
 
 
@@ -272,4 +245,41 @@ unsigned int
 str2uint(const char *str)
 {
 	return strtoul(str, NULL, 10);
+}
+
+
+/*
+ *	pg_putenv()
+ *
+ *	This is like putenv(), but takes two arguments.
+ *	It also does unsetenv() if val is NULL.
+ */
+void
+pg_putenv(const char *var, const char *val)
+{
+	if (val)
+	{
+#ifndef WIN32
+		char	   *envstr = (char *) pg_malloc(strlen(var) +
+												strlen(val) + 2);
+
+		sprintf(envstr, "%s=%s", var, val);
+		putenv(envstr);
+
+		/*
+		 * Do not free envstr because it becomes part of the environment on
+		 * some operating systems.	See port/unsetenv.c::unsetenv.
+		 */
+#else
+		SetEnvironmentVariableA(var, val);
+#endif
+	}
+	else
+	{
+#ifndef WIN32
+		unsetenv(var);
+#else
+		SetEnvironmentVariableA(var, "");
+#endif
+	}
 }

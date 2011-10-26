@@ -66,6 +66,7 @@
     directory if Tcl support is specified in the configuration step of
     the installation procedure.  To install <application>PL/Tcl</>
     and/or <application>PL/TclU</> in a particular database, use the
+    <command>CREATE EXTENSION</> command or the
     <command>createlang</command> program, for example
     <literal>createlang pltcl <replaceable>dbname</></literal> or
     <literal>createlang pltclu <replaceable>dbname</></literal>.
@@ -343,8 +344,8 @@ spi_exec -array C "SELECT * FROM pg_class" {
        <para>
         Prepares and saves a query plan for later execution.  The
         saved plan will be retained for the life of the current
-        session.<indexterm><primary>preparing a query</><secondary>in
-        PL/Tcl</></>
+        session.<indexterm><primary>preparing a query</>
+        <secondary>in PL/Tcl</></>
        </para>
        <para>
         The query can use parameters, that is, placeholders for

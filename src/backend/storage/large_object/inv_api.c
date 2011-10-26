@@ -35,21 +35,17 @@
 #include "access/sysattr.h"
 #include "access/tuptoaster.h"
 #include "access/xact.h"
-#include "catalog/catalog.h"
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
 #include "catalog/objectaccess.h"
 #include "catalog/pg_largeobject.h"
 #include "catalog/pg_largeobject_metadata.h"
-#include "commands/comment.h"
 #include "libpq/libpq-fs.h"
 #include "miscadmin.h"
 #include "storage/large_object.h"
 #include "utils/fmgroids.h"
 #include "utils/rel.h"
-#include "utils/resowner.h"
 #include "utils/snapmgr.h"
-#include "utils/syscache.h"
 #include "utils/tqual.h"
 
 
@@ -844,8 +840,8 @@ inv_truncate(LargeObjectDesc *obj_desc, int len)
 	{
 		/*
 		 * If the first page we found was after the truncation point, we're in
-		 * a hole that we'll fill, but we need to delete the later page because
-		 * the loop below won't visit it again.
+		 * a hole that we'll fill, but we need to delete the later page
+		 * because the loop below won't visit it again.
 		 */
 		if (olddata != NULL)
 		{

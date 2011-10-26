@@ -19,6 +19,7 @@
 #include "executor/hashjoin.h"
 #include "executor/nodeHash.h"
 #include "executor/nodeHashjoin.h"
+#include "miscadmin.h"
 #include "utils/memutils.h"
 
 
@@ -59,7 +60,6 @@ static bool ExecHashJoinNewBatch(HashJoinState *hjstate);
 TupleTableSlot *				/* return: a tuple or NULL */
 ExecHashJoin(HashJoinState *node)
 {
-	EState	   *estate;
 	PlanState  *outerNode;
 	HashState  *hashNode;
 	List	   *joinqual;
@@ -74,7 +74,6 @@ ExecHashJoin(HashJoinState *node)
 	/*
 	 * get information from HashJoin node
 	 */
-	estate = node->js.ps.state;
 	joinqual = node->js.joinqual;
 	otherqual = node->js.ps.qual;
 	hashNode = (HashState *) innerPlanState(node);
@@ -113,6 +112,7 @@ ExecHashJoin(HashJoinState *node)
 		switch (node->hj_JoinState)
 		{
 			case HJ_BUILD_HASHTABLE:
+
 				/*
 				 * First time through: build hash table for inner relation.
 				 */
@@ -123,12 +123,12 @@ ExecHashJoin(HashJoinState *node)
 				 * right/full join, we can quit without building the hash
 				 * table.  However, for an inner join it is only a win to
 				 * check this when the outer relation's startup cost is less
-				 * than the projected cost of building the hash
-				 * table.  Otherwise it's best to build the hash table first
-				 * and see if the inner relation is empty.  (When it's a left
-				 * join, we should always make this check, since we aren't
-				 * going to be able to skip the join on the strength of an
-				 * empty inner relation anyway.)
+				 * than the projected cost of building the hash table.
+				 * Otherwise it's best to build the hash table first and see
+				 * if the inner relation is empty.	(When it's a left join, we
+				 * should always make this check, since we aren't going to be
+				 * able to skip the join on the strength of an empty inner
+				 * relation anyway.)
 				 *
 				 * If we are rescanning the join, we make use of information
 				 * gained on the previous scan: don't bother to try the
@@ -185,8 +185,8 @@ ExecHashJoin(HashJoinState *node)
 					return NULL;
 
 				/*
-				 * need to remember whether nbatch has increased since we began
-				 * scanning the outer relation
+				 * need to remember whether nbatch has increased since we
+				 * began scanning the outer relation
 				 */
 				hashtable->nbatch_outstart = hashtable->nbatch;
 
@@ -202,6 +202,7 @@ ExecHashJoin(HashJoinState *node)
 				/* FALL THRU */
 
 			case HJ_NEED_NEW_OUTER:
+
 				/*
 				 * We don't have an outer tuple, try to get the next one
 				 */
@@ -250,7 +251,7 @@ ExecHashJoin(HashJoinState *node)
 					Assert(batchno > hashtable->curbatch);
 					ExecHashJoinSaveTuple(ExecFetchSlotMinimalTuple(outerTupleSlot),
 										  hashvalue,
-										  &hashtable->outerBatchFile[batchno]);
+										&hashtable->outerBatchFile[batchno]);
 					/* Loop around, staying in HJ_NEED_NEW_OUTER state */
 					continue;
 				}
@@ -261,6 +262,14 @@ ExecHashJoin(HashJoinState *node)
 				/* FALL THRU */
 
 			case HJ_SCAN_BUCKET:
+
+				/*
+				 * We check for interrupts here because this corresponds to
+				 * where we'd fetch a row from a child plan node in other join
+				 * types.
+				 */
+				CHECK_FOR_INTERRUPTS();
+
 				/*
 				 * Scan the selected hash bucket for matches to current outer
 				 */
@@ -296,8 +305,8 @@ ExecHashJoin(HashJoinState *node)
 					}
 
 					/*
-					 * In a semijoin, we'll consider returning the first match,
-					 * but after that we're done with this outer tuple.
+					 * In a semijoin, we'll consider returning the first
+					 * match, but after that we're done with this outer tuple.
 					 */
 					if (node->js.jointype == JOIN_SEMI)
 						node->hj_JoinState = HJ_NEED_NEW_OUTER;
@@ -316,14 +325,19 @@ ExecHashJoin(HashJoinState *node)
 							return result;
 						}
 					}
+					else
+						InstrCountFiltered2(node, 1);
 				}
+				else
+					InstrCountFiltered1(node, 1);
 				break;
 
 			case HJ_FILL_OUTER_TUPLE:
+
 				/*
 				 * The current outer tuple has run out of matches, so check
-				 * whether to emit a dummy outer-join tuple.  Whether we
-				 * emit one or not, the next state is NEED_NEW_OUTER.
+				 * whether to emit a dummy outer-join tuple.  Whether we emit
+				 * one or not, the next state is NEED_NEW_OUTER.
 				 */
 				node->hj_JoinState = HJ_NEED_NEW_OUTER;
 
@@ -350,10 +364,13 @@ ExecHashJoin(HashJoinState *node)
 							return result;
 						}
 					}
+					else
+						InstrCountFiltered2(node, 1);
 				}
 				break;
 
 			case HJ_FILL_INNER_TUPLES:
+
 				/*
 				 * We have finished a batch, but we are doing right/full join,
 				 * so any unmatched inner tuples in the hashtable have to be
@@ -386,14 +403,17 @@ ExecHashJoin(HashJoinState *node)
 						return result;
 					}
 				}
+				else
+					InstrCountFiltered2(node, 1);
 				break;
 
 			case HJ_NEED_NEW_BATCH:
+
 				/*
 				 * Try to advance to next batch.  Done if there are no more.
 				 */
 				if (!ExecHashJoinNewBatch(node))
-					return NULL;				/* end of join */
+					return NULL;	/* end of join */
 				node->hj_JoinState = HJ_NEED_NEW_OUTER;
 				break;
 
@@ -783,7 +803,7 @@ ExecHashJoinNewBatch(HashJoinState *hjstate)
 	}
 
 	if (curbatch >= nbatch)
-		return false;		/* no more batches */
+		return false;			/* no more batches */
 
 	hashtable->curbatch = curbatch;
 
@@ -829,7 +849,7 @@ ExecHashJoinNewBatch(HashJoinState *hjstate)
 		if (BufFileSeek(hashtable->outerBatchFile[curbatch], 0, 0L, SEEK_SET))
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not rewind hash-join temporary file: %m")));
+				   errmsg("could not rewind hash-join temporary file: %m")));
 	}
 
 	return true;
@@ -944,14 +964,13 @@ ExecReScanHashJoin(HashJoinState *node)
 				ExecHashTableResetMatchFlags(node->hj_HashTable);
 
 			/*
-			 * Also, we need to reset our state about the emptiness of
-			 * the outer relation, so that the new scan of the outer will
-			 * update it correctly if it turns out to be empty this time.
-			 * (There's no harm in clearing it now because ExecHashJoin won't
-			 * need the info.  In the other cases, where the hash table
-			 * doesn't exist or we are destroying it, we leave this state
-			 * alone because ExecHashJoin will need it the first time
-			 * through.)
+			 * Also, we need to reset our state about the emptiness of the
+			 * outer relation, so that the new scan of the outer will update
+			 * it correctly if it turns out to be empty this time. (There's no
+			 * harm in clearing it now because ExecHashJoin won't need the
+			 * info.  In the other cases, where the hash table doesn't exist
+			 * or we are destroying it, we leave this state alone because
+			 * ExecHashJoin will need it the first time through.)
 			 */
 			node->hj_OuterNotEmpty = false;
 

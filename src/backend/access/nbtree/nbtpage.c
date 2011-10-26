@@ -25,10 +25,9 @@
 #include "access/nbtree.h"
 #include "access/transam.h"
 #include "miscadmin.h"
-#include "storage/bufmgr.h"
-#include "storage/freespace.h"
 #include "storage/indexfsm.h"
 #include "storage/lmgr.h"
+#include "storage/predicate.h"
 #include "utils/inval.h"
 #include "utils/snapmgr.h"
 
@@ -465,7 +464,6 @@ _bt_log_reuse_page(Relation rel, BlockNumber blkno, TransactionId latestRemovedX
 
 	/* XLOG stuff */
 	{
-		XLogRecPtr	recptr;
 		XLogRecData rdata[1];
 		xl_btree_reuse_page xlrec_reuse;
 
@@ -477,7 +475,7 @@ _bt_log_reuse_page(Relation rel, BlockNumber blkno, TransactionId latestRemovedX
 		rdata[0].buffer = InvalidBuffer;
 		rdata[0].next = NULL;
 
-		recptr = XLogInsert(RM_BTREE_ID, XLOG_BTREE_REUSE_PAGE, rdata);
+		XLogInsert(RM_BTREE_ID, XLOG_BTREE_REUSE_PAGE, rdata);
 
 		/*
 		 * We don't do PageSetLSN or PageSetTLI here because we're about
@@ -560,9 +558,19 @@ _bt_getbuf(Relation rel, BlockNumber blkno, int access)
 					 */
 					if (XLogStandbyInfoActive())
 					{
+						TransactionId latestRemovedXid;
+
 						BTPageOpaque opaque = (BTPageOpaque) PageGetSpecialPointer(page);
 
-						_bt_log_reuse_page(rel, blkno, opaque->btpo.xact);
+						/*
+						 * opaque->btpo.xact is the threshold value not the
+						 * value to measure conflicts against. We must retreat
+						 * by one from it to get the correct conflict xid.
+						 */
+						latestRemovedXid = opaque->btpo.xact;
+						TransactionIdRetreat(latestRemovedXid);
+
+						_bt_log_reuse_page(rel, blkno, latestRemovedXid);
 					}
 
 					/* Okay to use page.  Re-initialize and return it */
@@ -677,6 +685,7 @@ bool
 _bt_page_recyclable(Page page)
 {
 	BTPageOpaque opaque;
+	TransactionId cutoff;
 
 	/*
 	 * It's possible to find an all-zeroes page in an index --- for example, a
@@ -689,11 +698,18 @@ _bt_page_recyclable(Page page)
 
 	/*
 	 * Otherwise, recycle if deleted and too old to have any processes
-	 * interested in it.
+	 * interested in it.  If we are generating records for Hot Standby
+	 * defer page recycling until RecentGlobalXmin to respect user
+	 * controls specified by vacuum_defer_cleanup_age or hot_standby_feedback.
 	 */
+	if (XLogStandbyInfoActive())
+		cutoff = RecentGlobalXmin;
+	else
+		cutoff = RecentXmin;
+
 	opaque = (BTPageOpaque) PageGetSpecialPointer(page);
 	if (P_ISDELETED(opaque) &&
-		TransactionIdPrecedesOrEquals(opaque->btpo.xact, RecentXmin))
+		TransactionIdPrecedesOrEquals(opaque->btpo.xact, cutoff))
 		return true;
 	return false;
 }
@@ -1184,6 +1200,12 @@ _bt_pagedel(Relation rel, Buffer buf, BTStack stack)
 			 RelationGetRelationName(rel));
 
 	/*
+	 * Any insert which would have gone on the target block will now go to the
+	 * right sibling block.
+	 */
+	PredicateLockPageCombine(rel, target, rightsib);
+
+	/*
 	 * Next find and write-lock the current parent of the target page. This is
 	 * essentially the same as the corresponding step of splitting.
 	 */
@@ -1261,9 +1283,9 @@ _bt_pagedel(Relation rel, Buffer buf, BTStack stack)
 
 	/*
 	 * Check that the parent-page index items we're about to delete/overwrite
-	 * contain what we expect.  This can fail if the index has become
-	 * corrupt for some reason.  We want to throw any error before entering
-	 * the critical section --- otherwise it'd be a PANIC.
+	 * contain what we expect.	This can fail if the index has become corrupt
+	 * for some reason.  We want to throw any error before entering the
+	 * critical section --- otherwise it'd be a PANIC.
 	 *
 	 * The test on the target item is just an Assert because _bt_getstackbuf
 	 * should have guaranteed it has the expected contents.  The test on the

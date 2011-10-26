@@ -93,14 +93,12 @@
 #include "postgres.h"
 
 #include "access/nbtree.h"
-#include "catalog/pg_amop.h"
 #include "executor/execdebug.h"
 #include "executor/nodeMergejoin.h"
 #include "miscadmin.h"
 #include "utils/acl.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
-#include "utils/syscache.h"
 
 
 /*
@@ -138,12 +136,13 @@ typedef struct MergeJoinClauseData
 
 	/*
 	 * The comparison strategy in use, and the lookup info to let us call the
-	 * btree comparison support function.
+	 * btree comparison support function, and the collation to use.
 	 */
 	bool		reverse;		/* if true, negate the cmpfn's output */
 	bool		nulls_first;	/* if true, nulls sort low */
 	FmgrInfo	cmpfinfo;
-} MergeJoinClauseData;
+	Oid			collation;
+}	MergeJoinClauseData;
 
 /* Result type for MJEvalOuterValues and MJEvalInnerValues */
 typedef enum
@@ -169,17 +168,18 @@ typedef enum
  * the two expressions from the original clause.
  *
  * In addition to the expressions themselves, the planner passes the btree
- * opfamily OID, btree strategy number (BTLessStrategyNumber or
+ * opfamily OID, collation OID, btree strategy number (BTLessStrategyNumber or
  * BTGreaterStrategyNumber), and nulls-first flag that identify the intended
  * sort ordering for each merge key.  The mergejoinable operator is an
- * equality operator in this opfamily, and the two inputs are guaranteed to be
+ * equality operator in the opfamily, and the two inputs are guaranteed to be
  * ordered in either increasing or decreasing (respectively) order according
- * to this opfamily, with nulls at the indicated end of the range.	This
- * allows us to obtain the needed comparison function from the opfamily.
+ * to the opfamily and collation, with nulls at the indicated end of the range.
+ * This allows us to obtain the needed comparison function from the opfamily.
  */
 static MergeJoinClause
 MJExamineQuals(List *mergeclauses,
 			   Oid *mergefamilies,
+			   Oid *mergecollations,
 			   int *mergestrategies,
 			   bool *mergenullsfirst,
 			   PlanState *parent)
@@ -197,6 +197,7 @@ MJExamineQuals(List *mergeclauses,
 		OpExpr	   *qual = (OpExpr *) lfirst(cl);
 		MergeJoinClause clause = &clauses[iClause];
 		Oid			opfamily = mergefamilies[iClause];
+		Oid			collation = mergecollations[iClause];
 		StrategyNumber opstrategy = mergestrategies[iClause];
 		bool		nulls_first = mergenullsfirst[iClause];
 		int			op_strategy;
@@ -250,6 +251,9 @@ MJExamineQuals(List *mergeclauses,
 			elog(ERROR, "unsupported mergejoin strategy %d", opstrategy);
 
 		clause->nulls_first = nulls_first;
+
+		/* ... and the collation too */
+		clause->collation = collation;
 
 		iClause++;
 	}
@@ -426,7 +430,7 @@ MJCompare(MergeJoinState *mergestate)
 		 * OK to call the comparison function.
 		 */
 		InitFunctionCallInfoData(fcinfo, &(clause->cmpfinfo), 2,
-								 NULL, NULL);
+								 clause->collation, NULL, NULL);
 		fcinfo.arg[0] = clause->ldatum;
 		fcinfo.arg[1] = clause->rdatum;
 		fcinfo.argnull[0] = false;
@@ -501,6 +505,8 @@ MJFillOuter(MergeJoinState *node)
 			return result;
 		}
 	}
+	else
+		InstrCountFiltered2(node, 1);
 
 	return NULL;
 }
@@ -540,6 +546,8 @@ MJFillInner(MergeJoinState *node)
 			return result;
 		}
 	}
+	else
+		InstrCountFiltered2(node, 1);
 
 	return NULL;
 }
@@ -636,7 +644,6 @@ ExecMergeTupleDump(MergeJoinState *mergestate)
 TupleTableSlot *
 ExecMergeJoin(MergeJoinState *node)
 {
-	EState	   *estate;
 	List	   *joinqual;
 	List	   *otherqual;
 	bool		qualResult;
@@ -652,7 +659,6 @@ ExecMergeJoin(MergeJoinState *node)
 	/*
 	 * get information from node
 	 */
-	estate = node->js.ps.state;
 	innerPlan = innerPlanState(node);
 	outerPlan = outerPlanState(node);
 	econtext = node->js.ps.ps_ExprContext;
@@ -891,7 +897,11 @@ ExecMergeJoin(MergeJoinState *node)
 							return result;
 						}
 					}
+					else
+						InstrCountFiltered2(node, 1);
 				}
+				else
+					InstrCountFiltered1(node, 1);
 				break;
 
 				/*
@@ -1636,6 +1646,7 @@ ExecInitMergeJoin(MergeJoin *node, EState *estate, int eflags)
 	mergestate->mj_NumClauses = list_length(node->mergeclauses);
 	mergestate->mj_Clauses = MJExamineQuals(node->mergeclauses,
 											node->mergeFamilies,
+											node->mergeCollations,
 											node->mergeStrategies,
 											node->mergeNullsFirst,
 											(PlanState *) mergestate);

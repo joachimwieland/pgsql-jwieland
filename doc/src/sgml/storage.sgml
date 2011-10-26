@@ -83,6 +83,16 @@ Item
 </row>
 
 <row>
+ <entry><filename>pg_serial</></entry>
+ <entry>Subdirectory containing information about committed serializable transactions</entry>
+</row>
+
+<row>
+ <entry><filename>pg_snapshots</></entry>
+ <entry>Subdirectory containing exported snapshots</entry>
+</row>
+
+<row>
  <entry><filename>pg_stat_tmp</></entry>
  <entry>Subdirectory containing temporary files for the statistics
   subsystem</entry>
@@ -116,7 +126,7 @@ last started with</entry>
 
 <row>
  <entry><filename>postmaster.pid</></entry>
- <entry>A lock file recording the current postmaster process id (PID),
+ <entry>A lock file recording the current postmaster process ID (PID),
   cluster data directory path,
   postmaster start timestamp,
   port number,

@@ -31,6 +31,7 @@
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/rel.h"
 #include "utils/syscache.h"
 #include "utils/typcache.h"
 
@@ -95,9 +96,9 @@ PG_MODULE_MAGIC;
  **********************************************************************/
 typedef struct pltcl_interp_desc
 {
-	Oid			user_id;				/* Hash key (must be first!) */
-	Tcl_Interp *interp;					/* The interpreter */
-	Tcl_HashTable query_hash;			/* pltcl_query_desc structs */
+	Oid			user_id;		/* Hash key (must be first!) */
+	Tcl_Interp *interp;			/* The interpreter */
+	Tcl_HashTable query_hash;	/* pltcl_query_desc structs */
 } pltcl_interp_desc;
 
 
@@ -127,7 +128,7 @@ typedef struct pltcl_proc_desc
 typedef struct pltcl_query_desc
 {
 	char		qname[20];
-	void	   *plan;
+	SPIPlanPtr	plan;
 	int			nargs;
 	Oid		   *argtypes;
 	FmgrInfo   *arginfuncs;
@@ -148,18 +149,19 @@ typedef struct pltcl_query_desc
  **********************************************************************/
 typedef struct pltcl_proc_key
 {
-	Oid			proc_id;				/* Function OID */
+	Oid			proc_id;		/* Function OID */
+
 	/*
 	 * is_trigger is really a bool, but declare as Oid to ensure this struct
 	 * contains no padding
 	 */
-	Oid			is_trigger;				/* is it a trigger function? */
-	Oid			user_id;				/* User calling the function, or 0 */
+	Oid			is_trigger;		/* is it a trigger function? */
+	Oid			user_id;		/* User calling the function, or 0 */
 } pltcl_proc_key;
 
 typedef struct pltcl_proc_ptr
 {
-	pltcl_proc_key proc_key;			/* Hash key (must be first!) */
+	pltcl_proc_key proc_key;	/* Hash key (must be first!) */
 	pltcl_proc_desc *proc_ptr;
 } pltcl_proc_ptr;
 
@@ -196,7 +198,7 @@ static HeapTuple pltcl_trigger_handler(PG_FUNCTION_ARGS, bool pltrusted);
 static void throw_tcl_error(Tcl_Interp *interp, const char *proname);
 
 static pltcl_proc_desc *compile_pltcl_function(Oid fn_oid, Oid tgreloid,
-											   bool pltrusted);
+					   bool pltrusted);
 
 static int pltcl_elog(ClientData cdata, Tcl_Interp *interp,
 		   int argc, CONST84 char *argv[]);
@@ -492,8 +494,8 @@ pltcl_init_load_unknown(Tcl_Interp *interp)
 	 * This is for backwards compatibility.  To ensure that the table
 	 * is trustworthy, we require it to be owned by a superuser.
 	 ************************************************************/
-	pmrel = try_relation_openrv(makeRangeVar(NULL, "pltcl_modules", -1),
-								AccessShareLock);
+	pmrel = relation_openrv_extended(makeRangeVar(NULL, "pltcl_modules", -1),
+									 AccessShareLock, true);
 	if (pmrel == NULL)
 		return;
 	/* must be table or view, else ignore */
@@ -2022,7 +2024,7 @@ pltcl_process_SPI_result(Tcl_Interp *interp,
  * pltcl_SPI_prepare()		- Builtin support for prepared plans
  *				  The Tcl command SPI_prepare
  *				  always saves the plan using
- *				  SPI_saveplan and returns a key for
+ *				  SPI_keepplan and returns a key for
  *				  access. There is no chance to prepare
  *				  and not save the plan currently.
  **********************************************************************/
@@ -2033,7 +2035,6 @@ pltcl_SPI_prepare(ClientData cdata, Tcl_Interp *interp,
 	int			nargs;
 	CONST84 char **args;
 	pltcl_query_desc *qdesc;
-	void	   *plan;
 	int			i;
 	Tcl_HashEntry *hashent;
 	int			hashnew;
@@ -2101,22 +2102,18 @@ pltcl_SPI_prepare(ClientData cdata, Tcl_Interp *interp,
 		 * Prepare the plan and check for errors
 		 ************************************************************/
 		UTF_BEGIN;
-		plan = SPI_prepare(UTF_U2E(argv[1]), nargs, qdesc->argtypes);
+		qdesc->plan = SPI_prepare(UTF_U2E(argv[1]), nargs, qdesc->argtypes);
 		UTF_END;
 
-		if (plan == NULL)
+		if (qdesc->plan == NULL)
 			elog(ERROR, "SPI_prepare() failed");
 
 		/************************************************************
 		 * Save the plan into permanent memory (right now it's in the
 		 * SPI procCxt, which will go away at function end).
 		 ************************************************************/
-		qdesc->plan = SPI_saveplan(plan);
-		if (qdesc->plan == NULL)
-			elog(ERROR, "SPI_saveplan() failed");
-
-		/* Release the procCxt copy to avoid within-function memory leak */
-		SPI_freeplan(plan);
+		if (SPI_keepplan(qdesc->plan))
+			elog(ERROR, "SPI_keepplan() failed");
 
 		pltcl_subtrans_commit(oldcontext, oldowner);
 	}

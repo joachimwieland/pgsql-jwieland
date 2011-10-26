@@ -51,6 +51,7 @@
 #include "miscadmin.h"
 #include "optimizer/var.h"
 #include "parser/parse_coerce.h"
+#include "parser/parse_collate.h"
 #include "parser/parse_expr.h"
 #include "parser/parse_func.h"
 #include "parser/parse_type.h"
@@ -334,6 +335,7 @@ examine_parameter_list(List *parameters, Oid languageOid,
 
 			def = transformExpr(pstate, fp->defexpr);
 			def = coerce_to_specific_type(pstate, def, toid, "DEFAULT");
+			assign_expr_collations(pstate, def);
 
 			/*
 			 * Make sure no variables are referred to.
@@ -1487,6 +1489,7 @@ CreateCast(CreateCastStmt *stmt)
 	char		sourcetyptype;
 	char		targettyptype;
 	Oid			funcid;
+	Oid			castid;
 	int			nargs;
 	char		castcontext;
 	char		castmethod;
@@ -1663,7 +1666,7 @@ CreateCast(CreateCastStmt *stmt)
 		 * We also disallow creating binary-compatibility casts involving
 		 * domains.  Casting from a domain to its base type is already
 		 * allowed, and casting the other way ought to go through domain
-		 * coercion to permit constraint checking.  Again, if you're intent on
+		 * coercion to permit constraint checking.	Again, if you're intent on
 		 * having your own semantics for that, create a no-op cast function.
 		 *
 		 * NOTE: if we were to relax this, the above checks for composites
@@ -1732,13 +1735,13 @@ CreateCast(CreateCastStmt *stmt)
 
 	tuple = heap_form_tuple(RelationGetDescr(relation), values, nulls);
 
-	simple_heap_insert(relation, tuple);
+	castid = simple_heap_insert(relation, tuple);
 
 	CatalogUpdateIndexes(relation, tuple);
 
 	/* make dependency entries */
 	myself.classId = CastRelationId;
-	myself.objectId = HeapTupleGetOid(tuple);
+	myself.objectId = castid;
 	myself.objectSubId = 0;
 
 	/* dependency on source type */
@@ -1762,9 +1765,11 @@ CreateCast(CreateCastStmt *stmt)
 		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 	}
 
+	/* dependency on extension */
+	recordDependencyOnCurrentExtension(&myself, false);
+
 	/* Post creation hook for new cast */
-	InvokeObjectAccessHook(OAT_POST_CREATE,
-						   CastRelationId, myself.objectId, 0);
+	InvokeObjectAccessHook(OAT_POST_CREATE, CastRelationId, castid, 0);
 
 	heap_freetuple(tuple);
 
@@ -1825,7 +1830,7 @@ DropCast(DropCastStmt *stmt)
 Oid
 get_cast_oid(Oid sourcetypeid, Oid targettypeid, bool missing_ok)
 {
-	Oid		oid;
+	Oid			oid;
 
 	oid = GetSysCacheOid2(CASTSOURCETARGET,
 						  ObjectIdGetDatum(sourcetypeid),
@@ -1875,13 +1880,7 @@ AlterFunctionNamespace(List *name, List *argtypes, bool isagg,
 					   const char *newschema)
 {
 	Oid			procOid;
-	Oid			oldNspOid;
 	Oid			nspOid;
-	HeapTuple	tup;
-	Relation	procRel;
-	Form_pg_proc proc;
-
-	procRel = heap_open(ProcedureRelationId, RowExclusiveLock);
 
 	/* get function OID */
 	if (isagg)
@@ -1889,20 +1888,33 @@ AlterFunctionNamespace(List *name, List *argtypes, bool isagg,
 	else
 		procOid = LookupFuncNameTypeNames(name, argtypes, false);
 
-	/* check permissions on function */
-	if (!pg_proc_ownercheck(procOid, GetUserId()))
-		aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_PROC,
-					   NameListToString(name));
+	/* get schema OID and check its permissions */
+	nspOid = LookupCreationNamespace(newschema);
+
+	AlterFunctionNamespace_oid(procOid, nspOid);
+}
+
+Oid
+AlterFunctionNamespace_oid(Oid procOid, Oid nspOid)
+{
+	Oid			oldNspOid;
+	HeapTuple	tup;
+	Relation	procRel;
+	Form_pg_proc proc;
+
+	procRel = heap_open(ProcedureRelationId, RowExclusiveLock);
 
 	tup = SearchSysCacheCopy1(PROCOID, ObjectIdGetDatum(procOid));
 	if (!HeapTupleIsValid(tup))
 		elog(ERROR, "cache lookup failed for function %u", procOid);
 	proc = (Form_pg_proc) GETSTRUCT(tup);
 
-	oldNspOid = proc->pronamespace;
+	/* check permissions on function */
+	if (!pg_proc_ownercheck(procOid, GetUserId()))
+		aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_PROC,
+					   NameStr(proc->proname));
 
-	/* get schema OID and check its permissions */
-	nspOid = LookupCreationNamespace(newschema);
+	oldNspOid = proc->pronamespace;
 
 	/* common checks on switching namespaces */
 	CheckSetNamespace(oldNspOid, nspOid, ProcedureRelationId, procOid);
@@ -1916,7 +1928,7 @@ AlterFunctionNamespace(List *name, List *argtypes, bool isagg,
 				(errcode(ERRCODE_DUPLICATE_FUNCTION),
 				 errmsg("function \"%s\" already exists in schema \"%s\"",
 						NameStr(proc->proname),
-						newschema)));
+						get_namespace_name(nspOid))));
 
 	/* OK, modify the pg_proc row */
 
@@ -1930,11 +1942,13 @@ AlterFunctionNamespace(List *name, List *argtypes, bool isagg,
 	if (changeDependencyFor(ProcedureRelationId, procOid,
 							NamespaceRelationId, oldNspOid, nspOid) != 1)
 		elog(ERROR, "failed to change schema dependency for function \"%s\"",
-			 NameListToString(name));
+			 NameStr(proc->proname));
 
 	heap_freetuple(tup);
 
 	heap_close(procRel, RowExclusiveLock);
+
+	return oldNspOid;
 }
 
 

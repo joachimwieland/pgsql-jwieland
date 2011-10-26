@@ -32,7 +32,8 @@ SELECT perl_set_int(5);
 SELECT * FROM perl_set_int(5);
 
 
-CREATE TYPE testrowperl AS (f1 integer, f2 text, f3 text);
+CREATE TYPE testnestperl AS (f5 integer[]);
+CREATE TYPE testrowperl AS (f1 integer, f2 text, f3 text, f4 testnestperl);
 
 CREATE OR REPLACE FUNCTION perl_row() RETURNS testrowperl AS $$
     return undef;
@@ -41,12 +42,20 @@ $$ LANGUAGE plperl;
 SELECT perl_row();
 SELECT * FROM perl_row();
 
+
 CREATE OR REPLACE FUNCTION perl_row() RETURNS testrowperl AS $$
-    return {f2 => 'hello', f1 => 1, f3 => 'world'};
+    return {f2 => 'hello', f1 => 1, f3 => 'world', 'f4' => { 'f5' => [[1]] } };
 $$ LANGUAGE plperl;
 
 SELECT perl_row();
 SELECT * FROM perl_row();
+
+-- test returning a composite literal
+CREATE OR REPLACE FUNCTION perl_row_lit() RETURNS testrowperl AS $$
+    return '(1,hello,world,"({{1}})")';
+$$ LANGUAGE plperl;
+
+SELECT perl_row_lit();
 
 
 CREATE OR REPLACE FUNCTION perl_set() RETURNS SETOF testrowperl AS $$
@@ -60,7 +69,10 @@ CREATE OR REPLACE FUNCTION perl_set() RETURNS SETOF testrowperl AS $$
     return [
         { f1 => 1, f2 => 'Hello', f3 =>  'World' },
         undef,
-        { f1 => 3, f2 => 'Hello', f3 =>  'PL/Perl' }
+        { f1 => 3, f2 => 'Hello', f3 =>  'PL/Perl', 'f4' => {} },
+        { f1 => 4, f2 => 'Hello', f3 =>  'PL/Perl', 'f4' => { 'f5' => undef }},
+        { f1 => 5, f2 => 'Hello', f3 =>  'PL/Perl', 'f4' => { 'f5' => '{1}' }},
+        { f1 => 6, f2 => 'Hello', f3 =>  'PL/Perl', 'f4' => { 'f5' => [1] }},
     ];
 $$  LANGUAGE plperl;
 
@@ -70,15 +82,17 @@ SELECT * FROM perl_set();
 CREATE OR REPLACE FUNCTION perl_set() RETURNS SETOF testrowperl AS $$
     return [
         { f1 => 1, f2 => 'Hello', f3 =>  'World' },
-        { f1 => 2, f2 => 'Hello', f3 =>  'PostgreSQL' },
-        { f1 => 3, f2 => 'Hello', f3 =>  'PL/Perl' }
+        { f1 => 2, f2 => 'Hello', f3 =>  'PostgreSQL', 'f4' => undef },
+        { f1 => 3, f2 => 'Hello', f3 =>  'PL/Perl', 'f4' => {} },
+        { f1 => 4, f2 => 'Hello', f3 =>  'PL/Perl', 'f4' => { 'f5' => undef }},
+        { f1 => 5, f2 => 'Hello', f3 =>  'PL/Perl', 'f4' => { 'f5' => '{1}' }},
+        { f1 => 6, f2 => 'Hello', f3 =>  'PL/Perl', 'f4' => { 'f5' => [1] }},
+        { f1 => 7, f2 => 'Hello', f3 =>  'PL/Perl', 'f4' => '({1})' },
     ];
 $$  LANGUAGE plperl;
 
 SELECT perl_set();
 SELECT * FROM perl_set();
-
-
 
 CREATE OR REPLACE FUNCTION perl_record() RETURNS record AS $$
     return undef;
@@ -86,15 +100,15 @@ $$ LANGUAGE plperl;
 
 SELECT perl_record();
 SELECT * FROM perl_record();
-SELECT * FROM perl_record() AS (f1 integer, f2 text, f3 text);
+SELECT * FROM perl_record() AS (f1 integer, f2 text, f3 text, f4 testnestperl);
 
 CREATE OR REPLACE FUNCTION perl_record() RETURNS record AS $$
-    return {f2 => 'hello', f1 => 1, f3 => 'world'};
+    return {f2 => 'hello', f1 => 1, f3 => 'world', 'f4' => { 'f5' => [1] } };
 $$ LANGUAGE plperl;
 
 SELECT perl_record();
 SELECT * FROM perl_record();
-SELECT * FROM perl_record() AS (f1 integer, f2 text, f3 text);
+SELECT * FROM perl_record() AS (f1 integer, f2 text, f3 text, f4 testnestperl);
 
 
 CREATE OR REPLACE FUNCTION perl_record_set() RETURNS SETOF record AS $$
@@ -297,7 +311,7 @@ SELECT * FROM recurse(3);
 
 
 ---
---- Test arrary return
+--- Test array return
 ---
 CREATE OR REPLACE FUNCTION  array_of_text() RETURNS TEXT[][]
 LANGUAGE plperl as $$
@@ -361,6 +375,24 @@ CREATE OR REPLACE FUNCTION perl_spi_prepared_bad(double precision) RETURNS doubl
 $$ LANGUAGE plperl;
 SELECT perl_spi_prepared_bad(4.35) as "double precision";
 
+-- Test with a row type
+CREATE OR REPLACE FUNCTION perl_spi_prepared() RETURNS INTEGER AS $$
+   my $x = spi_prepare('select $1::footype AS a', 'footype');
+   my $q = spi_exec_prepared( $x, '(1, 2)');
+   spi_freeplan($x);
+return $q->{rows}->[0]->{a}->{x};
+$$ LANGUAGE plperl;
+SELECT * from perl_spi_prepared();
+
+CREATE OR REPLACE FUNCTION perl_spi_prepared_row(footype) RETURNS footype AS $$
+   my $footype = shift;
+   my $x = spi_prepare('select $1 AS a', 'footype');
+   my $q = spi_exec_prepared( $x, {}, $footype );
+   spi_freeplan($x);
+return $q->{rows}->[0]->{a};
+$$ LANGUAGE plperl;
+SELECT * from perl_spi_prepared_row('(1, 2)');
+
 -- simple test of a DO block
 DO $$
   $a = 'This is a test';
@@ -390,3 +422,43 @@ DO $do$ use strict; my $name = "foo"; my $ref = $$name; $do$ LANGUAGE plperl;
 -- check that we can "use warnings" (in this case to turn a warn into an error)
 -- yields "ERROR:  Useless use of sort in scalar context."
 DO $do$ use warnings FATAL => qw(void) ; my @y; my $x = sort @y; 1; $do$ LANGUAGE plperl;
+
+-- make sure functions marked as VOID without an explicit return work
+CREATE OR REPLACE FUNCTION myfuncs() RETURNS void AS $$
+   $_SHARED{myquote} = sub {
+       my $arg = shift;
+       $arg =~ s/(['\\])/\\$1/g;
+       return "'$arg'";
+   };
+$$ LANGUAGE plperl;
+
+SELECT myfuncs();
+
+-- make sure we can't return an array as a scalar
+CREATE OR REPLACE FUNCTION text_arrayref() RETURNS text AS $$
+	return ['array'];
+$$ LANGUAGE plperl;
+
+SELECT text_arrayref();
+
+--- make sure we can't return a hash as a scalar
+CREATE OR REPLACE FUNCTION text_hashref() RETURNS text AS $$
+	return {'hash'=>1};
+$$ LANGUAGE plperl;
+
+SELECT text_hashref();
+
+---- make sure we can't return a blessed object as a scalar
+CREATE OR REPLACE FUNCTION text_obj() RETURNS text AS $$
+	return bless({}, 'Fake::Object');
+$$ LANGUAGE plperl;
+
+SELECT text_obj();
+
+----- make sure we can't return a scalar ref
+CREATE OR REPLACE FUNCTION text_scalarref() RETURNS text AS $$
+	my $str = 'str';
+	return \$str;
+$$ LANGUAGE plperl;
+
+SELECT text_scalarref();

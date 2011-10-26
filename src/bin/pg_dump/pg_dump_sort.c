@@ -22,13 +22,14 @@ static const char *modulename = gettext_noop("sorter");
  * Sort priority for object types when dumping a pre-7.3 database.
  * Objects are sorted by priority levels, and within an equal priority level
  * by OID.	(This is a relatively crude hack to provide semi-reasonable
- * behavior for old databases without full dependency info.)  Note: text
- * search, foreign-data, and default ACL objects can't really happen here,
- * so the rather bogus priorities for them don't matter.
+ * behavior for old databases without full dependency info.)  Note: collations,
+ * extensions, text search, foreign-data, and default ACL objects can't really
+ * happen here, so the rather bogus priorities for them don't matter.
  */
 static const int oldObjectTypePriority[] =
 {
 	1,							/* DO_NAMESPACE */
+	1,							/* DO_EXTENSION */
 	2,							/* DO_TYPE */
 	2,							/* DO_SHELL_TYPE */
 	2,							/* DO_FUNC */
@@ -56,7 +57,8 @@ static const int oldObjectTypePriority[] =
 	4,							/* DO_FOREIGN_SERVER */
 	17,							/* DO_DEFAULT_ACL */
 	9,							/* DO_BLOB */
-	11							/* DO_BLOB_DATA */
+	11,							/* DO_BLOB_DATA */
+	2							/* DO_COLLATION */
 };
 
 /*
@@ -66,34 +68,36 @@ static const int oldObjectTypePriority[] =
 static const int newObjectTypePriority[] =
 {
 	1,							/* DO_NAMESPACE */
-	3,							/* DO_TYPE */
-	3,							/* DO_SHELL_TYPE */
-	4,							/* DO_FUNC */
-	5,							/* DO_AGG */
-	6,							/* DO_OPERATOR */
-	7,							/* DO_OPCLASS */
-	7,							/* DO_OPFAMILY */
-	9,							/* DO_CONVERSION */
-	16,							/* DO_TABLE */
-	18,							/* DO_ATTRDEF */
-	23,							/* DO_INDEX */
-	24,							/* DO_RULE */
-	25,							/* DO_TRIGGER */
-	22,							/* DO_CONSTRAINT */
-	26,							/* DO_FK_CONSTRAINT */
+	4,							/* DO_EXTENSION */
+	5,							/* DO_TYPE */
+	5,							/* DO_SHELL_TYPE */
+	6,							/* DO_FUNC */
+	7,							/* DO_AGG */
+	8,							/* DO_OPERATOR */
+	9,							/* DO_OPCLASS */
+	9,							/* DO_OPFAMILY */
+	11,							/* DO_CONVERSION */
+	18,							/* DO_TABLE */
+	20,							/* DO_ATTRDEF */
+	25,							/* DO_INDEX */
+	26,							/* DO_RULE */
+	27,							/* DO_TRIGGER */
+	24,							/* DO_CONSTRAINT */
+	28,							/* DO_FK_CONSTRAINT */
 	2,							/* DO_PROCLANG */
-	8,							/* DO_CAST */
-	20,							/* DO_TABLE_DATA */
-	17,							/* DO_DUMMY_TYPE */
-	10,							/* DO_TSPARSER */
-	12,							/* DO_TSDICT */
-	11,							/* DO_TSTEMPLATE */
-	13,							/* DO_TSCONFIG */
-	14,							/* DO_FDW */
-	15,							/* DO_FOREIGN_SERVER */
-	27,							/* DO_DEFAULT_ACL */
-	19,							/* DO_BLOB */
-	21							/* DO_BLOB_DATA */
+	10,							/* DO_CAST */
+	22,							/* DO_TABLE_DATA */
+	19,							/* DO_DUMMY_TYPE */
+	12,							/* DO_TSPARSER */
+	14,							/* DO_TSDICT */
+	13,							/* DO_TSTEMPLATE */
+	15,							/* DO_TSCONFIG */
+	16,							/* DO_FDW */
+	17,							/* DO_FOREIGN_SERVER */
+	29,							/* DO_DEFAULT_ACL */
+	21,							/* DO_BLOB */
+	23,							/* DO_BLOB_DATA */
+	3							/* DO_COLLATION */
 };
 
 
@@ -211,8 +215,8 @@ sortDumpableObjectsByTypeName(DumpableObject **objs, int numObjs)
 static int
 DOTypeNameCompare(const void *p1, const void *p2)
 {
-	DumpableObject *obj1 = *(DumpableObject **) p1;
-	DumpableObject *obj2 = *(DumpableObject **) p2;
+	DumpableObject *obj1 = *(DumpableObject * const *) p1;
+	DumpableObject *obj2 = *(DumpableObject * const *) p2;
 	int			cmpval;
 
 	/* Sort by type */
@@ -243,8 +247,8 @@ DOTypeNameCompare(const void *p1, const void *p2)
 	/* To have a stable sort order, break ties for some object types */
 	if (obj1->objType == DO_FUNC || obj1->objType == DO_AGG)
 	{
-		FuncInfo   *fobj1 = *(FuncInfo **) p1;
-		FuncInfo   *fobj2 = *(FuncInfo **) p2;
+		FuncInfo   *fobj1 = *(FuncInfo * const *) p1;
+		FuncInfo   *fobj2 = *(FuncInfo * const *) p2;
 
 		cmpval = fobj1->nargs - fobj2->nargs;
 		if (cmpval != 0)
@@ -273,8 +277,8 @@ sortDumpableObjectsByTypeOid(DumpableObject **objs, int numObjs)
 static int
 DOTypeOidCompare(const void *p1, const void *p2)
 {
-	DumpableObject *obj1 = *(DumpableObject **) p1;
-	DumpableObject *obj2 = *(DumpableObject **) p2;
+	DumpableObject *obj1 = *(DumpableObject * const *) p1;
+	DumpableObject *obj2 = *(DumpableObject * const *) p2;
 	int			cmpval;
 
 	cmpval = oldObjectTypePriority[obj1->objType] -
@@ -1100,6 +1104,11 @@ describeDumpableObject(DumpableObject *obj, char *buf, int bufsize)
 					 "SCHEMA %s  (ID %d OID %u)",
 					 obj->name, obj->dumpId, obj->catId.oid);
 			return;
+		case DO_EXTENSION:
+			snprintf(buf, bufsize,
+					 "EXTENSION %s  (ID %d OID %u)",
+					 obj->name, obj->dumpId, obj->catId.oid);
+			return;
 		case DO_TYPE:
 			snprintf(buf, bufsize,
 					 "TYPE %s  (ID %d OID %u)",
@@ -1133,6 +1142,11 @@ describeDumpableObject(DumpableObject *obj, char *buf, int bufsize)
 		case DO_OPFAMILY:
 			snprintf(buf, bufsize,
 					 "OPERATOR FAMILY %s  (ID %d OID %u)",
+					 obj->name, obj->dumpId, obj->catId.oid);
+			return;
+		case DO_COLLATION:
+			snprintf(buf, bufsize,
+					 "COLLATION %s  (ID %d OID %u)",
 					 obj->name, obj->dumpId, obj->catId.oid);
 			return;
 		case DO_CONVERSION:

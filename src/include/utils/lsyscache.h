@@ -13,9 +13,16 @@
 #ifndef LSYSCACHE_H
 #define LSYSCACHE_H
 
-#include "access/attnum.h"
 #include "access/htup.h"
-#include "nodes/pg_list.h"
+
+/* Result list element for get_op_btree_interpretation */
+typedef struct OpBtreeInterpretation
+{
+	Oid			opfamily_id;		/* btree opfamily containing operator */
+	int			strategy;			/* its strategy number */
+	Oid			oplefttype;			/* declared left input datatype */
+	Oid			oprighttype;		/* declared right input datatype */
+} OpBtreeInterpretation;
 
 /* I/O function selector for get_type_io_data */
 typedef enum IOFuncSelector
@@ -50,8 +57,7 @@ extern bool get_compatible_hash_operators(Oid opno,
 							  Oid *lhs_opno, Oid *rhs_opno);
 extern bool get_op_hash_functions(Oid opno,
 					  RegProcedure *lhs_procno, RegProcedure *rhs_procno);
-extern void get_op_btree_interpretation(Oid opno,
-							List **opfamilies, List **opstrats);
+extern List *get_op_btree_interpretation(Oid opno);
 extern bool equality_ops_are_compatible(Oid opno1, Oid opno2);
 extern Oid get_opfamily_proc(Oid opfamily, Oid lefttype, Oid righttype,
 				  int16 procnum);
@@ -60,8 +66,9 @@ extern char *get_relid_attribute_name(Oid relid, AttrNumber attnum);
 extern AttrNumber get_attnum(Oid relid, const char *attname);
 extern Oid	get_atttype(Oid relid, AttrNumber attnum);
 extern int32 get_atttypmod(Oid relid, AttrNumber attnum);
-extern void get_atttypetypmod(Oid relid, AttrNumber attnum,
-				  Oid *typid, int32 *typmod);
+extern void get_atttypetypmodcoll(Oid relid, AttrNumber attnum,
+					  Oid *typid, int32 *typmod, Oid *collid);
+extern char *get_collation_name(Oid colloid);
 extern char *get_constraint_name(Oid conoid);
 extern Oid	get_opclass_family(Oid opclass);
 extern Oid	get_opclass_input_type(Oid opclass);
@@ -124,6 +131,8 @@ extern void getTypeOutputInfo(Oid type, Oid *typOutput, bool *typIsVarlena);
 extern void getTypeBinaryInputInfo(Oid type, Oid *typReceive, Oid *typIOParam);
 extern void getTypeBinaryOutputInfo(Oid type, Oid *typSend, bool *typIsVarlena);
 extern Oid	get_typmodin(Oid typid);
+extern Oid	get_typcollation(Oid typid);
+extern bool type_is_collatable(Oid typid);
 extern Oid	getBaseType(Oid typid);
 extern Oid	getBaseTypeAndTypmod(Oid typid, int32 *typmod);
 extern int32 get_typavgwidth(Oid typid, int32 typmod);

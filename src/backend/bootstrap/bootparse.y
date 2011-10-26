@@ -217,6 +217,7 @@ Boot_CreateStmt:
 												   PG_CATALOG_NAMESPACE,
 												   shared_relation ? GLOBALTABLESPACE_OID : 0,
 												   $3,
+												   InvalidOid,
 												   tupdesc,
 												   RELKIND_RELATION,
 												   RELPERSISTENCE_PERMANENT,
@@ -247,9 +248,8 @@ Boot_CreateStmt:
 													  ONCOMMIT_NOOP,
 													  (Datum) 0,
 													  false,
-													  true,
-													  false);
-						elog(DEBUG4, "relation created with oid %u", id);
+													  true);
+						elog(DEBUG4, "relation created with OID %u", id);
 					}
 					do_end();
 				}
@@ -285,6 +285,7 @@ Boot_DeclareIndexStmt:
 					DefineIndex(makeRangeVar(NULL, $6, -1),
 								$3,
 								$4,
+								InvalidOid,
 								$8,
 								NULL,
 								$10,
@@ -303,6 +304,7 @@ Boot_DeclareUniqueIndexStmt:
 					DefineIndex(makeRangeVar(NULL, $7, -1),
 								$4,
 								$5,
+								InvalidOid,
 								$9,
 								NULL,
 								$11,
@@ -345,6 +347,7 @@ boot_index_param:
 					n->name = $1;
 					n->expr = NULL;
 					n->indexcolname = NULL;
+					n->collation = NIL;
 					n->opclass = list_make1(makeString($2));
 					n->ordering = SORTBY_DEFAULT;
 					n->nulls_ordering = SORTBY_NULLS_DEFAULT;

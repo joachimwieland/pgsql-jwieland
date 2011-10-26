@@ -14,13 +14,11 @@
  */
 #include "postgres.h"
 
-#include "access/heapam.h"
 #include "access/tuptoaster.h"
 #include "access/xact.h"
 #include "catalog/dependency.h"
 #include "catalog/heap.h"
 #include "catalog/index.h"
-#include "catalog/indexing.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_opclass.h"
@@ -29,6 +27,7 @@
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "utils/builtins.h"
+#include "utils/rel.h"
 #include "utils/syscache.h"
 
 /* Potentially set by contrib/pg_upgrade_support functions */
@@ -59,9 +58,11 @@ AlterTableCreateToastTable(Oid relOid, Datum reloptions)
 	Relation	rel;
 
 	/*
-	 * Grab an exclusive lock on the target table, which we will NOT release
-	 * until end of transaction.  (This is probably redundant in all present
-	 * uses...)
+	 * Grab an exclusive lock on the target table, since we'll update its
+	 * pg_class tuple. This is redundant for all present uses, since caller
+	 * will have such a lock already.  But the lock is needed to ensure that
+	 * concurrent readers of the pg_class tuple won't have visibility issues,
+	 * so let's be safe.
 	 */
 	rel = heap_open(relOid, AccessExclusiveLock);
 
@@ -103,7 +104,7 @@ BootstrapToastTable(char *relName, Oid toastOid, Oid toastIndexOid)
 /*
  * create_toast_table --- internal workhorse
  *
- * rel is already opened and exclusive-locked
+ * rel is already opened and locked
  * toastOid and toastIndexOid are normally InvalidOid, but during
  * bootstrap they can be nonzero to specify hand-assigned OIDs
  */
@@ -118,12 +119,12 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid, Datum reloptio
 	Relation	toast_rel;
 	Relation	class_rel;
 	Oid			toast_relid;
-	Oid			toast_idxid;
 	Oid			toast_typid = InvalidOid;
 	Oid			namespaceid;
 	char		toast_relname[NAMEDATALEN];
 	char		toast_idxname[NAMEDATALEN];
 	IndexInfo  *indexInfo;
+	Oid			collationObjectId[2];
 	Oid			classObjectId[2];
 	int16		coloptions[2];
 	ObjectAddress baseobject,
@@ -157,7 +158,8 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid, Datum reloptio
 	 * creation even if it seems not to need one.
 	 */
 	if (!needs_toast_table(rel) &&
-		!OidIsValid(binary_upgrade_next_toast_pg_class_oid))
+		(!IsBinaryUpgrade ||
+		 !OidIsValid(binary_upgrade_next_toast_pg_class_oid)))
 		return false;
 
 	/*
@@ -202,7 +204,7 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid, Datum reloptio
 		namespaceid = PG_TOAST_NAMESPACE;
 
 	/* Use binary-upgrade override for pg_type.oid, if supplied. */
-	if (OidIsValid(binary_upgrade_next_toast_pg_type_oid))
+	if (IsBinaryUpgrade && OidIsValid(binary_upgrade_next_toast_pg_type_oid))
 	{
 		toast_typid = binary_upgrade_next_toast_pg_type_oid;
 		binary_upgrade_next_toast_pg_type_oid = InvalidOid;
@@ -226,8 +228,7 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid, Datum reloptio
 										   ONCOMMIT_NOOP,
 										   reloptions,
 										   false,
-										   true,
-										   false);
+										   true);
 	Assert(toast_relid != InvalidOid);
 
 	/* make the toast relation visible, else heap_open will fail */
@@ -264,20 +265,23 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid, Datum reloptio
 	indexInfo->ii_Concurrent = false;
 	indexInfo->ii_BrokenHotChain = false;
 
+	collationObjectId[0] = InvalidOid;
+	collationObjectId[1] = InvalidOid;
+
 	classObjectId[0] = OID_BTREE_OPS_OID;
 	classObjectId[1] = INT4_BTREE_OPS_OID;
 
 	coloptions[0] = 0;
 	coloptions[1] = 0;
 
-	toast_idxid = index_create(toast_rel, toast_idxname, toastIndexOid,
-							   indexInfo,
-							   list_make2("chunk_id", "chunk_seq"),
-							   BTREE_AM_OID,
-							   rel->rd_rel->reltablespace,
-							   classObjectId, coloptions, (Datum) 0,
-							   true, false, false, false,
-							   true, false, false);
+	index_create(toast_rel, toast_idxname, toastIndexOid, InvalidOid,
+				 indexInfo,
+				 list_make2("chunk_id", "chunk_seq"),
+				 BTREE_AM_OID,
+				 rel->rd_rel->reltablespace,
+				 collationObjectId, classObjectId, coloptions, (Datum) 0,
+				 true, false, false, false,
+				 true, false, false);
 
 	heap_close(toast_rel, NoLock);
 

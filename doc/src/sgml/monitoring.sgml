@@ -245,14 +245,17 @@ postgres: <replaceable>user</> <replaceable>database</> <replaceable>host</> <re
       <entry><structname>pg_stat_activity</><indexterm><primary>pg_stat_activity</primary></indexterm></entry>
       <entry>One row per server process, showing database OID, database
       name, process <acronym>ID</>, user OID, user name, application name,
-      client's address and port number, times at which the server process,
-      current transaction, and current query began execution, process's waiting
-      status, and text of the current query.
+      client's address, host name (if available), and port number, times at
+      which the server process, current transaction, and current query began
+      execution, process's waiting status, and text of the current query.
       The columns that report data on the current query are available unless
       the parameter <varname>track_activities</varname> has been turned off.
       Furthermore, these columns are only visible if the user examining
       the view is a superuser or the same as the user owning the process
-      being reported on.
+      being reported on.  The client's host name will be available only if
+      <xref linkend="guc-log-hostname"> is set or if the user's host name
+      needed to be looked up during <filename>pg_hba.conf</filename>
+      processing.
      </entry>
      </row>
 
@@ -267,7 +270,7 @@ postgres: <replaceable>user</> <replaceable>database</> <replaceable>host</> <re
       by backends (that is, not by the background writer), how many times
       those backends had to execute their own fsync calls (normally the
       background writer handles those even when the backend does its own
-      write), and total buffers allocated.
+      write), total buffers allocated, and time of last statistics reset.
      </entry>
      </row>
 
@@ -278,16 +281,16 @@ postgres: <replaceable>user</> <replaceable>database</> <replaceable>host</> <re
       number of transactions committed and rolled back in that database,
       total disk blocks read, total buffer hits (i.e., block
       read requests avoided by finding the block already in buffer cache),
-      number of rows returned, fetched, inserted, updated and deleted, and
-      total number of queries cancelled due to conflict with recovery (on
-      standby servers).
+      number of rows returned, fetched, inserted, updated and deleted, the
+      total number of queries canceled due to conflict with recovery (on
+      standby servers), and time of last statistics reset.
      </entry>
      </row>
 
      <row>
       <entry><structname>pg_stat_database_conflicts</><indexterm><primary>pg_stat_database_conflicts</primary></indexterm></entry>
       <entry>One row per database, showing database OID, database name and
-      the number of queries that have been cancelled in this database due to
+      the number of queries that have been canceled in this database due to
       dropped tablespaces, lock timeouts, old snapshots, pinned buffers and
       deadlocks. Will only contain information on standby servers, since
       conflicts do not occur on master servers.
@@ -297,11 +300,22 @@ postgres: <replaceable>user</> <replaceable>database</> <replaceable>host</> <re
      <row>
       <entry><structname>pg_stat_replication</><indexterm><primary>pg_stat_replication</primary></indexterm></entry>
       <entry>One row per WAL sender process, showing process <acronym>ID</>,
-      user OID, user name, application name, client's address and port number,
-      time at which the server process began execution, current WAL sender
-      state and transaction log location. The columns detailing what exactly
-      the connection is doing are only visible if the user examining the view
-      is a superuser.
+      user OID, user name, application name, client's address, host name
+      (if available) and port number, time at which the server process began
+      execution, and the current WAL sender state and transaction log
+      location.  In addition, the standby reports the last transaction log
+      position it received and wrote, the last position it flushed to disk,
+      and the last position it replayed, and this information is also
+      displayed here. If the standby's application names matches one of the
+      settings in <varname>synchronous_standby_names</> then the sync_priority
+      is shown here also, that is the order in which standbys will become
+      the synchronous standby. The columns detailing what exactly the connection
+      is doing are only visible if the user examining the view is a superuser.
+      The client's host name will be available only if
+      <xref linkend="guc-log-hostname"> is set or if the user's host name
+      needed to be looked up during <filename>pg_hba.conf</filename>
+      processing. Only directly connected standbys are listed; no information
+      about downstream standby servers is recorded.
      </entry>
      </row>
 
@@ -315,11 +329,11 @@ postgres: <replaceable>user</> <replaceable>database</> <replaceable>host</> <re
       scans, numbers of row insertions, updates, and deletions,
       number of row updates that were HOT (i.e., no separate index update),
       numbers of live and dead rows,
-      the last time the table was vacuumed manually,
+      the last time the table was non-<option>FULL</> vacuumed manually,
       the last time it was vacuumed by the autovacuum daemon,
       the last time it was analyzed manually,
       the last time it was analyzed by the autovacuum daemon,
-      number of times it has been vacuumed manually,
+      number of times it has been non-<option>FULL</> vacuumed manually,
       number of times it has been vacuumed by the autovacuum daemon,
       number of times it has been analyzed manually,
       and the number of times it has been analyzed by the autovacuum daemon.
@@ -493,7 +507,8 @@ postgres: <replaceable>user</> <replaceable>database</> <replaceable>host</> <re
     considering bitmap scans, because <structfield>idx_tup_read</> counts
     index entries retrieved from the index while <structfield>idx_tup_fetch</>
     counts live rows fetched from the table; the latter will be less if any
-    dead or not-yet-committed rows are fetched using the index.
+    dead or not-yet-committed rows are fetched using the index, or if any
+    heap fetches are avoided by means of an index-only scan.
    </para>
   </note>
 
@@ -626,7 +641,7 @@ postgres: <replaceable>user</> <replaceable>database</> <replaceable>host</> <re
       <entry><literal><function>pg_stat_get_db_conflict_tablespace</function>(<type>oid</type>)</literal></entry>
       <entry><type>bigint</type></entry>
       <entry>
-       Number of queries cancelled because of recovery conflict with dropped tablespaces in database
+       Number of queries canceled because of recovery conflict with dropped tablespaces in database
       </entry>
      </row>
 
@@ -634,7 +649,7 @@ postgres: <replaceable>user</> <replaceable>database</> <replaceable>host</> <re
       <entry><literal><function>pg_stat_get_db_conflict_lock</function>(<type>oid</type>)</literal></entry>
       <entry><type>bigint</type></entry>
       <entry>
-       Number of queries cancelled because of recovery conflict with locks in database
+       Number of queries canceled because of recovery conflict with locks in database
       </entry>
      </row>
 
@@ -642,7 +657,7 @@ postgres: <replaceable>user</> <replaceable>database</> <replaceable>host</> <re
       <entry><literal><function>pg_stat_get_db_conflict_snapshot</function>(<type>oid</type>)</literal></entry>
       <entry><type>bigint</type></entry>
       <entry>
-       Number of queries cancelled because of recovery conflict with old snapshots in database
+       Number of queries canceled because of recovery conflict with old snapshots in database
       </entry>
      </row>
 
@@ -650,7 +665,7 @@ postgres: <replaceable>user</> <replaceable>database</> <replaceable>host</> <re
       <entry><literal><function>pg_stat_get_db_conflict_bufferpin</function>(<type>oid</type>)</literal></entry>
       <entry><type>bigint</type></entry>
       <entry>
-       Number of queries cancelled because of recovery conflict with pinned buffers in database
+       Number of queries canceled because of recovery conflict with pinned buffers in database
       </entry>
      </row>
 
@@ -658,7 +673,20 @@ postgres: <replaceable>user</> <replaceable>database</> <replaceable>host</> <re
       <entry><literal><function>pg_stat_get_db_conflict_startup_deadlock</function>(<type>oid</type>)</literal></entry>
       <entry><type>bigint</type></entry>
       <entry>
-       Number of queries cancelled because of recovery conflict with deadlocks in database
+       Number of queries canceled because of recovery conflict with deadlocks in database
+      </entry>
+     </row>
+
+     <row>
+      <entry><literal><function>pg_stat_get_db_stat_reset_time</function>(<type>oid</type>)</literal></entry>
+      <entry><type>timestamptz</type></entry>
+      <entry>
+       Time of the last statistics reset for the database.  Initialized to the
+       system time during the first connection to each database.  The reset time
+       is updated when you call <function>pg_stat_reset</function> on the
+       database, as well as upon execution of
+       <function>pg_stat_reset_single_table_counters</function> against any
+       table or index in it.
       </entry>
      </row>
 
@@ -758,7 +786,7 @@ postgres: <replaceable>user</> <replaceable>database</> <replaceable>host</> <re
       <entry><literal><function>pg_stat_get_last_vacuum_time</function>(<type>oid</type>)</literal></entry>
       <entry><type>timestamptz</type></entry>
       <entry>
-       Time of the last vacuum initiated by the user on this table
+       Time of the last non-<option>FULL</option> vacuum initiated by the user on this table
       </entry>
      </row>
 
@@ -791,7 +819,7 @@ postgres: <replaceable>user</> <replaceable>database</> <replaceable>host</> <re
       <entry><literal><function>pg_stat_get_vacuum_count</function>(<type>oid</type>)</literal></entry>
       <entry><type>bigint</type></entry>
       <entry>
-       The number of times this table has been vacuumed manually
+       The number of times this table has been non-<option>FULL</> vacuumed manually
       </entry>
      </row>
 
@@ -1127,6 +1155,16 @@ postgres: <replaceable>user</> <replaceable>database</> <replaceable>host</> <re
      </row>
 
      <row>
+      <entry><literal><function>pg_stat_get_bgwriter_stat_reset_time()</function></literal></entry>
+      <entry><type>timestamptz</type></entry>
+      <entry>
+        Time of the last statistics reset for the background writer, updated
+        when executing <function>pg_stat_reset_shared('bgwriter')</function>
+        on the database cluster.
+      </entry>
+     </row>
+
+     <row>
       <entry><literal><function>pg_stat_get_buf_written_backend()</function></literal></entry>
       <entry><type>bigint</type></entry>
       <entry>
@@ -1321,9 +1359,10 @@ SELECT pg_stat_get_backend_pid(s.backendid) AS procpid,
 
   <para>
    A number of standard probes are provided in the source code,
-   as shown in <xref linkend="dtrace-probe-point-table">.
-   More can certainly be added to enhance <productname>PostgreSQL</>'s
-   observability.
+   as shown in <xref linkend="dtrace-probe-point-table">;
+   <xref linkend="typedefs-table">
+   shows the types used in the probes.  More probes can certainly be
+   added to enhance <productname>PostgreSQL</>'s observability.
   </para>
 
  <table id="dtrace-probe-point-table">

@@ -84,6 +84,7 @@
 #include "postmaster/postmaster.h"
 #include "storage/bufmgr.h"
 #include "storage/ipc.h"
+#include "storage/latch.h"
 #include "storage/pmsignal.h"
 #include "storage/proc.h"
 #include "storage/procsignal.h"
@@ -93,8 +94,10 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/ps_status.h"
+#include "utils/rel.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
+#include "utils/timestamp.h"
 #include "utils/tqual.h"
 
 
@@ -210,7 +213,7 @@ typedef struct WorkerInfoData
 	int			wi_cost_delay;
 	int			wi_cost_limit;
 	int			wi_cost_limit_base;
-} WorkerInfoData;
+}	WorkerInfoData;
 
 typedef struct WorkerInfoData *WorkerInfo;
 
@@ -224,7 +227,7 @@ typedef enum
 	AutoVacForkFailed,			/* failed trying to start a worker */
 	AutoVacRebalance,			/* rebalance the cost limits */
 	AutoVacNumSignals			/* must be last */
-} AutoVacuumSignal;
+}	AutoVacuumSignal;
 
 /*-------------
  * The main autovacuum shmem struct.  On shared memory we store this main
@@ -552,11 +555,11 @@ AutoVacLauncherMain(int argc, char *argv[])
 		Dlelem	   *elem;
 
 		/*
-		 * Emergency bailout if postmaster has died.  This is to avoid the
-		 * necessity for manual cleanup of all postmaster children.
+		 * This loop is a bit different from the normal use of WaitLatch,
+		 * because we'd like to sleep before the first launch of a child
+		 * process.  So it's WaitLatch, then ResetLatch, then check for
+		 * wakening conditions.
 		 */
-		if (!PostmasterIsAlive(true))
-			proc_exit(1);
 
 		launcher_determine_sleep((AutoVacuumShmem->av_freeWorkers != NULL),
 								 false, &nap);
@@ -565,41 +568,23 @@ AutoVacLauncherMain(int argc, char *argv[])
 		EnableCatchupInterrupt();
 
 		/*
-		 * Sleep for a while according to schedule.
-		 *
-		 * On some platforms, signals won't interrupt the sleep.  To ensure we
-		 * respond reasonably promptly when someone signals us, break down the
-		 * sleep into 1-second increments, and check for interrupts after each
-		 * nap.
+		 * Wait until naptime expires or we get some type of signal (all the
+		 * signal handlers will wake us by calling SetLatch).
 		 */
-		while (nap.tv_sec > 0 || nap.tv_usec > 0)
-		{
-			uint32		sleeptime;
+		WaitLatch(&MyProc->procLatch,
+				  WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
+				  (nap.tv_sec * 1000L) + (nap.tv_usec / 1000L));
 
-			if (nap.tv_sec > 0)
-			{
-				sleeptime = 1000000;
-				nap.tv_sec--;
-			}
-			else
-			{
-				sleeptime = nap.tv_usec;
-				nap.tv_usec = 0;
-			}
-			pg_usleep(sleeptime);
-
-			/*
-			 * Emergency bailout if postmaster has died.  This is to avoid the
-			 * necessity for manual cleanup of all postmaster children.
-			 */
-			if (!PostmasterIsAlive(true))
-				proc_exit(1);
-
-			if (got_SIGTERM || got_SIGHUP || got_SIGUSR2)
-				break;
-		}
+		ResetLatch(&MyProc->procLatch);
 
 		DisableCatchupInterrupt();
+
+		/*
+		 * Emergency bailout if postmaster has died.  This is to avoid the
+		 * necessity for manual cleanup of all postmaster children.
+		 */
+		if (!PostmasterIsAlive())
+			proc_exit(1);
 
 		/* the normal shutdown case */
 		if (got_SIGTERM)
@@ -714,7 +699,7 @@ AutoVacLauncherMain(int argc, char *argv[])
 					worker->wi_links.next = (SHM_QUEUE *) AutoVacuumShmem->av_freeWorkers;
 					AutoVacuumShmem->av_freeWorkers = worker;
 					AutoVacuumShmem->av_startingWorker = NULL;
-					elog(WARNING, "worker took too long to start; cancelled");
+					elog(WARNING, "worker took too long to start; canceled");
 				}
 			}
 			else
@@ -1043,10 +1028,10 @@ rebuild_database_list(Oid newdb)
 static int
 db_comparator(const void *a, const void *b)
 {
-	if (((avl_dbase *) a)->adl_score == ((avl_dbase *) b)->adl_score)
+	if (((const avl_dbase *) a)->adl_score == ((const avl_dbase *) b)->adl_score)
 		return 0;
 	else
-		return (((avl_dbase *) a)->adl_score < ((avl_dbase *) b)->adl_score) ? 1 : -1;
+		return (((const avl_dbase *) a)->adl_score < ((const avl_dbase *) b)->adl_score) ? 1 : -1;
 }
 
 /*
@@ -1108,6 +1093,7 @@ do_start_worker(void)
 	recentXid = ReadNewTransactionId();
 	xidForceLimit = recentXid - autovacuum_freeze_max_age;
 	/* ensure it's a "normal" XID, else TransactionIdPrecedes misbehaves */
+	/* this can cause the limit to go backwards by 3, but that's OK */
 	if (xidForceLimit < FirstNormalTransactionId)
 		xidForceLimit -= FirstNormalTransactionId;
 
@@ -1319,21 +1305,39 @@ AutoVacWorkerFailed(void)
 static void
 avl_sighup_handler(SIGNAL_ARGS)
 {
+	int			save_errno = errno;
+
 	got_SIGHUP = true;
+	if (MyProc)
+		SetLatch(&MyProc->procLatch);
+
+	errno = save_errno;
 }
 
 /* SIGUSR2: a worker is up and running, or just finished, or failed to fork */
 static void
 avl_sigusr2_handler(SIGNAL_ARGS)
 {
+	int			save_errno = errno;
+
 	got_SIGUSR2 = true;
+	if (MyProc)
+		SetLatch(&MyProc->procLatch);
+
+	errno = save_errno;
 }
 
 /* SIGTERM: time to die */
 static void
 avl_sigterm_handler(SIGNAL_ARGS)
 {
+	int			save_errno = errno;
+
 	got_SIGTERM = true;
+	if (MyProc)
+		SetLatch(&MyProc->procLatch);
+
+	errno = save_errno;
 }
 
 
@@ -1460,7 +1464,7 @@ AutoVacWorkerMain(int argc, char *argv[])
 	pqsignal(SIGHUP, SIG_IGN);
 
 	/*
-	 * SIGINT is used to signal cancelling the current table's vacuum; SIGTERM
+	 * SIGINT is used to signal canceling the current table's vacuum; SIGTERM
 	 * means abort and exit cleanly, and SIGQUIT means abandon ship.
 	 */
 	pqsignal(SIGINT, StatementCancelHandler);
@@ -1525,6 +1529,14 @@ AutoVacWorkerMain(int argc, char *argv[])
 	 * preventing regular maintenance from being executed.
 	 */
 	SetConfigOption("statement_timeout", "0", PGC_SUSET, PGC_S_OVERRIDE);
+
+	/*
+	 * Force synchronous replication off to allow regular maintenance even if
+	 * we are waiting for standbys to connect. This is important to ensure we
+	 * aren't blocked from performing anti-wraparound tasks.
+	 */
+	if (synchronous_commit > SYNCHRONOUS_COMMIT_LOCAL_FLUSH)
+		SetConfigOption("synchronous_commit", "local", PGC_SUSET, PGC_S_OVERRIDE);
 
 	/*
 	 * Get the info about the database we're going to work on.
@@ -1682,8 +1694,8 @@ autovac_balance_cost(void)
 {
 	/*
 	 * The idea here is that we ration out I/O equally.  The amount of I/O
-	 * that a worker can consume is determined by cost_limit/cost_delay, so
-	 * we try to equalize those ratios rather than the raw limit settings.
+	 * that a worker can consume is determined by cost_limit/cost_delay, so we
+	 * try to equalize those ratios rather than the raw limit settings.
 	 *
 	 * note: in cost_limit, zero also means use value from elsewhere, because
 	 * zero is not a valid value.
@@ -1738,7 +1750,7 @@ autovac_balance_cost(void)
 
 			/*
 			 * We put a lower bound of 1 on the cost_limit, to avoid division-
-			 * by-zero in the vacuum code.  Also, in case of roundoff trouble
+			 * by-zero in the vacuum code.	Also, in case of roundoff trouble
 			 * in these calculations, let's be sure we don't ever set
 			 * cost_limit to more than the base value.
 			 */
@@ -1777,7 +1789,7 @@ get_database_list(void)
 	Relation	rel;
 	HeapScanDesc scan;
 	HeapTuple	tup;
-	MemoryContext	resultcxt;
+	MemoryContext resultcxt;
 
 	/* This is the context that we will allocate our output data in */
 	resultcxt = CurrentMemoryContext;
@@ -1799,13 +1811,13 @@ get_database_list(void)
 	{
 		Form_pg_database pgdatabase = (Form_pg_database) GETSTRUCT(tup);
 		avw_dbase  *avdb;
-		MemoryContext	oldcxt;
+		MemoryContext oldcxt;
 
 		/*
-		 * Allocate our results in the caller's context, not the transaction's.
-		 * We do this inside the loop, and restore the original context at the
-		 * end, so that leaky things like heap_getnext() are not called in a
-		 * potentially long-lived context.
+		 * Allocate our results in the caller's context, not the
+		 * transaction's. We do this inside the loop, and restore the original
+		 * context at the end, so that leaky things like heap_getnext() are
+		 * not called in a potentially long-lived context.
 		 */
 		oldcxt = MemoryContextSwitchTo(resultcxt);
 
@@ -1982,7 +1994,7 @@ do_autovacuum(void)
 			backendID = GetTempNamespaceBackendId(classForm->relnamespace);
 
 			/* We just ignore it if the owning backend is still active */
-			if (backendID == MyBackendId || !BackendIdIsActive(backendID))
+			if (backendID == MyBackendId || BackendIdGetProc(backendID) == NULL)
 			{
 				/*
 				 * We found an orphan temp table (which was probably left
@@ -2209,9 +2221,9 @@ do_autovacuum(void)
 		LWLockRelease(AutovacuumScheduleLock);
 
 		/*
-		 * Remember the prevailing values of the vacuum cost GUCs.  We have
-		 * to restore these at the bottom of the loop, else we'll compute
-		 * wrong values in the next iteration of autovac_balance_cost().
+		 * Remember the prevailing values of the vacuum cost GUCs.	We have to
+		 * restore these at the bottom of the loop, else we'll compute wrong
+		 * values in the next iteration of autovac_balance_cost().
 		 */
 		stdVacuumCostDelay = VacuumCostDelay;
 		stdVacuumCostLimit = VacuumCostLimit;
@@ -2671,19 +2683,27 @@ autovacuum_do_vac_analyze(autovac_table *tab,
 						  BufferAccessStrategy bstrategy)
 {
 	VacuumStmt	vacstmt;
+	RangeVar	rangevar;
 
-	/* Set up command parameters --- use a local variable instead of palloc */
+	/* Set up command parameters --- use local variables instead of palloc */
 	MemSet(&vacstmt, 0, sizeof(vacstmt));
+	MemSet(&rangevar, 0, sizeof(rangevar));
+
+	rangevar.schemaname = tab->at_nspname;
+	rangevar.relname = tab->at_relname;
+	rangevar.location = -1;
 
 	vacstmt.type = T_VacuumStmt;
-	vacstmt.options = 0;
+	if (!tab->at_wraparound)
+		vacstmt.options = VACOPT_NOWAIT;
 	if (tab->at_dovacuum)
 		vacstmt.options |= VACOPT_VACUUM;
 	if (tab->at_doanalyze)
 		vacstmt.options |= VACOPT_ANALYZE;
 	vacstmt.freeze_min_age = tab->at_freeze_min_age;
 	vacstmt.freeze_table_age = tab->at_freeze_table_age;
-	vacstmt.relation = NULL;	/* not used since we pass a relid */
+	/* we pass the OID, but might need this anyway for an error message */
+	vacstmt.relation = &rangevar;
 	vacstmt.va_cols = NIL;
 
 	/* Let pgstat know what we're doing */

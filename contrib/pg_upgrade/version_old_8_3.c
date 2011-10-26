@@ -7,6 +7,8 @@
  *	contrib/pg_upgrade/version_old_8_3.c
  */
 
+#include "postgres.h"
+
 #include "pg_upgrade.h"
 
 #include "access/transam.h"
@@ -26,7 +28,7 @@ old_8_3_check_for_name_data_type_usage(ClusterInfo *cluster)
 	bool		found = false;
 	char		output_path[MAXPGPATH];
 
-	prep_status("Checking for invalid 'name' user columns");
+	prep_status("Checking for invalid \"name\" user columns");
 
 	snprintf(output_path, sizeof(output_path), "%s/tables_using_name.txt",
 			 os_info.cwd);
@@ -59,8 +61,10 @@ old_8_3_check_for_name_data_type_usage(ClusterInfo *cluster)
 								"		NOT a.attisdropped AND "
 								"		a.atttypid = 'pg_catalog.name'::pg_catalog.regtype AND "
 								"		c.relnamespace = n.oid AND "
-							  "		n.nspname != 'pg_catalog' AND "
-						 "		n.nspname != 'information_schema'");
+								 /* exclude possible orphaned temp tables */
+								"  		n.nspname !~ '^pg_temp_' AND "
+								"		n.nspname !~ '^pg_toast_temp_' AND "
+						 		"		n.nspname NOT IN ('pg_catalog', 'information_schema')");
 
 		ntups = PQntuples(res);
 		i_nspname = PQfnumber(res, "nspname");
@@ -70,10 +74,10 @@ old_8_3_check_for_name_data_type_usage(ClusterInfo *cluster)
 		{
 			found = true;
 			if (script == NULL && (script = fopen(output_path, "w")) == NULL)
-				pg_log(PG_FATAL, "Could not create necessary file:  %s\n", output_path);
+				pg_log(PG_FATAL, "could not open file \"%s\": %s\n", output_path, getErrorText(errno));
 			if (!db_used)
 			{
-				fprintf(script, "Database:  %s\n", active_db->db_name);
+				fprintf(script, "Database: %s\n", active_db->db_name);
 				db_used = true;
 			}
 			fprintf(script, "  %s.%s.%s\n",
@@ -87,18 +91,19 @@ old_8_3_check_for_name_data_type_usage(ClusterInfo *cluster)
 		PQfinish(conn);
 	}
 
+	if (script)
+		fclose(script);
+
 	if (found)
 	{
-		fclose(script);
 		pg_log(PG_REPORT, "fatal\n");
 		pg_log(PG_FATAL,
-			   "| Your installation contains the \"name\" data type in\n"
-			   "| user tables.  This data type changed its internal\n"
-			   "| alignment between your old and new clusters so this\n"
-			   "| cluster cannot currently be upgraded.  You can\n"
-			   "| remove the problem tables and restart the upgrade.\n"
-			   "| A list of the problem columns is in the file:\n"
-			   "| \t%s\n\n", output_path);
+			   "Your installation contains the \"name\" data type in user tables.  This\n"
+			   "data type changed its internal alignment between your old and new\n"
+			   "clusters so this cluster cannot currently be upgraded.  You can remove\n"
+			   "the problem tables and restart the upgrade.  A list of the problem\n"
+			   "columns is in the file:\n"
+			   "    %s\n\n", output_path);
 	}
 	else
 		check_ok();
@@ -147,8 +152,10 @@ old_8_3_check_for_tsquery_usage(ClusterInfo *cluster)
 								"		NOT a.attisdropped AND "
 								"		a.atttypid = 'pg_catalog.tsquery'::pg_catalog.regtype AND "
 								"		c.relnamespace = n.oid AND "
-							  "		n.nspname != 'pg_catalog' AND "
-						 "		n.nspname != 'information_schema'");
+								 /* exclude possible orphaned temp tables */
+								"  		n.nspname !~ '^pg_temp_' AND "
+								"		n.nspname !~ '^pg_toast_temp_' AND "
+						 		"		n.nspname NOT IN ('pg_catalog', 'information_schema')");
 
 		ntups = PQntuples(res);
 		i_nspname = PQfnumber(res, "nspname");
@@ -158,10 +165,10 @@ old_8_3_check_for_tsquery_usage(ClusterInfo *cluster)
 		{
 			found = true;
 			if (script == NULL && (script = fopen(output_path, "w")) == NULL)
-				pg_log(PG_FATAL, "Could not create necessary file:  %s\n", output_path);
+				pg_log(PG_FATAL, "could not open file \"%s\": %s\n", output_path, getErrorText(errno));
 			if (!db_used)
 			{
-				fprintf(script, "Database:  %s\n", active_db->db_name);
+				fprintf(script, "Database: %s\n", active_db->db_name);
 				db_used = true;
 			}
 			fprintf(script, "  %s.%s.%s\n",
@@ -175,18 +182,100 @@ old_8_3_check_for_tsquery_usage(ClusterInfo *cluster)
 		PQfinish(conn);
 	}
 
+	if (script)
+		fclose(script);
+
 	if (found)
 	{
-		fclose(script);
 		pg_log(PG_REPORT, "fatal\n");
 		pg_log(PG_FATAL,
-			   "| Your installation contains the \"tsquery\" data type.\n"
-			   "| This data type added a new internal field between\n"
-			   "| your old and new clusters so this cluster cannot\n"
-			   "| currently be upgraded.  You can remove the problem\n"
-			   "| columns and restart the upgrade.  A list of the\n"
-			   "| problem columns is in the file:\n"
-			   "| \t%s\n\n", output_path);
+			   "Your installation contains the \"tsquery\" data type.    This data type\n"
+			   "added a new internal field between your old and new clusters so this\n"
+			   "cluster cannot currently be upgraded.  You can remove the problem\n"
+			   "columns and restart the upgrade.  A list of the problem columns is in the\n"
+			   "file:\n"
+			   "    %s\n\n", output_path);
+	}
+	else
+		check_ok();
+}
+
+
+/*
+ *	old_8_3_check_ltree_usage()
+ *	8.3 -> 8.4
+ *	The internal ltree structure was changed in 8.4 so upgrading is impossible.
+ */
+void
+old_8_3_check_ltree_usage(ClusterInfo *cluster)
+{
+	int			dbnum;
+	FILE	   *script = NULL;
+	bool		found = false;
+	char		output_path[MAXPGPATH];
+
+	prep_status("Checking for contrib/ltree");
+
+	snprintf(output_path, sizeof(output_path), "%s/contrib_ltree.txt",
+			 os_info.cwd);
+
+	for (dbnum = 0; dbnum < cluster->dbarr.ndbs; dbnum++)
+	{
+		PGresult   *res;
+		bool		db_used = false;
+		int			ntups;
+		int			rowno;
+		int			i_nspname,
+					i_proname;
+		DbInfo	   *active_db = &cluster->dbarr.dbs[dbnum];
+		PGconn	   *conn = connectToServer(cluster, active_db->db_name);
+
+		/* Find any functions coming from contrib/ltree */
+		res = executeQueryOrDie(conn,
+								"SELECT n.nspname, p.proname "
+								"FROM	pg_catalog.pg_proc p, "
+								"		pg_catalog.pg_namespace n "
+								"WHERE	p.pronamespace = n.oid AND "
+								"		p.probin = '$libdir/ltree'");
+
+		ntups = PQntuples(res);
+		i_nspname = PQfnumber(res, "nspname");
+		i_proname = PQfnumber(res, "proname");
+		for (rowno = 0; rowno < ntups; rowno++)
+		{
+			found = true;
+			if (script == NULL && (script = fopen(output_path, "w")) == NULL)
+				pg_log(PG_FATAL, "Could not open file \"%s\": %s\n",
+					   output_path, getErrorText(errno));
+			if (!db_used)
+			{
+				fprintf(script, "Database: %s\n", active_db->db_name);
+				db_used = true;
+			}
+			fprintf(script, "  %s.%s\n",
+					PQgetvalue(res, rowno, i_nspname),
+					PQgetvalue(res, rowno, i_proname));
+		}
+
+		PQclear(res);
+
+		PQfinish(conn);
+	}
+
+	if (script)
+		fclose(script);
+
+	if (found)
+	{
+		pg_log(PG_REPORT, "fatal\n");
+		pg_log(PG_FATAL,
+			   "Your installation contains the \"ltree\" data type.  This data type\n"
+			   "changed its internal storage format between your old and new clusters so this\n"
+			   "cluster cannot currently be upgraded.  You can manually upgrade databases\n"
+			   "that use \"contrib/ltree\" facilities and remove \"contrib/ltree\" from the old\n"
+			   "cluster and restart the upgrade.  A list of the problem functions is in the\n"
+			   "file:\n"
+			   "    %s\n\n", output_path);
 	}
 	else
 		check_ok();
@@ -243,8 +332,10 @@ old_8_3_rebuild_tsvector_tables(ClusterInfo *cluster, bool check_mode)
 								"		NOT a.attisdropped AND "
 								"		a.atttypid = 'pg_catalog.tsvector'::pg_catalog.regtype AND "
 								"		c.relnamespace = n.oid AND "
-							  "		n.nspname != 'pg_catalog' AND "
-						 "		n.nspname != 'information_schema'");
+								 /* exclude possible orphaned temp tables */
+								"  		n.nspname !~ '^pg_temp_' AND "
+								"		n.nspname !~ '^pg_toast_temp_' AND "
+						 		"		n.nspname NOT IN ('pg_catalog', 'information_schema')");
 
 /*
  *	This macro is used below to avoid reindexing indexes already rebuilt
@@ -261,7 +352,7 @@ old_8_3_rebuild_tsvector_tables(ClusterInfo *cluster, bool check_mode)
 								"		NOT a.attisdropped AND "		\
 								"		a.atttypid = 'pg_catalog.tsvector'::pg_catalog.regtype AND " \
 								"		c.relnamespace = n.oid AND "	\
-								"		n.nspname != 'pg_catalog' AND " \
+								"       n.nspname !~ '^pg_' AND "		\
 								"		n.nspname != 'information_schema') "
 
 		ntups = PQntuples(res);
@@ -274,7 +365,7 @@ old_8_3_rebuild_tsvector_tables(ClusterInfo *cluster, bool check_mode)
 			if (!check_mode)
 			{
 				if (script == NULL && (script = fopen(output_path, "w")) == NULL)
-					pg_log(PG_FATAL, "Could not create necessary file:  %s\n", output_path);
+					pg_log(PG_FATAL, "could not open file \"%s\": %s\n", output_path, getErrorText(errno));
 				if (!db_used)
 				{
 					fprintf(script, "\\connect %s\n\n",
@@ -284,7 +375,7 @@ old_8_3_rebuild_tsvector_tables(ClusterInfo *cluster, bool check_mode)
 
 				/* Rebuild all tsvector collumns with one ALTER TABLE command */
 				if (strcmp(PQgetvalue(res, rowno, i_nspname), nspname) != 0 ||
-				 strcmp(PQgetvalue(res, rowno, i_relname), relname) != 0)
+					strcmp(PQgetvalue(res, rowno, i_relname), relname) != 0)
 				{
 					if (strlen(nspname) != 0 || strlen(relname) != 0)
 						fprintf(script, ";\n\n");
@@ -314,27 +405,25 @@ old_8_3_rebuild_tsvector_tables(ClusterInfo *cluster, bool check_mode)
 		PQfinish(conn);
 	}
 
+	if (script)
+		fclose(script);
+
 	if (found)
 	{
-		if (!check_mode)
-			fclose(script);
 		report_status(PG_WARNING, "warning");
 		if (check_mode)
 			pg_log(PG_WARNING, "\n"
-				   "| Your installation contains tsvector columns.\n"
-				   "| The tsvector internal storage format changed\n"
-				   "| between your old and new clusters so the tables\n"
-				   "| must be rebuilt.  After upgrading, you will be\n"
-				   "| given instructions.\n\n");
+				   "Your installation contains tsvector columns.  The tsvector internal\n"
+				   "storage format changed between your old and new clusters so the tables\n"
+				   "must be rebuilt.  After upgrading, you will be given instructions.\n\n");
 		else
 			pg_log(PG_WARNING, "\n"
-				   "| Your installation contains tsvector columns.\n"
-				   "| The tsvector internal storage format changed\n"
-				   "| between your old and new clusters so the tables\n"
-				   "| must be rebuilt.  The file:\n"
-				   "| \t%s\n"
-				   "| when executed by psql by the database super-user\n"
-				   "| will rebuild all tables with tsvector columns.\n\n",
+				   "Your installation contains tsvector columns.  The tsvector internal\n"
+				   "storage format changed between your old and new clusters so the tables\n"
+				   "must be rebuilt.  The file:\n"
+				   "    %s\n"
+				   "when executed by psql by the database superuser will rebuild all tables\n"
+				   "with tsvector columns.\n\n",
 				   output_path);
 	}
 	else
@@ -355,7 +444,7 @@ old_8_3_invalidate_hash_gin_indexes(ClusterInfo *cluster, bool check_mode)
 	bool		found = false;
 	char		output_path[MAXPGPATH];
 
-	prep_status("Checking for hash and gin indexes");
+	prep_status("Checking for hash and GIN indexes");
 
 	snprintf(output_path, sizeof(output_path), "%s/reindex_hash_and_gin.sql",
 			 os_info.cwd);
@@ -374,11 +463,11 @@ old_8_3_invalidate_hash_gin_indexes(ClusterInfo *cluster, bool check_mode)
 		/* find hash and gin indexes */
 		res = executeQueryOrDie(conn,
 								"SELECT n.nspname, c.relname "
-								"FROM 	pg_catalog.pg_class c, "
+								"FROM	pg_catalog.pg_class c, "
 								"		pg_catalog.pg_index i, "
 								"		pg_catalog.pg_am a, "
 								"		pg_catalog.pg_namespace n "
-								"WHERE 	i.indexrelid = c.oid AND "
+								"WHERE	i.indexrelid = c.oid AND "
 								"		c.relam = a.oid AND "
 								"		c.relnamespace = n.oid AND "
 							"		a.amname IN ('hash', 'gin') AND "
@@ -393,7 +482,7 @@ old_8_3_invalidate_hash_gin_indexes(ClusterInfo *cluster, bool check_mode)
 			if (!check_mode)
 			{
 				if (script == NULL && (script = fopen(output_path, "w")) == NULL)
-					pg_log(PG_FATAL, "Could not create necessary file:  %s\n", output_path);
+					pg_log(PG_FATAL, "could not open file \"%s\": %s\n", output_path, getErrorText(errno));
 				if (!db_used)
 				{
 					fprintf(script, "\\connect %s\n",
@@ -413,10 +502,10 @@ old_8_3_invalidate_hash_gin_indexes(ClusterInfo *cluster, bool check_mode)
 			PQclear(executeQueryOrDie(conn,
 									  "UPDATE pg_catalog.pg_index i "
 									  "SET	indisvalid = false "
-									  "FROM 	pg_catalog.pg_class c, "
+									  "FROM	pg_catalog.pg_class c, "
 									  "		pg_catalog.pg_am a, "
 									  "		pg_catalog.pg_namespace n "
-									  "WHERE 	i.indexrelid = c.oid AND "
+									  "WHERE	i.indexrelid = c.oid AND "
 									  "		c.relam = a.oid AND "
 									  "		c.relnamespace = n.oid AND "
 									"		a.amname IN ('hash', 'gin')"));
@@ -424,30 +513,26 @@ old_8_3_invalidate_hash_gin_indexes(ClusterInfo *cluster, bool check_mode)
 		PQfinish(conn);
 	}
 
+	if (script)
+		fclose(script);
+
 	if (found)
 	{
-		if (!check_mode)
-			fclose(script);
 		report_status(PG_WARNING, "warning");
 		if (check_mode)
 			pg_log(PG_WARNING, "\n"
-				   "| Your installation contains hash and/or gin\n"
-				   "| indexes.  These indexes have different\n"
-				   "| internal formats between your old and new\n"
-				   "| clusters so they must be reindexed with the\n"
-				   "| REINDEX command. After upgrading, you will\n"
-				   "| be given REINDEX instructions.\n\n");
+				   "Your installation contains hash and/or GIN indexes.  These indexes have\n"
+				   "different internal formats between your old and new clusters, so they\n"
+				   "must be reindexed with the REINDEX command.  After upgrading, you will\n"
+				   "be given REINDEX instructions.\n\n");
 		else
 			pg_log(PG_WARNING, "\n"
-				   "| Your installation contains hash and/or gin\n"
-				   "| indexes.  These indexes have different internal\n"
-				   "| formats between your old and new clusters so\n"
-				   "| they must be reindexed with the REINDEX command.\n"
-				   "| The file:\n"
-				   "| \t%s\n"
-				   "| when executed by psql by the database super-user\n"
-				   "| will recreate all invalid indexes; until then,\n"
-				   "| none of these indexes will be used.\n\n",
+				   "Your installation contains hash and/or GIN indexes.  These indexes have\n"
+				   "different internal formats between your old and new clusters, so they\n"
+				   "must be reindexed with the REINDEX command.  The file:\n"
+				   "    %s\n"
+				   "when executed by psql by the database superuser will recreate all invalid\n"
+				   "indexes; until then, none of these indexes will be used.\n\n",
 				   output_path);
 	}
 	else
@@ -517,7 +602,7 @@ old_8_3_invalidate_bpchar_pattern_ops_indexes(ClusterInfo *cluster,
 			if (!check_mode)
 			{
 				if (script == NULL && (script = fopen(output_path, "w")) == NULL)
-					pg_log(PG_FATAL, "Could not create necessary file:  %s\n", output_path);
+					pg_log(PG_FATAL, "could not open file \"%s\": %s\n", output_path, getErrorText(errno));
 				if (!db_used)
 				{
 					fprintf(script, "\\connect %s\n",
@@ -553,30 +638,26 @@ old_8_3_invalidate_bpchar_pattern_ops_indexes(ClusterInfo *cluster,
 		PQfinish(conn);
 	}
 
+	if (script)
+		fclose(script);
+
 	if (found)
 	{
-		if (!check_mode)
-			fclose(script);
 		report_status(PG_WARNING, "warning");
 		if (check_mode)
 			pg_log(PG_WARNING, "\n"
-				   "| Your installation contains indexes using\n"
-				   "| \"bpchar_pattern_ops\".  These indexes have\n"
-				   "| different internal formats between your old and\n"
-				   "| new clusters so they must be reindexed with the\n"
-				   "| REINDEX command.  After upgrading, you will be\n"
-				   "| given REINDEX instructions.\n\n");
+				   "Your installation contains indexes using \"bpchar_pattern_ops\".  These\n"
+				   "indexes have different internal formats between your old and new clusters\n"
+				   "so they must be reindexed with the REINDEX command.  After upgrading, you\n"
+				   "will be given REINDEX instructions.\n\n");
 		else
 			pg_log(PG_WARNING, "\n"
-				   "| Your installation contains indexes using\n"
-				   "| \"bpchar_pattern_ops\".  These indexes have\n"
-				   "| different internal formats between your old and\n"
-				   "| new clusters so they must be reindexed with the\n"
-				   "| REINDEX command.  The file:\n"
-				   "| \t%s\n"
-				   "| when executed by psql by the database super-user\n"
-				   "| will recreate all invalid indexes; until then,\n"
-				   "| none of these indexes will be used.\n\n",
+				   "Your installation contains indexes using \"bpchar_pattern_ops\".  These\n"
+				   "indexes have different internal formats between your old and new clusters\n"
+				   "so they must be reindexed with the REINDEX command.  The file:\n"
+				   "    %s\n"
+				   "when executed by psql by the database superuser will recreate all invalid\n"
+				   "indexes; until then, none of these indexes will be used.\n\n",
 				   output_path);
 	}
 	else
@@ -624,8 +705,10 @@ old_8_3_create_sequence_script(ClusterInfo *cluster)
 								"		pg_catalog.pg_namespace n "
 								"WHERE	c.relkind = 'S' AND "
 								"		c.relnamespace = n.oid AND "
-							  "		n.nspname != 'pg_catalog' AND "
-						 "		n.nspname != 'information_schema'");
+								 /* exclude possible orphaned temp tables */
+								"  		n.nspname !~ '^pg_temp_' AND "
+								"		n.nspname !~ '^pg_toast_temp_' AND "
+						 		"		n.nspname NOT IN ('pg_catalog', 'information_schema')");
 
 		ntups = PQntuples(res);
 		i_nspname = PQfnumber(res, "nspname");
@@ -641,7 +724,7 @@ old_8_3_create_sequence_script(ClusterInfo *cluster)
 			found = true;
 
 			if (script == NULL && (script = fopen(output_path, "w")) == NULL)
-				pg_log(PG_FATAL, "Could not create necessary file:  %s\n", output_path);
+				pg_log(PG_FATAL, "could not open file \"%s\": %s\n", output_path, getErrorText(errno));
 			if (!db_used)
 			{
 				fprintf(script, "\\connect %s\n\n",
@@ -672,7 +755,8 @@ old_8_3_create_sequence_script(ClusterInfo *cluster)
 
 		PQfinish(conn);
 	}
-	if (found)
+
+	if (script)
 		fclose(script);
 
 	check_ok();

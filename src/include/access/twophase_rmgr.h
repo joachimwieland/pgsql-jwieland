@@ -25,7 +25,8 @@ typedef uint8 TwoPhaseRmgrId;
 #define TWOPHASE_RM_LOCK_ID			1
 #define TWOPHASE_RM_PGSTAT_ID		2
 #define TWOPHASE_RM_MULTIXACT_ID	3
-#define TWOPHASE_RM_MAX_ID			TWOPHASE_RM_MULTIXACT_ID
+#define TWOPHASE_RM_PREDICATELOCK_ID	4
+#define TWOPHASE_RM_MAX_ID			TWOPHASE_RM_PREDICATELOCK_ID
 
 extern const TwoPhaseCallback twophase_recover_callbacks[];
 extern const TwoPhaseCallback twophase_postcommit_callbacks[];

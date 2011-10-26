@@ -29,13 +29,13 @@
 #include "commands/defrem.h"
 #include "commands/trigger.h"
 #include "executor/executor.h"
-#include "executor/instrument.h"
 #include "miscadmin.h"
 #include "nodes/bitmapset.h"
 #include "nodes/makefuncs.h"
 #include "optimizer/clauses.h"
 #include "optimizer/var.h"
 #include "parser/parse_clause.h"
+#include "parser/parse_collate.h"
 #include "parser/parse_func.h"
 #include "parser/parse_relation.h"
 #include "parser/parsetree.h"
@@ -50,6 +50,7 @@
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/rel.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
 #include "utils/tqual.h"
@@ -142,14 +143,7 @@ CreateTrigger(CreateTrigStmt *stmt, const char *queryString,
 	ObjectAddress myself,
 				referenced;
 
-	/*
-	 * ShareRowExclusiveLock is sufficient to prevent concurrent write activity
-	 * to the relation, and thus to lock out any operations that might want to
-	 * fire triggers on the relation.  If we had ON SELECT triggers we would
-	 * need to take an AccessExclusiveLock to add one of those, just as we do
-	 * with ON SELECT rules.
-	 */
-	rel = heap_openrv(stmt->relation, ShareRowExclusiveLock);
+	rel = heap_openrv(stmt->relation, AccessExclusiveLock);
 
 	/*
 	 * Triggers must be on tables or views, and there are additional
@@ -199,7 +193,17 @@ CreateTrigger(CreateTrigStmt *stmt, const char *queryString,
 						RelationGetRelationName(rel))));
 
 	if (stmt->isconstraint && stmt->constrrel != NULL)
-		constrrelid = RangeVarGetRelid(stmt->constrrel, false);
+	{
+		/*
+		 * We must take a lock on the target relation to protect against
+		 * concurrent drop.  It's not clear that AccessShareLock is strong
+		 * enough, but we certainly need at least that much... otherwise,
+		 * we might end up creating a pg_constraint entry referencing a
+		 * nonexistent table.
+		 */
+		constrrelid = RangeVarGetRelid(stmt->constrrel, AccessShareLock, false,
+									   false);
+	}
 
 	/* permission checks */
 	if (!isInternal)
@@ -243,7 +247,7 @@ CreateTrigger(CreateTrigStmt *stmt, const char *queryString,
 		if (stmt->whenClause)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("INSTEAD OF triggers cannot have WHEN conditions")));
+				 errmsg("INSTEAD OF triggers cannot have WHEN conditions")));
 		if (stmt->columns != NIL)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -282,6 +286,8 @@ CreateTrigger(CreateTrigStmt *stmt, const char *queryString,
 		whenClause = transformWhereClause(pstate,
 										  copyObject(stmt->whenClause),
 										  "WHEN");
+		/* we have to fix its collations too */
+		assign_expr_collations(pstate, whenClause);
 
 		/*
 		 * No subplans or aggregates, please
@@ -306,7 +312,9 @@ CreateTrigger(CreateTrigStmt *stmt, const char *queryString,
 		 * subselects in WHEN clauses; it would fail to examine the contents
 		 * of subselects.
 		 */
-		varList = pull_var_clause(whenClause, PVC_REJECT_PLACEHOLDERS);
+		varList = pull_var_clause(whenClause,
+								  PVC_REJECT_AGGREGATES,
+								  PVC_REJECT_PLACEHOLDERS);
 		foreach(lc, varList)
 		{
 			Var		   *var = (Var *) lfirst(lc);
@@ -422,6 +430,7 @@ CreateTrigger(CreateTrigStmt *stmt, const char *queryString,
 											  CONSTRAINT_TRIGGER,
 											  stmt->deferrable,
 											  stmt->initdeferred,
+											  true,
 											  RelationGetRelid(rel),
 											  NULL,		/* no conkey */
 											  0,
@@ -476,8 +485,8 @@ CreateTrigger(CreateTrigStmt *stmt, const char *queryString,
 	 * can skip this for internally generated triggers, since the name
 	 * modification above should be sufficient.
 	 *
-	 * NOTE that this is cool only because we have ShareRowExclusiveLock on the
-	 * relation, so the trigger set won't be changing underneath us.
+	 * NOTE that this is cool only because we have AccessExclusiveLock on
+	 * the relation, so the trigger set won't be changing underneath us.
 	 */
 	if (!isInternal)
 	{
@@ -892,7 +901,7 @@ ConvertTriggerToFK(CreateTrigStmt *stmt, Oid funcoid)
 		ereport(NOTICE,
 		(errmsg("ignoring incomplete trigger group for constraint \"%s\" %s",
 				constr_name, buf.data),
-		 errdetail("%s", _(funcdescr[funcnum]))));
+		 errdetail_internal("%s", _(funcdescr[funcnum]))));
 		oldContext = MemoryContextSwitchTo(TopMemoryContext);
 		info = (OldTriggerInfo *) palloc0(sizeof(OldTriggerInfo));
 		info->args = copyObject(stmt->args);
@@ -908,7 +917,7 @@ ConvertTriggerToFK(CreateTrigStmt *stmt, Oid funcoid)
 		ereport(NOTICE,
 		(errmsg("ignoring incomplete trigger group for constraint \"%s\" %s",
 				constr_name, buf.data),
-		 errdetail("%s", _(funcdescr[funcnum]))));
+		 errdetail_internal("%s", _(funcdescr[funcnum]))));
 	}
 	else
 	{
@@ -920,7 +929,7 @@ ConvertTriggerToFK(CreateTrigStmt *stmt, Oid funcoid)
 		ereport(NOTICE,
 				(errmsg("converting trigger group into constraint \"%s\" %s",
 						constr_name, buf.data),
-				 errdetail("%s", _(funcdescr[funcnum]))));
+				 errdetail_internal("%s", _(funcdescr[funcnum]))));
 		fkcon->contype = CONSTR_FOREIGN;
 		fkcon->location = -1;
 		if (funcnum == 2)
@@ -1002,6 +1011,8 @@ ConvertTriggerToFK(CreateTrigStmt *stmt, Oid funcoid)
 		}
 		fkcon->deferrable = stmt->deferrable;
 		fkcon->initdeferred = stmt->initdeferred;
+		fkcon->skip_validation = false;
+		fkcon->initially_valid = true;
 
 		/* ... and execute it */
 		ProcessUtility((Node *) atstmt,
@@ -1020,10 +1031,14 @@ ConvertTriggerToFK(CreateTrigStmt *stmt, Oid funcoid)
  * DropTrigger - drop an individual trigger by name
  */
 void
-DropTrigger(Oid relid, const char *trigname, DropBehavior behavior,
+DropTrigger(RangeVar *relation, const char *trigname, DropBehavior behavior,
 			bool missing_ok)
 {
+	Oid			relid;
 	ObjectAddress object;
+
+	/* lock level should match RemoveTriggerById */
+	relid = RangeVarGetRelid(relation, AccessExclusiveLock, false, false);
 
 	object.classId = TriggerRelationId;
 	object.objectId = get_trigger_oid(relid, trigname, missing_ok);
@@ -1032,8 +1047,8 @@ DropTrigger(Oid relid, const char *trigname, DropBehavior behavior,
 	if (!OidIsValid(object.objectId))
 	{
 		ereport(NOTICE,
-				(errmsg("trigger \"%s\" for table \"%s\" does not exist, skipping",
-						trigname, get_rel_name(relid))));
+		  (errmsg("trigger \"%s\" for table \"%s\" does not exist, skipping",
+				  trigname, get_rel_name(relid))));
 		return;
 	}
 
@@ -1078,14 +1093,11 @@ RemoveTriggerById(Oid trigOid)
 		elog(ERROR, "could not find tuple for trigger %u", trigOid);
 
 	/*
-	 * Open and lock the relation the trigger belongs to.  As in
-	 * CreateTrigger, this is sufficient to lock out all operations that
-	 * could fire or add triggers; but it would need to be revisited if
-	 * we had ON SELECT triggers.
+	 * Open and exclusive-lock the relation the trigger belongs to.
 	 */
 	relid = ((Form_pg_trigger) GETSTRUCT(tup))->tgrelid;
 
-	rel = heap_open(relid, ShareRowExclusiveLock);
+	rel = heap_open(relid, AccessExclusiveLock);
 
 	if (rel->rd_rel->relkind != RELKIND_RELATION &&
 		rel->rd_rel->relkind != RELKIND_VIEW)
@@ -1818,7 +1830,8 @@ ExecCallTriggerFunc(TriggerData *trigdata,
 	/*
 	 * Call the function, passing no arguments but setting a context.
 	 */
-	InitFunctionCallInfoData(fcinfo, finfo, 0, (Node *) trigdata, NULL);
+	InitFunctionCallInfoData(fcinfo, finfo, 0,
+							 InvalidOid, (Node *) trigdata, NULL);
 
 	pgstat_init_function_usage(&fcinfo, &fcusage);
 
@@ -1908,12 +1921,13 @@ ExecASInsertTriggers(EState *estate, ResultRelInfo *relinfo)
 							  false, NULL, NULL, NIL, NULL);
 }
 
-HeapTuple
+TupleTableSlot *
 ExecBRInsertTriggers(EState *estate, ResultRelInfo *relinfo,
-					 HeapTuple trigtuple)
+					 TupleTableSlot *slot)
 {
 	TriggerDesc *trigdesc = relinfo->ri_TrigDesc;
-	HeapTuple	newtuple = trigtuple;
+	HeapTuple	slottuple = ExecMaterializeSlot(slot);
+	HeapTuple	newtuple = slottuple;
 	HeapTuple	oldtuple;
 	TriggerData LocTriggerData;
 	int			i;
@@ -1946,12 +1960,29 @@ ExecBRInsertTriggers(EState *estate, ResultRelInfo *relinfo,
 									   relinfo->ri_TrigFunctions,
 									   relinfo->ri_TrigInstrument,
 									   GetPerTupleMemoryContext(estate));
-		if (oldtuple != newtuple && oldtuple != trigtuple)
+		if (oldtuple != newtuple && oldtuple != slottuple)
 			heap_freetuple(oldtuple);
 		if (newtuple == NULL)
-			break;
+			return NULL;		/* "do nothing" */
 	}
-	return newtuple;
+
+	if (newtuple != slottuple)
+	{
+		/*
+		 * Return the modified tuple using the es_trig_tuple_slot.	We assume
+		 * the tuple was allocated in per-tuple memory context, and therefore
+		 * will go away by itself. The tuple table slot should not try to
+		 * clear it.
+		 */
+		TupleTableSlot *newslot = estate->es_trig_tuple_slot;
+		TupleDesc	tupdesc = RelationGetDescr(relinfo->ri_RelationDesc);
+
+		if (newslot->tts_tupleDescriptor != tupdesc)
+			ExecSetSlotDescriptor(newslot, tupdesc);
+		ExecStoreTuple(newtuple, newslot, InvalidBuffer, false);
+		slot = newslot;
+	}
+	return slot;
 }
 
 void
@@ -1965,12 +1996,13 @@ ExecARInsertTriggers(EState *estate, ResultRelInfo *relinfo,
 							  true, NULL, trigtuple, recheckIndexes, NULL);
 }
 
-HeapTuple
+TupleTableSlot *
 ExecIRInsertTriggers(EState *estate, ResultRelInfo *relinfo,
-					 HeapTuple trigtuple)
+					 TupleTableSlot *slot)
 {
 	TriggerDesc *trigdesc = relinfo->ri_TrigDesc;
-	HeapTuple	newtuple = trigtuple;
+	HeapTuple	slottuple = ExecMaterializeSlot(slot);
+	HeapTuple	newtuple = slottuple;
 	HeapTuple	oldtuple;
 	TriggerData LocTriggerData;
 	int			i;
@@ -2003,12 +2035,29 @@ ExecIRInsertTriggers(EState *estate, ResultRelInfo *relinfo,
 									   relinfo->ri_TrigFunctions,
 									   relinfo->ri_TrigInstrument,
 									   GetPerTupleMemoryContext(estate));
-		if (oldtuple != newtuple && oldtuple != trigtuple)
+		if (oldtuple != newtuple && oldtuple != slottuple)
 			heap_freetuple(oldtuple);
 		if (newtuple == NULL)
-			break;
+			return NULL;		/* "do nothing" */
 	}
-	return newtuple;
+
+	if (newtuple != slottuple)
+	{
+		/*
+		 * Return the modified tuple using the es_trig_tuple_slot.	We assume
+		 * the tuple was allocated in per-tuple memory context, and therefore
+		 * will go away by itself. The tuple table slot should not try to
+		 * clear it.
+		 */
+		TupleTableSlot *newslot = estate->es_trig_tuple_slot;
+		TupleDesc	tupdesc = RelationGetDescr(relinfo->ri_RelationDesc);
+
+		if (newslot->tts_tupleDescriptor != tupdesc)
+			ExecSetSlotDescriptor(newslot, tupdesc);
+		ExecStoreTuple(newtuple, newslot, InvalidBuffer, false);
+		slot = newslot;
+	}
+	return slot;
 }
 
 void
@@ -2256,32 +2305,44 @@ ExecASUpdateTriggers(EState *estate, ResultRelInfo *relinfo)
 							  GetModifiedColumns(relinfo, estate));
 }
 
-HeapTuple
+TupleTableSlot *
 ExecBRUpdateTriggers(EState *estate, EPQState *epqstate,
 					 ResultRelInfo *relinfo,
-					 ItemPointer tupleid, HeapTuple newtuple)
+					 ItemPointer tupleid, TupleTableSlot *slot)
 {
 	TriggerDesc *trigdesc = relinfo->ri_TrigDesc;
+	HeapTuple	slottuple = ExecMaterializeSlot(slot);
+	HeapTuple	newtuple = slottuple;
 	TriggerData LocTriggerData;
 	HeapTuple	trigtuple;
 	HeapTuple	oldtuple;
-	HeapTuple	intuple = newtuple;
 	TupleTableSlot *newSlot;
 	int			i;
 	Bitmapset  *modifiedCols;
 
+	/* get a copy of the on-disk tuple we are planning to update */
 	trigtuple = GetTupleForTrigger(estate, epqstate, relinfo, tupleid,
 								   &newSlot);
 	if (trigtuple == NULL)
-		return NULL;
+		return NULL;			/* cancel the update action */
 
 	/*
-	 * In READ COMMITTED isolation level it's possible that newtuple was
+	 * In READ COMMITTED isolation level it's possible that target tuple was
 	 * changed due to concurrent update.  In that case we have a raw subplan
-	 * output tuple and need to run it through the junk filter.
+	 * output tuple in newSlot, and need to run it through the junk filter to
+	 * produce an insertable tuple.
+	 *
+	 * Caution: more than likely, the passed-in slot is the same as the
+	 * junkfilter's output slot, so we are clobbering the original value of
+	 * slottuple by doing the filtering.  This is OK since neither we nor our
+	 * caller have any more interest in the prior contents of that slot.
 	 */
 	if (newSlot != NULL)
-		intuple = newtuple = ExecRemoveJunk(relinfo->ri_junkFilter, newSlot);
+	{
+		slot = ExecFilterJunk(relinfo->ri_junkFilter, newSlot);
+		slottuple = ExecMaterializeSlot(slot);
+		newtuple = slottuple;
+	}
 
 	modifiedCols = GetModifiedColumns(relinfo, estate);
 
@@ -2313,13 +2374,33 @@ ExecBRUpdateTriggers(EState *estate, EPQState *epqstate,
 									   relinfo->ri_TrigFunctions,
 									   relinfo->ri_TrigInstrument,
 									   GetPerTupleMemoryContext(estate));
-		if (oldtuple != newtuple && oldtuple != intuple)
+		if (oldtuple != newtuple && oldtuple != slottuple)
 			heap_freetuple(oldtuple);
 		if (newtuple == NULL)
-			break;
+		{
+			heap_freetuple(trigtuple);
+			return NULL;		/* "do nothing" */
+		}
 	}
 	heap_freetuple(trigtuple);
-	return newtuple;
+
+	if (newtuple != slottuple)
+	{
+		/*
+		 * Return the modified tuple using the es_trig_tuple_slot.	We assume
+		 * the tuple was allocated in per-tuple memory context, and therefore
+		 * will go away by itself. The tuple table slot should not try to
+		 * clear it.
+		 */
+		TupleTableSlot *newslot = estate->es_trig_tuple_slot;
+		TupleDesc	tupdesc = RelationGetDescr(relinfo->ri_RelationDesc);
+
+		if (newslot->tts_tupleDescriptor != tupdesc)
+			ExecSetSlotDescriptor(newslot, tupdesc);
+		ExecStoreTuple(newtuple, newslot, InvalidBuffer, false);
+		slot = newslot;
+	}
+	return slot;
 }
 
 void
@@ -2341,14 +2422,15 @@ ExecARUpdateTriggers(EState *estate, ResultRelInfo *relinfo,
 	}
 }
 
-HeapTuple
+TupleTableSlot *
 ExecIRUpdateTriggers(EState *estate, ResultRelInfo *relinfo,
-					 HeapTuple oldtuple, HeapTuple newtuple)
+					 HeapTuple trigtuple, TupleTableSlot *slot)
 {
 	TriggerDesc *trigdesc = relinfo->ri_TrigDesc;
+	HeapTuple	slottuple = ExecMaterializeSlot(slot);
+	HeapTuple	newtuple = slottuple;
 	TriggerData LocTriggerData;
-	HeapTuple	intuple = newtuple;
-	HeapTuple	rettuple;
+	HeapTuple	oldtuple;
 	int			i;
 
 	LocTriggerData.type = T_TriggerData;
@@ -2366,26 +2448,42 @@ ExecIRUpdateTriggers(EState *estate, ResultRelInfo *relinfo,
 								  TRIGGER_TYPE_UPDATE))
 			continue;
 		if (!TriggerEnabled(estate, relinfo, trigger, LocTriggerData.tg_event,
-							NULL, oldtuple, newtuple))
+							NULL, trigtuple, newtuple))
 			continue;
 
-		LocTriggerData.tg_trigtuple = oldtuple;
-		LocTriggerData.tg_newtuple = newtuple;
+		LocTriggerData.tg_trigtuple = trigtuple;
+		LocTriggerData.tg_newtuple = oldtuple = newtuple;
 		LocTriggerData.tg_trigtuplebuf = InvalidBuffer;
 		LocTriggerData.tg_newtuplebuf = InvalidBuffer;
 		LocTriggerData.tg_trigger = trigger;
-		rettuple = ExecCallTriggerFunc(&LocTriggerData,
+		newtuple = ExecCallTriggerFunc(&LocTriggerData,
 									   i,
 									   relinfo->ri_TrigFunctions,
 									   relinfo->ri_TrigInstrument,
 									   GetPerTupleMemoryContext(estate));
-		if (newtuple != rettuple && newtuple != intuple)
-			heap_freetuple(newtuple);
-		newtuple = rettuple;
+		if (oldtuple != newtuple && oldtuple != slottuple)
+			heap_freetuple(oldtuple);
 		if (newtuple == NULL)
-			break;
+			return NULL;		/* "do nothing" */
 	}
-	return newtuple;
+
+	if (newtuple != slottuple)
+	{
+		/*
+		 * Return the modified tuple using the es_trig_tuple_slot.	We assume
+		 * the tuple was allocated in per-tuple memory context, and therefore
+		 * will go away by itself. The tuple table slot should not try to
+		 * clear it.
+		 */
+		TupleTableSlot *newslot = estate->es_trig_tuple_slot;
+		TupleDesc	tupdesc = RelationGetDescr(relinfo->ri_RelationDesc);
+
+		if (newslot->tts_tupleDescriptor != tupdesc)
+			ExecSetSlotDescriptor(newslot, tupdesc);
+		ExecStoreTuple(newtuple, newslot, InvalidBuffer, false);
+		slot = newslot;
+	}
+	return slot;
 }
 
 void
@@ -2636,9 +2734,9 @@ TriggerEnabled(EState *estate, ResultRelInfo *relinfo,
 
 			oldContext = MemoryContextSwitchTo(estate->es_query_cxt);
 			tgqual = stringToNode(trigger->tgqual);
-			/* Change references to OLD and NEW to INNER and OUTER */
-			ChangeVarNodes(tgqual, PRS2_OLD_VARNO, INNER, 0);
-			ChangeVarNodes(tgqual, PRS2_NEW_VARNO, OUTER, 0);
+			/* Change references to OLD and NEW to INNER_VAR and OUTER_VAR */
+			ChangeVarNodes(tgqual, PRS2_OLD_VARNO, INNER_VAR, 0);
+			ChangeVarNodes(tgqual, PRS2_NEW_VARNO, OUTER_VAR, 0);
 			/* ExecQual wants implicit-AND form */
 			tgqual = (Node *) make_ands_implicit((Expr *) tgqual);
 			*predicate = (List *) ExecPrepareExpr((Expr *) tgqual, estate);
@@ -2671,13 +2769,13 @@ TriggerEnabled(EState *estate, ResultRelInfo *relinfo,
 		}
 		if (HeapTupleIsValid(newtup))
 		{
-			if (estate->es_trig_tuple_slot == NULL)
+			if (estate->es_trig_newtup_slot == NULL)
 			{
 				oldContext = MemoryContextSwitchTo(estate->es_query_cxt);
-				estate->es_trig_tuple_slot = ExecInitExtraTupleSlot(estate);
+				estate->es_trig_newtup_slot = ExecInitExtraTupleSlot(estate);
 				MemoryContextSwitchTo(oldContext);
 			}
-			newslot = estate->es_trig_tuple_slot;
+			newslot = estate->es_trig_newtup_slot;
 			if (newslot->tts_tupleDescriptor != tupdesc)
 				ExecSetSlotDescriptor(newslot, tupdesc);
 			ExecStoreTuple(newtup, newslot, InvalidBuffer, false);
@@ -2685,7 +2783,7 @@ TriggerEnabled(EState *estate, ResultRelInfo *relinfo,
 
 		/*
 		 * Finally evaluate the expression, making the old and/or new tuples
-		 * available as INNER/OUTER respectively.
+		 * available as INNER_VAR/OUTER_VAR respectively.
 		 */
 		econtext->ecxt_innertuple = oldslot;
 		econtext->ecxt_outertuple = newslot;
@@ -2802,7 +2900,7 @@ typedef struct AfterTriggerEventDataOneCtid
 {
 	TriggerFlags ate_flags;		/* status bits and offset to shared data */
 	ItemPointerData ate_ctid1;	/* inserted, deleted, or old updated tuple */
-} AfterTriggerEventDataOneCtid;
+}	AfterTriggerEventDataOneCtid;
 
 #define SizeofTriggerEvent(evt) \
 	(((evt)->ate_flags & AFTER_TRIGGER_2CTIDS) ? \
@@ -3590,9 +3688,9 @@ AfterTriggerBeginQuery(void)
  *	we invoke all AFTER IMMEDIATE trigger events queued by the query, and
  *	transfer deferred trigger events to the global deferred-trigger list.
  *
- *	Note that this should be called just BEFORE closing down the executor
+ *	Note that this must be called BEFORE closing down the executor
  *	with ExecutorEnd, because we make use of the EState's info about
- *	target relations.
+ *	target relations.  Normally it is called from ExecutorFinish.
  * ----------
  */
 void

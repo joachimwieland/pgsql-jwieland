@@ -9,7 +9,7 @@
 CREATE TABLE pxtest1 (foobar VARCHAR(10));
 INSERT INTO pxtest1 VALUES ('aaa');
 -- Test PREPARE TRANSACTION
-BEGIN;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 UPDATE pxtest1 SET foobar = 'bbb' WHERE foobar = 'aaa';
 SELECT * FROM pxtest1;
  foobar 
@@ -45,7 +45,7 @@ SELECT gid FROM pg_prepared_xacts;
 (0 rows)
 
 -- Test COMMIT PREPARED
-BEGIN;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 INSERT INTO pxtest1 VALUES ('ddd');
 SELECT * FROM pxtest1;
  foobar 
@@ -70,7 +70,7 @@ SELECT * FROM pxtest1;
 (2 rows)
 
 -- Test duplicate gids
-BEGIN;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 UPDATE pxtest1 SET foobar = 'eee' WHERE foobar = 'ddd';
 SELECT * FROM pxtest1;
  foobar 
@@ -86,16 +86,8 @@ SELECT gid FROM pg_prepared_xacts;
  foo3
 (1 row)
 
-BEGIN;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 INSERT INTO pxtest1 VALUES ('fff');
-SELECT * FROM pxtest1;
- foobar 
---------
- aaa
- ddd
- fff
-(3 rows)
-
 -- This should fail, because the gid foo3 is already in use
 PREPARE TRANSACTION 'foo3';
 ERROR:  transaction identifier "foo3" is already in use
@@ -114,10 +106,53 @@ SELECT * FROM pxtest1;
  ddd
 (2 rows)
 
+-- Test serialization failure (SSI)
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+UPDATE pxtest1 SET foobar = 'eee' WHERE foobar = 'ddd';
+SELECT * FROM pxtest1;
+ foobar 
+--------
+ aaa
+ eee
+(2 rows)
+
+PREPARE TRANSACTION 'foo4';
+SELECT gid FROM pg_prepared_xacts;
+ gid  
+------
+ foo4
+(1 row)
+
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+SELECT * FROM pxtest1;
+ foobar 
+--------
+ aaa
+ ddd
+(2 rows)
+
+-- This should fail, because the two transactions have a write-skew anomaly
+INSERT INTO pxtest1 VALUES ('fff');
+ERROR:  could not serialize access due to read/write dependencies among transactions
+DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+HINT:  The transaction might succeed if retried.
+PREPARE TRANSACTION 'foo5';
+SELECT gid FROM pg_prepared_xacts;
+ gid  
+------
+ foo4
+(1 row)
+
+ROLLBACK PREPARED 'foo4';
+SELECT gid FROM pg_prepared_xacts;
+ gid 
+-----
+(0 rows)
+
 -- Clean up
 DROP TABLE pxtest1;
 -- Test subtransactions
-BEGIN;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
   CREATE TABLE pxtest2 (a int);
   INSERT INTO pxtest2 VALUES (1);
   SAVEPOINT a;
@@ -128,7 +163,7 @@ BEGIN;
 PREPARE TRANSACTION 'regress-one';
 CREATE TABLE pxtest3(fff int);
 -- Test shared invalidation
-BEGIN;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
   DROP TABLE pxtest3;
   CREATE TABLE pxtest4 (a int);
   INSERT INTO pxtest4 VALUES (1);
