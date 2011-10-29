@@ -156,6 +156,13 @@ InitArchiveFmt_Tar(ArchiveHandle *AH)
 	AH->ClonePtr = NULL;
 	AH->DeClonePtr = NULL;
 
+	AH->StartMasterParallelPtr = NULL;
+	AH->EndMasterParallelPtr = NULL;
+
+	AH->GetParallelStatePtr = NULL;
+	AH->WorkerJobDumpPtr = NULL;
+	AH->WorkerJobRestorePtr = NULL;
+
 	/*
 	 * Set up some special context used in compressing data.
 	 */

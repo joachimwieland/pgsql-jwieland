@@ -24,6 +24,7 @@
 #include "dumputils.h"
 
 #include <ctype.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -34,47 +35,6 @@
 #endif
 
 #include "libpq/libpq-fs.h"
-
-/*
- * Special exit values from worker children.  We reserve 0 for normal
- * success; 1 and other small values should be interpreted as crashes.
- */
-#define WORKER_CREATE_DONE		10
-#define WORKER_INHIBIT_DATA		11
-#define WORKER_IGNORED_ERRORS	12
-
-/*
- * Unix uses exit to return result from worker child, so function is void.
- * Windows thread result comes via function return.
- */
-#ifndef WIN32
-#define parallel_restore_result void
-#else
-#define parallel_restore_result DWORD
-#endif
-
-/* IDs for worker children are either PIDs or thread handles */
-#ifndef WIN32
-#define thandle pid_t
-#else
-#define thandle HANDLE
-#endif
-
-/* Arguments needed for a worker child */
-typedef struct _restore_args
-{
-	ArchiveHandle *AH;
-	TocEntry   *te;
-} RestoreArgs;
-
-/* State for each parallel activity slot */
-typedef struct _parallel_slot
-{
-	thandle		child_id;
-	RestoreArgs *args;
-} ParallelSlot;
-
-#define NO_SLOT (-1)
 
 /* state needed to save/restore an archive's output target */
 typedef struct _outputContext
@@ -128,22 +88,17 @@ static OutputContext SaveOutput(ArchiveHandle *AH);
 static void RestoreOutput(ArchiveHandle *AH, OutputContext savedContext);
 
 static int restore_toc_entry(ArchiveHandle *AH, TocEntry *te,
-				  RestoreOptions *ropt, bool is_parallel);
-static void restore_toc_entries_parallel(ArchiveHandle *AH);
-static thandle spawn_restore(RestoreArgs *args);
-static thandle reap_child(ParallelSlot *slots, int n_slots, int *work_status);
-static bool work_in_progress(ParallelSlot *slots, int n_slots);
-static int	get_next_slot(ParallelSlot *slots, int n_slots);
+							 RestoreOptions *ropt, bool is_parallel);
+static void restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate);
 static void par_list_header_init(TocEntry *l);
 static void par_list_append(TocEntry *l, TocEntry *te);
 static void par_list_remove(TocEntry *te);
 static TocEntry *get_next_work_item(ArchiveHandle *AH,
 				   TocEntry *ready_list,
-				   ParallelSlot *slots, int n_slots);
-static parallel_restore_result parallel_restore(RestoreArgs *args);
+				   ParallelState *pstate);
 static void mark_work_done(ArchiveHandle *AH, TocEntry *ready_list,
-			   thandle worker, int status,
-			   ParallelSlot *slots, int n_slots);
+			   int worker, int status,
+			   ParallelState *pstate);
 static void fix_dependencies(ArchiveHandle *AH);
 static bool has_lock_conflicts(TocEntry *te1, TocEntry *te2);
 static void repoint_table_dependencies(ArchiveHandle *AH,
@@ -153,8 +108,49 @@ static void reduce_dependencies(ArchiveHandle *AH, TocEntry *te,
 					TocEntry *ready_list);
 static void mark_create_done(ArchiveHandle *AH, TocEntry *te);
 static void inhibit_data_for_failed_table(ArchiveHandle *AH, TocEntry *te);
-static ArchiveHandle *CloneArchive(ArchiveHandle *AH);
-static void DeCloneArchive(ArchiveHandle *AH);
+
+static void ListenToChildren(ArchiveHandle *AH, ParallelState *pstate, bool do_wait);
+static void WaitForCommands(ArchiveHandle *AH, ParallelState *pstate, int childId);
+static void PrintStatus(ParallelState *pstate);
+static int GetIdleChild(ParallelState *pstate);
+static int ReapChildStatus(ParallelState *pstate, int *status);
+static bool HasEveryChildTerminated(ParallelState *pstate);
+static bool IsEveryChildIdle(ParallelState *pstate);
+
+#ifdef WIN32
+#define getMessageFromMaster(a,b,c) getMessageFromMasterWin32((a),(b),(c))
+#define sendMessageToMaster(a,b,c,d) sendMessageToMasterWin32((a),(b),(c),(d))
+#define getMessageFromChild(a,b,c,d) getMessageFromChildWin32((a),(b),(c),(d))
+#define sendMessageToChild(a,b,c,d) sendMessageToChildWin32((a),(b),(c),(d))
+static char *getMessageFromMasterWin32(ArchiveHandle *AH, ParallelState *pstate,
+									   int worker);
+static void sendMessageToMasterWin32(ArchiveHandle *AH, ParallelState *pstate,
+									 int worker, const char *str);
+static char *getMessageFromChildWin32(ArchiveHandle *AH, ParallelState *pstate,
+									  bool do_wait, int *childId);
+static void sendMessageToChildWin32(ArchiveHandle *AH, ParallelState *pstate,
+									int worker, const char *str);
+
+#else
+
+#define getMessageFromMaster(a,b,c) getMessageFromMasterUnix((a),(b),(c))
+#define sendMessageToMaster(a,b,c,d) sendMessageToMasterUnix((a),(b),(c),(d))
+#define getMessageFromChild(a,b,c,d) getMessageFromChildUnix((a),(b),(c),(d))
+#define sendMessageToChild(a,b,c,d) sendMessageToChildUnix((a),(b),(c),(d))
+static char *getMessageFromMasterUnix(ArchiveHandle *AH, ParallelState *pstate,
+									  int worker);
+static void sendMessageToMasterUnix(ArchiveHandle *AH, ParallelState *pstate,
+									int worker, const char *str);
+static char *getMessageFromChildUnix(ArchiveHandle *AH, ParallelState *pstate,
+									 bool do_wait, int *childId);
+static void sendMessageToChildUnix(ArchiveHandle *AH, ParallelState *pstate,
+								   int worker, const char *str);
+static char *readMessageFromPipe(int fd, bool allowBlock);
+#endif
+
+/* XXX: This will probably go away if the syncSnapshot patch gets committed */
+PGconn *g_conn;
+PGconn **g_conn_child;
 
 
 /*
@@ -408,7 +404,13 @@ RestoreArchive(Archive *AHX, RestoreOptions *ropt)
 	 * In parallel mode, turn control over to the parallel-restore logic.
 	 */
 	if (parallel_mode)
-		restore_toc_entries_parallel(AH);
+	{
+		ParallelState *pstate;
+		/* this will actually fork the processes */
+		pstate = ParallelBackupStart(AH, ropt->number_of_jobs, ropt);
+		restore_toc_entries_parallel(AH, pstate);
+		ParallelBackupEnd(AH, pstate);
+	}
 	else
 	{
 		for (te = AH->toc->next; te != AH->toc; te = te->next)
@@ -473,7 +475,7 @@ static int
 restore_toc_entry(ArchiveHandle *AH, TocEntry *te,
 				  RestoreOptions *ropt, bool is_parallel)
 {
-	int			retval = 0;
+	int			status = WORKER_OK;
 	teReqs		reqs;
 	bool		defnDumped;
 
@@ -515,7 +517,7 @@ restore_toc_entry(ArchiveHandle *AH, TocEntry *te,
 				if (ropt->noDataForFailedTables)
 				{
 					if (is_parallel)
-						retval = WORKER_INHIBIT_DATA;
+						status = WORKER_INHIBIT_DATA;
 					else
 						inhibit_data_for_failed_table(AH, te);
 				}
@@ -530,7 +532,7 @@ restore_toc_entry(ArchiveHandle *AH, TocEntry *te,
 				 * just set the return value.
 				 */
 				if (is_parallel)
-					retval = WORKER_CREATE_DONE;
+					status = WORKER_CREATE_DONE;
 				else
 					mark_create_done(AH, te);
 			}
@@ -648,7 +650,10 @@ restore_toc_entry(ArchiveHandle *AH, TocEntry *te,
 		}
 	}
 
-	return retval;
+	if (AH->public.n_errors > 0 && status == WORKER_OK)
+		status = WORKER_IGNORED_ERRORS;
+
+	return status;
 }
 
 /*
@@ -749,7 +754,8 @@ ArchiveEntry(Archive *AHX,
 			 const char *tag,
 			 const char *namespace,
 			 const char *tablespace,
-			 const char *owner, bool withOids,
+			 const char *owner,
+			 unsigned long int relpages, bool withOids,
 			 const char *desc, teSection section,
 			 const char *defn,
 			 const char *dropStmt, const char *copyStmt,
@@ -2066,46 +2072,108 @@ _allocAH(const char *FileSpec, const ArchiveFormat fmt,
 void
 WriteDataChunks(ArchiveHandle *AH)
 {
-	TocEntry   *te;
-	StartDataPtr startPtr;
-	EndDataPtr	endPtr;
+	TocEntry	   *te;
+	ParallelState  *pstate = NULL;
+
+	if (AH->GetParallelStatePtr)
+		pstate = (AH->GetParallelStatePtr)(AH);
 
 	for (te = AH->toc->next; te != AH->toc; te = te->next)
 	{
-		if (te->dataDumper != NULL)
+		if (!te->hadDumper)
+			continue;
+
+		printf("Dumping table %s (%d)\n", te->tag, te->dumpId);
+		/*
+		 * If we are in a parallel backup, we are always the master process.
+		 */
+		if (pstate)
 		{
-			AH->currToc = te;
-			/* printf("Writing data for %d (%x)\n", te->id, te); */
+			int		ret_child;
+			int		work_status;
 
-			if (strcmp(te->desc, "BLOBS") == 0)
+			for (;;)
 			{
-				startPtr = AH->StartBlobsPtr;
-				endPtr = AH->EndBlobsPtr;
+				int nTerm = 0;
+				while ((ret_child = ReapChildStatus(pstate, &work_status)) != NO_SLOT)
+				{
+					if (work_status != 0)
+						die_horribly(AH, modulename, "Error processing a parallel work item\n");
+
+					nTerm++;
+				}
+
+				/* We need to make sure that we have an idle child before dispatching
+				 * the next item. If nTerm > 0 we already have that (quick check). */
+				if (nTerm > 0)
+					break;
+
+				/* explicit check for an idle child */
+				if (GetIdleChild(pstate) != NO_SLOT)
+					break;
+
+				/*
+				 * If we have no idle child, read the result of one or more
+				 * children and loop the loop to call ReapChildStatus() on them
+				 */
+				ListenToChildren(AH, pstate, true);
 			}
-			else
-			{
-				startPtr = AH->StartDataPtr;
-				endPtr = AH->EndDataPtr;
-			}
 
-			if (startPtr != NULL)
-				(*startPtr) (AH, te);
-
-			/*
-			 * printf("Dumper arg for %d is %x\n", te->id, te->dataDumperArg);
-			 */
-
-			/*
-			 * The user-provided DataDumper routine needs to call
-			 * AH->WriteData
-			 */
-			(*te->dataDumper) ((Archive *) AH, te->dataDumperArg);
-
-			if (endPtr != NULL)
-				(*endPtr) (AH, te);
-			AH->currToc = NULL;
+			Assert(GetIdleChild(pstate) != NO_SLOT);
+			DispatchJobForTocEntry(AH, pstate, te, ACT_DUMP);
+		}
+		else
+		{
+			WriteDataChunksForTocEntry(AH, te);
 		}
 	}
+	if (pstate)
+	{
+		int		ret_child;
+		int		work_status;
+
+		/* Waiting for the remaining worker processes to finish */
+		/* XXX "worker" vs "child" */
+		while (!IsEveryChildIdle(pstate))
+		{
+			if ((ret_child = ReapChildStatus(pstate, &work_status)) == NO_SLOT)
+				ListenToChildren(AH, pstate, true);
+		}
+	}
+}
+
+void
+WriteDataChunksForTocEntry(ArchiveHandle *AH, TocEntry *te)
+{
+	StartDataPtr startPtr;
+	EndDataPtr	endPtr;
+
+	AH->currToc = te;
+
+	if (strcmp(te->desc, "BLOBS") == 0)
+	{
+		startPtr = AH->StartBlobsPtr;
+		endPtr = AH->EndBlobsPtr;
+	}
+	else
+	{
+		startPtr = AH->StartDataPtr;
+		endPtr = AH->EndDataPtr;
+	}
+
+	if (startPtr != NULL)
+		(*startPtr) (AH, te);
+
+	/*
+	 * The user-provided DataDumper routine needs to call
+	 * AH->WriteData
+	 */
+	(*te->dataDumper) ((Archive *) AH, te->dataDumperArg);
+
+	if (endPtr != NULL)
+		(*endPtr) (AH, te);
+
+	AH->currToc = NULL;
 }
 
 void
@@ -3073,10 +3141,12 @@ WriteHead(ArchiveHandle *AH)
 
 #ifndef HAVE_LIBZ
 	if (AH->compression != 0)
+	{
 		write_msg(modulename, "WARNING: requested compression not available in this "
 				  "installation -- archive will be uncompressed\n");
 
-	AH->compression = 0;
+		AH->compression = 0;
+	}
 #endif
 
 	WriteInt(AH, AH->compression);
@@ -3263,23 +3333,30 @@ dumpTimestamp(ArchiveHandle *AH, const char *msg, time_t tim)
  * RestoreArchive).
  */
 static void
-restore_toc_entries_parallel(ArchiveHandle *AH)
+restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate)
 {
 	RestoreOptions *ropt = AH->ropt;
-	int			n_slots = ropt->number_of_jobs;
-	ParallelSlot *slots;
+	ParallelSlot   *slots;
 	int			work_status;
-	int			next_slot;
 	bool		skipped_some;
 	TocEntry	pending_list;
 	TocEntry	ready_list;
 	TocEntry   *next_work_item;
-	thandle		ret_child;
+	int			ret_child;
 	TocEntry   *te;
 
 	ahlog(AH, 2, "entering restore_toc_entries_parallel\n");
 
-	slots = (ParallelSlot *) calloc(sizeof(ParallelSlot), n_slots);
+	/* XXX merged */
+	/* we haven't got round to making this work for all archive formats */
+	if (AH->ClonePtr == NULL || AH->ReopenPtr == NULL)
+		die_horribly(AH, modulename, "parallel restore is not supported with this archive file format\n");
+
+	/* doesn't work if the archive represents dependencies as OIDs, either */
+	if (AH->version < K_VERS_1_8)
+		die_horribly(AH, modulename, "parallel restore is not supported with archives made by pre-8.0 pg_dump\n");
+
+	slots = (ParallelSlot *) calloc(sizeof(ParallelSlot), ropt->number_of_jobs);
 
 	/* Adjust dependency information */
 	fix_dependencies(AH);
@@ -3397,8 +3474,8 @@ restore_toc_entries_parallel(ArchiveHandle *AH)
 	ahlog(AH, 1, "entering main parallel loop\n");
 
 	while ((next_work_item = get_next_work_item(AH, &ready_list,
-												slots, n_slots)) != NULL ||
-		   work_in_progress(slots, n_slots))
+												pstate)) != NULL ||
+		   !IsEveryChildIdle(pstate))
 	{
 		if (next_work_item != NULL)
 		{
@@ -3418,51 +3495,59 @@ restore_toc_entries_parallel(ArchiveHandle *AH)
 				continue;
 			}
 
-			if ((next_slot = get_next_slot(slots, n_slots)) != NO_SLOT)
-			{
-				/* There is work still to do and a worker slot available */
-				thandle		child;
-				RestoreArgs *args;
+			ahlog(AH, 1, "launching item %d %s %s\n",
+				  next_work_item->dumpId,
+				  next_work_item->desc, next_work_item->tag);
 
-				ahlog(AH, 1, "launching item %d %s %s\n",
-					  next_work_item->dumpId,
-					  next_work_item->desc, next_work_item->tag);
+			par_list_remove(next_work_item);
 
-				par_list_remove(next_work_item);
-
-				/* this memory is dealloced in mark_work_done() */
-				args = malloc(sizeof(RestoreArgs));
-				args->AH = CloneArchive(AH);
-				args->te = next_work_item;
-
-				/* run the step in a worker child */
-				child = spawn_restore(args);
-
-				slots[next_slot].child_id = child;
-				slots[next_slot].args = args;
-
-				continue;
-			}
-		}
-
-		/*
-		 * If we get here there must be work being done.  Either there is no
-		 * work available to schedule (and work_in_progress returned true) or
-		 * there are no slots available.  So we wait for a worker to finish,
-		 * and process the result.
-		 */
-		ret_child = reap_child(slots, n_slots, &work_status);
-
-		if (WIFEXITED(work_status))
-		{
-			mark_work_done(AH, &ready_list,
-						   ret_child, WEXITSTATUS(work_status),
-						   slots, n_slots);
+			Assert(GetIdleChild(pstate) != NO_SLOT);
+			DispatchJobForTocEntry(AH, pstate, next_work_item, ACT_RESTORE);
 		}
 		else
 		{
-			die_horribly(AH, modulename, "worker process crashed: status %d\n",
-						 work_status);
+			/* at least one child is working and we have nothing ready. */
+			Assert(!IsEveryChildIdle(pstate));
+		}
+
+		for (;;)
+		{
+			int nTerm = 0;
+
+			/*
+			 * In order to reduce dependencies as soon as possible and
+			 * especially to reap the status of children who are working on
+			 * items that pending items depend on, we do a non-blocking check
+			 * for ended children first.
+			 *
+			 * However, if we do not have any other work items currently that
+			 * children can work on, we do not busy-loop here but instead
+			 * really wait for at least one child to terminate. Hence we call
+			 * ListenToChildren(..., ..., true) in this case.
+			 */
+			ListenToChildren(AH, pstate, !next_work_item);
+
+			while ((ret_child = ReapChildStatus(pstate, &work_status)) != NO_SLOT)
+			{
+				nTerm++;
+				printf("Marking the child's work as done\n");
+				mark_work_done(AH, &ready_list, ret_child, work_status, pstate);
+			}
+
+			/* We need to make sure that we have an idle child before re-running the
+			 * loop. If nTerm > 0 we already have that (quick check). */
+			if (nTerm > 0)
+				break;
+
+			/* explicit check for an idle child */
+			if (GetIdleChild(pstate) != NO_SLOT)
+				break;
+
+			/*
+			 * If we have no idle child, read the result of one or more
+			 * children and loop the loop to call ReapChildStatus() on them
+			 */
+			ListenToChildren(AH, pstate, true);
 		}
 	}
 
@@ -3491,121 +3576,6 @@ restore_toc_entries_parallel(ArchiveHandle *AH)
 
 	/* The ACLs will be handled back in RestoreArchive. */
 }
-
-/*
- * create a worker child to perform a restore step in parallel
- */
-static thandle
-spawn_restore(RestoreArgs *args)
-{
-	thandle		child;
-
-	/* Ensure stdio state is quiesced before forking */
-	fflush(NULL);
-
-#ifndef WIN32
-	child = fork();
-	if (child == 0)
-	{
-		/* in child process */
-		parallel_restore(args);
-		die_horribly(args->AH, modulename,
-					 "parallel_restore should not return\n");
-	}
-	else if (child < 0)
-	{
-		/* fork failed */
-		die_horribly(args->AH, modulename,
-					 "could not create worker process: %s\n",
-					 strerror(errno));
-	}
-#else
-	child = (HANDLE) _beginthreadex(NULL, 0, (void *) parallel_restore,
-									args, 0, NULL);
-	if (child == 0)
-		die_horribly(args->AH, modulename,
-					 "could not create worker thread: %s\n",
-					 strerror(errno));
-#endif
-
-	return child;
-}
-
-/*
- *	collect status from a completed worker child
- */
-static thandle
-reap_child(ParallelSlot *slots, int n_slots, int *work_status)
-{
-#ifndef WIN32
-	/* Unix is so much easier ... */
-	return wait(work_status);
-#else
-	static HANDLE *handles = NULL;
-	int			hindex,
-				snum,
-				tnum;
-	thandle		ret_child;
-	DWORD		res;
-
-	/* first time around only, make space for handles to listen on */
-	if (handles == NULL)
-		handles = (HANDLE *) calloc(sizeof(HANDLE), n_slots);
-
-	/* set up list of handles to listen to */
-	for (snum = 0, tnum = 0; snum < n_slots; snum++)
-		if (slots[snum].child_id != 0)
-			handles[tnum++] = slots[snum].child_id;
-
-	/* wait for one to finish */
-	hindex = WaitForMultipleObjects(tnum, handles, false, INFINITE);
-
-	/* get handle of finished thread */
-	ret_child = handles[hindex - WAIT_OBJECT_0];
-
-	/* get the result */
-	GetExitCodeThread(ret_child, &res);
-	*work_status = res;
-
-	/* dispose of handle to stop leaks */
-	CloseHandle(ret_child);
-
-	return ret_child;
-#endif
-}
-
-/*
- * are we doing anything now?
- */
-static bool
-work_in_progress(ParallelSlot *slots, int n_slots)
-{
-	int			i;
-
-	for (i = 0; i < n_slots; i++)
-	{
-		if (slots[i].child_id != 0)
-			return true;
-	}
-	return false;
-}
-
-/*
- * find the first free parallel slot (if any).
- */
-static int
-get_next_slot(ParallelSlot *slots, int n_slots)
-{
-	int			i;
-
-	for (i = 0; i < n_slots; i++)
-	{
-		if (slots[i].child_id == 0)
-			return i;
-	}
-	return NO_SLOT;
-}
-
 
 /*
  * Check if te1 has an exclusive lock requirement for an item that te2 also
@@ -3680,7 +3650,7 @@ par_list_remove(TocEntry *te)
  */
 static TocEntry *
 get_next_work_item(ArchiveHandle *AH, TocEntry *ready_list,
-				   ParallelSlot *slots, int n_slots)
+				   ParallelState *pstate)
 {
 	bool		pref_non_data = false;	/* or get from AH->ropt */
 	TocEntry   *data_te = NULL;
@@ -3695,11 +3665,11 @@ get_next_work_item(ArchiveHandle *AH, TocEntry *ready_list,
 	{
 		int			count = 0;
 
-		for (k = 0; k < n_slots; k++)
-			if (slots[k].args->te != NULL &&
-				slots[k].args->te->section == SECTION_DATA)
+		for (k = 0; k < pstate->numWorkers; k++)
+			if (pstate->parallelSlot[k].args->te != NULL &&
+				pstate->parallelSlot[k].args->te->section == SECTION_DATA)
 				count++;
-		if (n_slots == 0 || count * 4 < n_slots)
+		if (pstate->numWorkers == 0 || count * 4 < pstate->numWorkers)
 			pref_non_data = false;
 	}
 
@@ -3715,13 +3685,13 @@ get_next_work_item(ArchiveHandle *AH, TocEntry *ready_list,
 		 * that a currently running item also needs lock on, or vice versa. If
 		 * so, we don't want to schedule them together.
 		 */
-		for (i = 0; i < n_slots && !conflicts; i++)
+		for (i = 0; i < pstate->numWorkers && !conflicts; i++)
 		{
 			TocEntry   *running_te;
 
-			if (slots[i].args == NULL)
+			if (pstate->parallelSlot[i].ChildStatus != CS_WORKING)
 				continue;
-			running_te = slots[i].args->te;
+			running_te = pstate->parallelSlot[i].args->te;
 
 			if (has_lock_conflicts(te, running_te) ||
 				has_lock_conflicts(running_te, te))
@@ -3756,61 +3726,29 @@ get_next_work_item(ArchiveHandle *AH, TocEntry *ready_list,
 /*
  * Restore a single TOC item in parallel with others
  *
- * this is the procedure run as a thread (Windows) or a
- * separate process (everything else).
+ * this is run in the worker, i.e. in a thread (Windows) or a separate process
+ * (everything else). A worker process executes several such work items during
+ * a parallel backup or restore. Once we terminate here and report back that
+ * our work is finished, the master process will assign us a new work item.
  */
-static parallel_restore_result
-parallel_restore(RestoreArgs *args)
+int
+parallel_restore(ParallelArgs *args)
 {
 	ArchiveHandle *AH = args->AH;
 	TocEntry   *te = args->te;
 	RestoreOptions *ropt = AH->ropt;
-	int			retval;
-
-	/*
-	 * Close and reopen the input file so we have a private file pointer that
-	 * doesn't stomp on anyone else's file pointer, if we're actually going to
-	 * need to read from the file. Otherwise, just close it except on Windows,
-	 * where it will possibly be needed by other threads.
-	 *
-	 * Note: on Windows, since we are using threads not processes, the reopen
-	 * call *doesn't* close the original file pointer but just open a new one.
-	 */
-	if (te->section == SECTION_DATA)
-		(AH->ReopenPtr) (AH);
-#ifndef WIN32
-	else
-		(AH->ClosePtr) (AH);
-#endif
-
-	/*
-	 * We need our own database connection, too
-	 */
-	ConnectDatabase((Archive *) AH, ropt->dbname,
-					ropt->pghost, ropt->pgport, ropt->username,
-					ropt->promptPassword);
+	int			status;
 
 	_doSetFixedOutputState(AH);
 
+	Assert(AH->connection != NULL);
+
+	AH->public.n_errors = 0;
+
 	/* Restore the TOC item */
-	retval = restore_toc_entry(AH, te, ropt, true);
+	status = restore_toc_entry(AH, te, ropt, true);
 
-	/* And clean up */
-	PQfinish(AH->connection);
-	AH->connection = NULL;
-
-	/* If we reopened the file, we are done with it, so close it now */
-	if (te->section == SECTION_DATA)
-		(AH->ClosePtr) (AH);
-
-	if (retval == 0 && AH->public.n_errors)
-		retval = WORKER_IGNORED_ERRORS;
-
-#ifndef WIN32
-	exit(retval);
-#else
-	return retval;
-#endif
+	return status;
 }
 
 
@@ -3822,25 +3760,12 @@ parallel_restore(RestoreArgs *args)
  */
 static void
 mark_work_done(ArchiveHandle *AH, TocEntry *ready_list,
-			   thandle worker, int status,
-			   ParallelSlot *slots, int n_slots)
+			   int worker, int status,
+			   ParallelState *pstate)
 {
 	TocEntry   *te = NULL;
-	int			i;
 
-	for (i = 0; i < n_slots; i++)
-	{
-		if (slots[i].child_id == worker)
-		{
-			slots[i].child_id = 0;
-			te = slots[i].args->te;
-			DeCloneArchive(slots[i].args->AH);
-			free(slots[i].args);
-			slots[i].args = NULL;
-
-			break;
-		}
-	}
+	te = pstate->parallelSlot[worker].args->te;
 
 	if (te == NULL)
 		die_horribly(AH, modulename, "could not find slot of finished worker\n");
@@ -4195,10 +4120,8 @@ inhibit_data_for_failed_table(ArchiveHandle *AH, TocEntry *te)
  *
  * Enough of the structure is cloned to ensure that there is no
  * conflict between different threads each with their own clone.
- *
- * These could be public, but no need at present.
  */
-static ArchiveHandle *
+ArchiveHandle *
 CloneArchive(ArchiveHandle *AH)
 {
 	ArchiveHandle *clone;
@@ -4236,7 +4159,7 @@ CloneArchive(ArchiveHandle *AH)
  *
  * Note: we assume any clone-local connection was already closed.
  */
-static void
+void
 DeCloneArchive(ArchiveHandle *AH)
 {
 	/* Clear format-specific state */
@@ -4256,3 +4179,820 @@ DeCloneArchive(ArchiveHandle *AH)
 
 	free(AH);
 }
+
+/*
+ * This function is called by both UNIX and Windows variants to set up a
+ * worker process.
+ */
+static void
+SetupChild(ArchiveHandle *AH, ParallelState *pstate, int childId, RestoreOptions *ropt)
+{
+	if (ropt)
+	{
+		/*
+		 * Restore mode - We need our own database connection, too
+		 */
+		AH->connection = NULL;
+		printf("Connecting: Db: %s host %s port %s user %s\n", ropt->dbname,
+						ropt->pghost ? ropt->pghost : "(null)",
+						ropt->pgport ? ropt->pgport : "(null)",
+						ropt->username ? ropt->username : "(null)");
+
+		ConnectDatabase((Archive *) AH, ropt->dbname,
+						ropt->pghost, ropt->pgport, ropt->username,
+						ropt->promptPassword);
+		(AH->ReopenPtr) (AH);
+	}
+	else
+	{
+		/*
+		 * Dump mode - The parent has opened our connection
+		 */
+		Assert(g_conn_child && g_conn_child[childId]);
+		AH->connection = g_conn_child[childId];
+
+#ifndef WIN32
+		free(g_conn_child);
+		g_conn_child = NULL;
+#endif
+	}
+
+	/*
+	 * The child must not use g_conn. The unix version (multiple processes)
+	 * actually could but the windows version can't (single process, multiple
+	 * threads).
+	 */
+	g_conn = NULL;
+
+	Assert(AH->connection != NULL);
+
+	/*
+	 * We don't actually need that on Unix where we can send to the
+	 * pipe any time. We need it on Windows to make sure that the child
+	 * has already set up its Message Queue when the master process wants to
+	 * send it the first object to dump. For consistency reasons however just
+	 * do it on Unix as well.
+	 */
+	sendMessageToMaster(AH, pstate, childId, "INIT OK");
+
+	WaitForCommands(AH, pstate, childId);
+}
+
+#ifdef WIN32
+typedef struct {
+	ArchiveHandle  *AH;
+	RestoreOptions *ropt;
+	int				childId;
+	ParallelState  *pstate;
+} ChildInfo;
+
+unsigned __stdcall
+init_spawned_child_win32(ChildInfo *ci)
+{
+	ArchiveHandle  *AH = ci->AH;
+	RestoreOptions *ropt = ci->ropt;
+	MSG				msg;
+
+	/* make sure that we have a Message Queue */
+	PeekMessage(&msg, NULL, WM_USER, WM_USER, PM_NOREMOVE);
+
+	SetupChild(AH, ci->pstate, ci->childId, ropt);
+
+	DeCloneArchive(AH);
+	_endthreadex(0);
+	return 0;
+}
+#endif
+
+/*
+ * This function starts the parallel dump or restore by spawning off the child
+ * processes in both Unix and Windows. For Windows, it creates a number of
+ * threads while it does a fork() on Unix.
+ */
+ParallelState *
+ParallelBackupStart(ArchiveHandle *AH, int numWorkers, RestoreOptions *ropt)
+{
+	ParallelState  *pstate;
+	int				i;
+
+	Assert(numWorkers > 0);
+
+	/* Ensure stdio state is quiesced before forking */
+	fflush(NULL);
+
+	pstate = (ParallelState *) malloc(sizeof(ParallelState));
+	if (!pstate)
+		die_horribly(AH, modulename, "out of memory\n");
+	memset((void *) pstate, 0, sizeof(ParallelState));
+
+	pstate->numWorkers = numWorkers;
+
+	if (numWorkers == 1)
+		return pstate;
+
+	pstate->parallelSlot = (ParallelSlot *) malloc(numWorkers * sizeof(ParallelSlot));
+
+#ifdef WIN32
+	{
+		MSG		msg;
+		/* make sure that we have a Message Queue in the master */
+		PeekMessage(&msg, NULL, WM_USER, WM_USER, PM_NOREMOVE);
+	}
+	pstate->masterHandle = GetCurrentThreadId();
+#endif
+
+	for (i = 0; i < numWorkers; i++)
+	{
+#ifdef WIN32
+		ChildInfo  *ci = (ChildInfo *) malloc(sizeof(ChildInfo));
+		DWORD		thandle;
+
+		ci->ropt = ropt;
+		ci->childId = i;
+		ci->AH = CloneArchive(AH);
+		/* children will only look up the master's handle here */
+		ci->pstate = pstate;
+
+		_beginthreadex(NULL, 0, &init_spawned_child_win32,
+					   ci, 0, (unsigned int *) &thandle);
+
+		pstate->parallelSlot[i].handle = thandle;
+#else
+		pid_t	pid;
+		int		pipeMW[2], pipeWM[2];
+
+		if (pipe(pipeMW) < 0 || pipe(pipeWM) < 0)
+			die_horribly(AH, modulename, "Cannot create communication channels: %s",
+						 strerror(errno));
+
+		pid = fork();
+		if (pid == 0)
+		{
+			/* we are the worker */
+			int j;
+
+			close(pipeWM[0]);	/* close read end of Worker -> Master */
+			close(pipeMW[1]);	/* close write end of Master -> Worker */
+
+			/* Close all inherited fd's for communication with the other workers */
+			for (j = 0; j < i; j++)
+			{
+				close(pstate->parallelSlot[j].pipeRead);
+				close(pstate->parallelSlot[j].pipeWrite);
+			}
+
+			/*
+			 * When we fork here, our information in pstate is still partial
+			 * but it already contains all the information we need. Also note
+			 * that the master process uses those exact same fields in his copy
+			 * of the structure with the exact opposite fd's.
+			 */
+			pstate->parallelSlot[i].pipeRead = pipeMW[0];
+			pstate->parallelSlot[i].pipeWrite = pipeWM[1];
+
+			SetupChild(AH, pstate, i, ropt);
+
+			close(pstate->parallelSlot[i].pipeRead);
+			close(pstate->parallelSlot[i].pipeWrite);
+			exit(0);
+		}
+		else if (pid < 0)
+			/* fork failed */
+			die_horribly(AH, modulename,
+						 "could not create worker process: %s\n",
+						 strerror(errno));
+
+		/* we are the Master */
+		Assert(pid > 0);
+		close(pipeWM[1]);	/* close write end of Worker -> Master */
+		close(pipeMW[0]);	/* close read end of Master -> Worker */
+
+		pstate->parallelSlot[i].pipeWrite = pipeMW[1];
+		pstate->parallelSlot[i].pipeRead = pipeWM[0];
+#endif
+
+		pstate->parallelSlot[i].args = (ParallelArgs *) malloc(sizeof(ParallelArgs));
+		pstate->parallelSlot[i].args->AH = AH;
+		pstate->parallelSlot[i].args->te = NULL;
+		pstate->parallelSlot[i].ChildStatus = CS_INIT;
+	}
+
+	/* now wait for the children to come up and send their INIT OK message */
+	ListenToChildren(AH, pstate, true);
+
+	return pstate;
+}
+
+void
+ParallelBackupEnd(ArchiveHandle *AH, ParallelState *pstate)
+{
+	int i;
+
+	if (pstate->numWorkers == 1)
+		return;
+
+	PrintStatus(pstate);
+	Assert(IsEveryChildIdle(pstate));
+	printf("Asking children to terminate\n");
+
+	for (i = 0; i < pstate->numWorkers; i++)
+	{
+		printf("Asking child %d to terminate\n", i);
+
+		sendMessageToChild(AH, pstate, i, "TERMINATE");
+
+		pstate->parallelSlot[i].ChildStatus = CS_WORKING;
+	}
+
+	while (!HasEveryChildTerminated(pstate))
+	{
+		ListenToChildren(AH, pstate, true);
+	}
+	PrintStatus(pstate);
+
+#ifndef WIN32
+	for (i = 0; i < pstate->numWorkers; i++)
+	{
+		close(pstate->parallelSlot[i].pipeRead);
+		close(pstate->parallelSlot[i].pipeWrite);
+	}
+#endif
+
+	free(pstate);
+}
+
+
+/*
+ * The sequence is the following (for dump, similar for restore):
+ *
+ * Master                                   Worker
+ *
+ *                                          enters WaitForCommands()
+ * DispatchJobForTocEntry(...te...)
+ *
+ * [ Worker is IDLE ]
+ *
+ * arg = (StartMasterParallelPtr)()
+ * send: DUMP arg
+ *                                          receive: DUMP arg
+ *                                          str = (WorkerJobDumpPtr)(arg)
+ * [ Worker is WORKING ]                    ... gets te from arg ...
+ *                                          ... dump te ...
+ *                                          send: OK DUMP info
+ *
+ * In ListenToChildren():
+ *
+ * [ Worker is FINISHED ]
+ * receive: OK DUMP info
+ * status = (EndMasterParallelPtr)(info)
+ *
+ * In ReapChildStatus(&ptr):
+ * *ptr = status;
+ * [ Worker is IDLE ]
+ */
+
+void
+DispatchJobForTocEntry(ArchiveHandle *AH, ParallelState *pstate, TocEntry *te,
+					   T_Action act)
+{
+	int		worker;
+	char   *arg;
+
+	Assert(GetIdleChild(pstate) != NO_SLOT);
+
+	/* our caller must make sure that at least one child is idle */
+	worker = GetIdleChild(pstate);
+	Assert(worker != NO_SLOT);
+
+	arg = (AH->StartMasterParallelPtr)(AH, te, act);
+
+	sendMessageToChild(AH, pstate, worker, arg);
+
+	pstate->parallelSlot[worker].ChildStatus = CS_WORKING;
+	pstate->parallelSlot[worker].args->te = te;
+	PrintStatus(pstate);
+}
+
+
+static void
+PrintStatus(ParallelState *pstate)
+{
+	int i;
+	printf("------Status------\n");
+	for (i = 0; i < pstate->numWorkers; i++)
+	{
+		printf("Status of child %d: ", i);
+		switch (pstate->parallelSlot[i].ChildStatus)
+		{
+			case CS_INIT:
+				printf("INIT");
+				break;
+			case CS_IDLE:
+				printf("IDLE");
+				break;
+			case CS_WORKING:
+				printf("WORKING");
+				break;
+			case CS_FINISHED:
+				printf("FINISHED");
+				break;
+			case CS_TERMINATED:
+				printf("TERMINATED");
+				break;
+		}
+		printf("\n");
+	}
+	printf("------------\n");
+}
+
+
+/*
+ * find the first free parallel slot (if any).
+ */
+static int
+GetIdleChild(ParallelState *pstate)
+{
+	int i;
+	for (i = 0; i < pstate->numWorkers; i++)
+		if (pstate->parallelSlot[i].ChildStatus == CS_IDLE)
+			return i;
+	return NO_SLOT;
+}
+
+static bool
+HasEveryChildTerminated(ParallelState *pstate)
+{
+	int i;
+	for (i = 0; i < pstate->numWorkers; i++)
+		if (pstate->parallelSlot[i].ChildStatus != CS_TERMINATED)
+			return false;
+	return true;
+}
+
+static bool
+IsEveryChildIdle(ParallelState *pstate)
+{
+	int i;
+	for (i = 0; i < pstate->numWorkers; i++)
+		if (pstate->parallelSlot[i].ChildStatus != CS_IDLE)
+			return false;
+	return true;
+}
+
+static void
+lockTableNoWait(ArchiveHandle *AH, TocEntry *te)
+{
+	const char *qualId;
+	PQExpBuffer query = createPQExpBuffer();
+	PGresult   *res;
+
+	Assert(AH->format == archDirectory);
+	Assert(strcmp(te->desc, "BLOBS") != 0);
+
+	/*
+	 * We are only locking tables and thus we can peek at the DROP command
+	 * which contains the fully qualified name.
+	 *
+	 * Additionally, strlen("DROP") == strlen("LOCK").
+	 */
+	appendPQExpBuffer(query, "SELECT pg_namespace.nspname,"
+							 "       pg_class.relname "
+							 "  FROM pg_class "
+							 "  JOIN pg_namespace on pg_namespace.oid = relnamespace "
+							 " WHERE pg_class.oid = %d", te->catalogId.oid);
+
+	res = PQexec(AH->connection, query->data);
+
+	if (!res || PQresultStatus(res) != PGRES_TUPLES_OK)
+		die_horribly(AH, modulename, "could not get relation name for oid %d: %s",
+					 te->catalogId.oid, PQerrorMessage(AH->connection));
+
+	resetPQExpBuffer(query);
+
+	qualId = fmtQualifiedId(PQgetvalue(res, 0, 0),
+							PQgetvalue(res, 0, 1),
+							AH->public.remoteVersion);
+
+	appendPQExpBuffer(query, "LOCK TABLE %s IN ACCESS SHARE MODE NOWAIT", qualId);
+	PQclear(res);
+
+	printf("Locking table: %s\n", query->data);
+
+	res = PQexec(AH->connection, query->data);
+
+	if (!res || PQresultStatus(res) != PGRES_COMMAND_OK)
+		die_horribly(AH, modulename, "could not lock table %s: %s",
+					 qualId, PQerrorMessage(AH->connection));
+
+	PQclear(res);
+	destroyPQExpBuffer(query);
+}
+
+/*
+ * At the moment we do not have format specific arguments so we can do the whole
+ * argument parsing here and need not pass them to the format-specific routine.
+ *
+ * On the other hand we do have format specific return values (the directory format
+ * returns the length of the file created) so we return a string in this case to be
+ * open for future improvement. We could also return a checksum or the like in the
+ * future.
+ */
+#define messageStartsWith(msg, prefix) \
+	(strncmp(msg, prefix, strlen(prefix)) == 0)
+#define messageEquals(msg, pattern) \
+	(strcmp(msg, pattern) == 0)
+static void
+WaitForCommands(ArchiveHandle *AH, ParallelState *pstate, int childId)
+{
+	char	   *command;
+	DumpId		dumpId;
+	int			nBytes;
+	bool		shouldExit = false;
+	char	   *str = NULL;
+	TocEntry   *te;
+
+	for(;;)
+	{
+		command = getMessageFromMaster(AH, pstate, childId);
+
+		if (messageStartsWith(command, "DUMP "))
+		{
+			Assert(AH->format == archDirectory);
+			sscanf(command + strlen("DUMP "), "%d%n", &dumpId, &nBytes);
+			Assert(nBytes == strlen(command) - strlen("DUMP "));
+
+			printf("DumpId: %d\n", dumpId);
+			te = getTocEntryByDumpId(AH, dumpId);
+			printf("got TocEntry for %s\n", te->tag);
+			Assert(te != NULL);
+
+			/*
+			 * Lock the table but with NOWAIT. Note that the parent is already
+			 * holding a lock. If we cannot acquire another ACCESS SHARE MODE
+			 * lock, then somebody else has requested an exclusive lock since
+			 * then. lockTableNoWait dies in this case to prevent deadlock.
+			 */
+			if (strcmp(te->desc, "BLOBS") != 0)
+				lockTableNoWait(AH, te);
+
+			str = (AH->WorkerJobDumpPtr)(AH, te);
+
+			Assert(AH->connection != NULL);
+		}
+		else if (messageStartsWith(command, "RESTORE "))
+		{
+			Assert(AH->format == archDirectory || AH->format == archCustom);
+			Assert(AH->connection != NULL);
+
+			sscanf(command + strlen("RESTORE "), "%d%n", &dumpId, &nBytes);
+			Assert(nBytes == strlen(command) - strlen("RESTORE "));
+
+			te = getTocEntryByDumpId(AH, dumpId);
+			Assert(te != NULL);
+			str = (AH->WorkerJobRestorePtr)(AH, te);
+
+			Assert(AH->connection != NULL);
+		}
+		else if (messageEquals(command, "TERMINATE"))
+		{
+			printf("Terminating in %d\n", getpid());
+			PQfinish(AH->connection);
+			str = "TERMINATE OK";
+			shouldExit = true;
+		}
+		else
+		{
+			die_horribly(AH, modulename,
+						 "Unknown command on communication channel: %s", command);
+		}
+		sendMessageToMaster(AH, pstate, childId, str);
+		if (shouldExit)
+			return;
+	}
+}
+
+/*
+ * Note the status change:
+ *
+ * DispatchJobForTocEntry		CS_IDLE -> CS_WORKING
+ * ListenToChildren				CS_WORKING -> CS_FINISHED / CS_TERMINATED
+ * ReapChildStatus				CS_FINISHED -> CS_IDLE
+ *
+ * Just calling ReapChildStatus() when all children are working might or might
+ * not give you an idle child because you need to call ListenToChildren() in
+ * between and only thereafter ReapChildStatus(). This is necessary in order to
+ * get and deal with the status (=result) of the child's execution.
+ */
+static void
+ListenToChildren(ArchiveHandle *AH, ParallelState *pstate, bool do_wait)
+{
+	int		childId;
+	char   *msg;
+
+	msg = getMessageFromChild(AH, pstate, do_wait, &childId);
+
+	if (!msg)
+	{
+		Assert(!do_wait);
+		return;
+	}
+
+	if (messageStartsWith(msg, "INIT OK"))
+	{
+		pstate->parallelSlot[childId].ChildStatus = CS_IDLE;
+		return;
+	}
+
+	if (messageStartsWith(msg, "OK "))
+	{
+		char	   *statusString;
+		TocEntry   *te;
+
+		printf("Got OK with information from child %d (%s)\n", childId, msg);
+
+		pstate->parallelSlot[childId].ChildStatus = CS_FINISHED;
+		te = pstate->parallelSlot[childId].args->te;
+		if (messageStartsWith(msg, "OK RESTORE "))
+		{
+			statusString = msg + strlen("OK RESTORE ");
+			pstate->parallelSlot[childId].status =
+				(AH->EndMasterParallelPtr)
+					(AH, te, statusString, ACT_RESTORE);
+		}
+		else if (messageStartsWith(msg, "OK DUMP "))
+		{
+			statusString = msg + strlen("OK DUMP ");
+			pstate->parallelSlot[childId].status =
+				(AH->EndMasterParallelPtr)
+					(AH, te, statusString, ACT_DUMP);
+		}
+		else
+			die_horribly(AH, modulename, "Invalid message received from child: %s", msg);
+	}
+	else if (messageStartsWith(msg, "TERMINATE OK"))
+	{
+		/* this child is idle again */
+		printf("Child %d has terminated\n", childId);
+		pstate->parallelSlot[childId].ChildStatus = CS_TERMINATED;
+		pstate->parallelSlot[childId].status = 0;
+	}
+	else
+	{
+		die_horribly(AH, modulename, "Invalid message received from child: %s", msg);
+	}
+	PrintStatus(pstate);
+
+	/* both Unix and Win32 return malloc()ed space */
+	free(msg);
+}
+
+static int
+ReapChildStatus(ParallelState *pstate, int *status)
+{
+	int i;
+
+	for (i = 0; i < pstate->numWorkers; i++)
+	{
+		if (pstate->parallelSlot[i].ChildStatus == CS_FINISHED)
+		{
+			*status = pstate->parallelSlot[i].status;
+			pstate->parallelSlot[i].status = 0;
+			pstate->parallelSlot[i].ChildStatus = CS_IDLE;
+			PrintStatus(pstate);
+			return i;
+		}
+	}
+	return NO_SLOT;
+}
+
+#ifdef WIN32
+static char *
+getMessageFromMasterWin32(ArchiveHandle *AH, ParallelState *pstate, int worker)
+{
+	MSG	msg;
+
+	if (GetMessage(&msg, (HWND) -1, WM_USER+1, WM_USER+1) <= 0)
+		die_horribly(AH, modulename, "Error retrieving message from master");
+	Assert(msg.wParam == (WPARAM) -1);
+	return (char *) msg.lParam;
+}
+
+static char *
+getMessageFromChildWin32(ArchiveHandle *AH, ParallelState *pstate, bool do_wait, int *childId)
+{
+	MSG	msg;
+
+	if (!do_wait)
+		if (!PeekMessage(&msg, (HWND) -1, WM_USER, WM_USER, PM_NOREMOVE))
+			return NULL;
+
+	/* there is a message or we wait for one */
+	if (GetMessage(&msg, (HWND) -1, WM_USER, WM_USER) <= 0)
+		die_horribly(AH, modulename, "Error retrieving message from child");
+
+	*childId = msg.wParam;
+	return (char *) msg.lParam;
+}
+
+static void
+sendMessageToMasterWin32(ArchiveHandle *AH, ParallelState *pstate, int worker, const char *str)
+{
+	DWORD	masterHandle = pstate->masterHandle;
+	char   *msg = strdup(str);
+
+	if (!PostThreadMessage(masterHandle, (UINT) WM_USER,
+						   (WPARAM) worker, (LPARAM) msg))
+	{
+		DWORD err = GetLastError();
+		die_horribly(AH, modulename,
+					 "Error sending message to master id %d: %s, errcode: %d\n",
+					 masterHandle, str, err);
+	}
+}
+
+static void
+sendMessageToChildWin32(ArchiveHandle *AH, ParallelState *pstate, int worker, const char *str)
+{
+	char   *msg = strdup(str);
+	DWORD	workerHandle = pstate->parallelSlot[worker].handle;
+
+	printf("workerHandle: %d, msg: %s\n", workerHandle, msg);
+	if (!PostThreadMessage(workerHandle, WM_USER+1, (WPARAM) -1, (LPARAM) msg))
+	{
+		DWORD err = GetLastError();
+		if (err == ERROR_INVALID_THREAD_ID)
+			printf("ERROR_INVALID_THREAD_ID\n");
+		else
+			printf("not ERROR_INVALID_THREAD_ID\n");
+		die_horribly(AH, modulename, "Error sending message to the child");
+	}
+}
+#endif
+
+#ifndef WIN32
+static char *
+getMessageFromMasterUnix(ArchiveHandle *AH, ParallelState *pstate, int worker)
+{
+	return readMessageFromPipe(pstate->parallelSlot[worker].pipeRead, true);
+}
+
+
+static void
+sendMessageToMasterUnix(ArchiveHandle *AH, ParallelState *pstate, int worker, const char *str)
+{
+	int len = strlen(str) + 1;
+
+	if (write(pstate->parallelSlot[worker].pipeWrite, str, len) != len)
+		die_horribly(AH, modulename,
+					 "Error writing to the communication channel: %s",
+					 strerror(errno));
+}
+
+static void
+sendMessageToChildUnix(ArchiveHandle *AH, ParallelState *pstate, int worker, const char *str)
+{
+	int len = strlen(str) + 1;
+
+	if (write(pstate->parallelSlot[worker].pipeWrite, str, len) != len)
+		die_horribly(AH, modulename,
+					 "Error writing to the communication channel: %s",
+					 strerror(errno));
+}
+
+static char *
+getMessageFromChildUnix(ArchiveHandle *AH, ParallelState *pstate, bool do_wait, int *childId)
+{
+	int			i;
+	fd_set		childset;
+	int			maxFd = -1;
+	struct		timeval nowait = { 0, 0 };
+
+	FD_ZERO(&childset);
+
+	for (i = 0; i < pstate->numWorkers; i++)
+	{
+		if (pstate->parallelSlot[i].ChildStatus == CS_TERMINATED)
+			continue;
+		FD_SET(pstate->parallelSlot[i].pipeRead, &childset);
+		if (pstate->parallelSlot[i].pipeRead > maxFd)
+			maxFd = pstate->parallelSlot[i].pipeRead;
+	}
+
+	if (do_wait)
+	{
+		fd_set	backup;
+		do
+		{
+			backup = childset;
+			i = select(maxFd + 1, &backup, NULL, NULL, NULL);  /* no timeout */
+		}
+		while (i < 0 && errno == EINTR);
+		Assert(i != 0);
+		childset = backup;
+	}
+	else
+	{
+		if ((i = select(maxFd + 1, &childset, NULL, NULL, &nowait)) == 0)
+			return NULL;
+	}
+
+	if (i < 0)
+	{
+		write_msg(NULL, "Error in ListenToChildren(): %s", strerror(errno));
+		exit(1);
+	}
+
+	for (i = 0; i < pstate->numWorkers; i++)
+	{
+		char	   *msg;
+
+		if (!FD_ISSET(pstate->parallelSlot[i].pipeRead, &childset))
+			continue;
+
+		if ((msg = readMessageFromPipe(pstate->parallelSlot[i].pipeRead, false)))
+		{
+			*childId = i;
+			return msg;
+		}
+	}
+	Assert(false);
+	return NULL;
+}
+
+static char *
+readMessageFromPipe(int fd, bool allowBlock)
+{
+	char   *msg;
+	int		msgsize, bufsize;
+	int		ret;
+	int		flags;
+
+	/*
+	 * The problem here is that we need to deal with several possibilites:
+	 * we could receive only a partial message or several messages at once.
+	 * The caller expects us to return exactly one message however.
+	 *
+	 * We could either read in as much as we can and keep track of what we
+	 * delivered back to the caller or we just read byte by byte. Once we see
+	 * (char) 0, we know that it's the message's end. This is quite inefficient
+	 * but since we are reading only on the command channel, the performance
+	 * loss does not seem worth the trouble of keeping internal states for
+	 * different file descriptors.
+	 */
+
+	/* XXX set this to some reasonable initial value for a release */
+	bufsize = 1;
+	msg = (char *) malloc(bufsize);
+
+	msgsize = 0;
+	for (;;)
+	{
+		/*
+		 * If we do non-blocking read, only set the channel non-blocking for
+		 * the very first character. We trust in our messages to terminate, if
+		 * there is any character, we read the message and will find a \0 at
+		 * the end.
+		 */
+		if (msgsize == 0 && !allowBlock)
+		{
+			flags = fcntl(fd, F_GETFL, 0);
+			fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+		}
+
+		ret = read(fd, msg + msgsize, 1);
+
+		if (msgsize == 0 && !allowBlock)
+		{
+			int		saved_errno = errno;
+			fcntl(fd, F_SETFL, flags);
+
+			/* no data has been available */
+			if (ret < 0 && saved_errno == EAGAIN)
+				return NULL;
+		}
+
+		if (ret == 0)
+		{
+			/* child has closed the connection */
+			write_msg(NULL, "the communication partner died\n");
+			exit(1);
+		}
+		if (ret < 0)
+		{
+			write_msg(NULL, "error reading from communication partner: %s\n",
+					  strerror(errno));
+			exit(1);
+		}
+
+		if (msg[msgsize] == '\0')
+			return msg;
+
+		msgsize++;
+		if (msgsize == bufsize)
+		{
+			bufsize += 10;
+			msg = (char *) realloc(msg, bufsize);
+		}
+	}
+}
+#endif

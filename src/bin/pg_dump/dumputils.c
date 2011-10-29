@@ -168,6 +168,33 @@ fmtId(const char *rawid)
 	return id_return->data;
 }
 
+/*
+ * fmtQualifiedId - convert a qualified name to the proper format for
+ * the source database.
+ *
+ * Like fmtId, use the result before calling again.
+ */
+const char *
+fmtQualifiedId(const char *schema, const char *id, int remoteVersion)
+{
+	static PQExpBuffer id_return = NULL;
+
+	if (id_return)				/* first time through? */
+		resetPQExpBuffer(id_return);
+	else
+		id_return = createPQExpBuffer();
+
+	/* Suppress schema name if fetching from pre-7.3 DB */
+	if (remoteVersion >= 70300 && schema && *schema)
+	{
+		appendPQExpBuffer(id_return, "%s.",
+						  fmtId(schema));
+	}
+	appendPQExpBuffer(id_return, "%s",
+					  fmtId(id));
+
+	return id_return->data;
+}
 
 /*
  * Convert a string value to an SQL string literal and append it to

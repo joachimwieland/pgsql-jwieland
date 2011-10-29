@@ -59,6 +59,8 @@ extern int	optind;
 #include <locale.h>
 #endif
 
+PGconn *g_conn;
+PGconn **g_conn_children;
 
 static void usage(const char *progname);
 

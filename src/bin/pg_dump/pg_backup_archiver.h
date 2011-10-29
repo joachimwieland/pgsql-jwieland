@@ -100,9 +100,19 @@ typedef z_stream *z_streamp;
 #define K_OFFSET_POS_SET 2
 #define K_OFFSET_NO_DATA 3
 
+/*
+ * Special exit values from worker children.  We reserve 0 for normal
+ * success; 1 and other small values should be interpreted as crashes.
+ */
+#define WORKER_OK                     0
+#define WORKER_CREATE_DONE            10
+#define WORKER_INHIBIT_DATA           11
+#define WORKER_IGNORED_ERRORS         12
+
 struct _archiveHandle;
 struct _tocEntry;
 struct _restoreList;
+enum _action;
 
 typedef void (*ClosePtr) (struct _archiveHandle * AH);
 typedef void (*ReopenPtr) (struct _archiveHandle * AH);
@@ -129,6 +139,14 @@ typedef void (*PrintTocDataPtr) (struct _archiveHandle * AH, struct _tocEntry * 
 
 typedef void (*ClonePtr) (struct _archiveHandle * AH);
 typedef void (*DeClonePtr) (struct _archiveHandle * AH);
+
+typedef struct _parallel_state *(*GetParallelStatePtr)(struct _archiveHandle * AH);
+typedef char *(*WorkerJobRestorePtr)(struct _archiveHandle * AH, struct _tocEntry * te);
+typedef char *(*WorkerJobDumpPtr)(struct _archiveHandle * AH, struct _tocEntry * te);
+typedef char *(*StartMasterParallelPtr)(struct _archiveHandle * AH, struct _tocEntry * te,
+										enum _action act);
+typedef int (*EndMasterParallelPtr)(struct _archiveHandle * AH, struct _tocEntry * te,
+									const char *str, enum _action act);
 
 typedef size_t (*CustomOutPtr) (struct _archiveHandle * AH, const void *buf, size_t len);
 
@@ -204,6 +222,13 @@ typedef struct _archiveHandle
 	EndBlobsPtr EndBlobsPtr;
 	StartBlobPtr StartBlobPtr;
 	EndBlobPtr EndBlobPtr;
+
+	StartMasterParallelPtr StartMasterParallelPtr;
+	EndMasterParallelPtr EndMasterParallelPtr;
+
+	GetParallelStatePtr GetParallelStatePtr;
+	WorkerJobDumpPtr WorkerJobDumpPtr;
+	WorkerJobRestorePtr WorkerJobRestorePtr;
 
 	ClonePtr ClonePtr;			/* Clone format-specific fields */
 	DeClonePtr DeClonePtr;		/* Clean up cloned fields */
@@ -298,6 +323,74 @@ typedef struct _tocEntry
 	int			nLockDeps;		/* number of such dependencies */
 } TocEntry;
 
+/* IDs for worker children are either PIDs or thread handles */
+#ifndef WIN32
+#define thandle pid_t
+#else
+#define thandle HANDLE
+#endif
+
+typedef enum
+{
+	CS_INIT,
+	CS_IDLE,
+	CS_WORKING,
+	CS_FINISHED,
+	CS_TERMINATED
+} T_ChildStatus;
+
+typedef enum _action
+{
+	ACT_DUMP,
+	ACT_RESTORE,
+} T_Action;
+
+/* Arguments needed for a worker process */
+typedef struct _parallel_args
+{
+	ArchiveHandle	   *AH;
+	TocEntry		   *te;
+} ParallelArgs;
+
+/* State for each parallel activity slot */
+typedef struct _parallel_slot
+{
+	thandle				child_id;
+	ParallelArgs	   *args;
+	T_ChildStatus		ChildStatus;
+	int					status;
+#ifdef WIN32
+	DWORD				handle;
+#else
+	int					pipeRead;
+	int					pipeWrite;
+#endif
+} ParallelSlot;
+
+#define NO_SLOT (-1)
+
+typedef struct _parallel_state
+{
+	int		numWorkers;
+#ifdef WIN32
+	DWORD	masterHandle;
+#endif
+	ParallelSlot *parallelSlot;
+} ParallelState;
+
+extern int parallel_restore(ParallelArgs *args);
+
+extern ParallelState *ParallelBackupStart(ArchiveHandle *AH,
+										  int numWorker, RestoreOptions *ropt);
+extern void ParallelBackupEnd(ArchiveHandle *AH, ParallelState *pstate);
+extern void DispatchJobForTocEntry(ArchiveHandle *AH,
+								   ParallelState *pstate,
+								   TocEntry *te, T_Action act);
+extern void WaitForAllChildren(ArchiveHandle *AH, ParallelState *pstate);
+
+extern PGconn *g_conn;
+extern PGconn **g_conn_child;
+
 /* Used everywhere */
 extern const char *progname;
 
@@ -312,6 +405,10 @@ extern void ReadHead(ArchiveHandle *AH);
 extern void WriteToc(ArchiveHandle *AH);
 extern void ReadToc(ArchiveHandle *AH);
 extern void WriteDataChunks(ArchiveHandle *AH);
+extern void WriteDataChunksForTocEntry(ArchiveHandle *AH, TocEntry *te);
+
+extern ArchiveHandle *CloneArchive(ArchiveHandle *AH);
+extern void DeCloneArchive(ArchiveHandle *AH);
 
 extern teReqs TocIDRequired(ArchiveHandle *AH, DumpId id, RestoreOptions *ropt);
 extern bool checkSeek(FILE *fp);
@@ -345,6 +442,8 @@ extern void InitArchiveFmt_Null(ArchiveHandle *AH);
 extern void InitArchiveFmt_Directory(ArchiveHandle *AH);
 extern void InitArchiveFmt_Tar(ArchiveHandle *AH);
 
+extern void setupArchDirectory(ArchiveHandle *AH, int numWorkers);
+
 extern bool isValidTarHeader(char *header);
 
 extern int	ReconnectToServer(ArchiveHandle *AH, const char *dbname, const char *newUser);
@@ -354,5 +453,17 @@ int			ahwrite(const void *ptr, size_t size, size_t nmemb, ArchiveHandle *AH);
 int			ahprintf(ArchiveHandle *AH, const char *fmt,...) __attribute__((format(PG_PRINTF_ATTRIBUTE, 2, 3)));
 
 void		ahlog(ArchiveHandle *AH, int level, const char *fmt,...) __attribute__((format(PG_PRINTF_ATTRIBUTE, 3, 4)));
+
+#ifdef USE_ASSERT_CHECKING
+#define Assert(condition) \
+	if (!(condition)) \
+	{ \
+		write_msg(NULL, "Failed assertion in %s, line %d\n", \
+				  __FILE__, __LINE__); \
+		abort();\
+	}
+#else
+#define Assert(condition)
+#endif
 
 #endif
