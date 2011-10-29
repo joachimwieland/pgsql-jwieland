@@ -3336,8 +3336,8 @@ static void
 restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate)
 {
 	RestoreOptions *ropt = AH->ropt;
+	ParallelSlot   *slots;
 	int			work_status;
-	int			next_slot;
 	bool		skipped_some;
 	TocEntry	pending_list;
 	TocEntry	ready_list;
@@ -3356,7 +3356,7 @@ restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate)
 	if (AH->version < K_VERS_1_8)
 		die_horribly(AH, modulename, "parallel restore is not supported with archives made by pre-8.0 pg_dump\n");
 
-	slots = (ParallelSlot *) calloc(sizeof(ParallelSlot), n_slots);
+	slots = (ParallelSlot *) calloc(sizeof(ParallelSlot), ropt->number_of_jobs);
 
 	/* Adjust dependency information */
 	fix_dependencies(AH);

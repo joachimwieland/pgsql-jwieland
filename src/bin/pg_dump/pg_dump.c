@@ -628,7 +628,6 @@ main(int argc, char **argv)
 		/* use printf() instead of write_msg() for writing to stdout */
 		printf("snapshots are not synchronized, make sure there is no write activity on the database\nwhile the connections are being opened.\n");
 
-<<<<<<< HEAD
 		printf("Opening connections...\n");
 		g_conn_child = (PGconn**) malloc(numWorkers * sizeof(PGconn *));
 		for (i = 0; i < numWorkers; i++)
@@ -640,7 +639,15 @@ main(int argc, char **argv)
 			SetupConnection(g_conn_child[i], dumpencoding, use_role);
 		}
 		printf("All connections opened...\n");
-=======
+
+		AH->connection = backup;
+
+		/* XXX there should be a better way to pass the number of workers down
+		 * to the archive */
+		if (archiveFormat == archDirectory)
+			setupArchDirectory(AH, numWorkers);
+	}
+
 	/*
 	 * Quote all identifiers, if requested.
 	 */
@@ -668,14 +675,8 @@ main(int argc, char **argv)
 						   "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
 	}
 	else
+	{
 		do_sql_command(g_conn, "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE");
-
-		AH->connection = backup;
-
-		/* XXX there should be a better way to pass the number of workers down
-		 * to the archive */
-		if (archiveFormat == archDirectory)
-			setupArchDirectory(AH, numWorkers);
 	}
 
 	/* Expand schema selection patterns into OID lists */
@@ -1261,7 +1262,8 @@ dumpTableData_copy(Archive *fout, void *dcontext)
 			appendPQExpBufferStr(q, "* ");
 		appendPQExpBuffer(q, "FROM %s %s) TO stdout;",
 						  fmtQualifiedId(tbinfo->dobj.namespace->dobj.name,
-										 classname),
+										 classname,
+										 AH->public.remoteVersion),
 						  tdinfo->filtercond);
 	}
 	else
@@ -2018,7 +2020,7 @@ dumpDatabase(Archive *AH)
 							  atoi(PQgetvalue(lo_res, 0, i_relfrozenxid)),
 							  LargeObjectMetadataRelationId);
 			ArchiveEntry(AH, nilCatalogId, createDumpId(),
-						 "pg_largeobject_metadata", NULL, NULL, "",
+						 "pg_largeobject_metadata", NULL, NULL, "", 0,
 						 false, "pg_largeobject_metadata", SECTION_PRE_DATA,
 						 loOutQry->data, "", NULL,
 						 NULL, 0,
@@ -2080,7 +2082,7 @@ dumpDatabase(Archive *AH)
 		emitShSecLabels(g_conn, res, seclabelQry, "DATABASE", datname);
 		if (strlen(seclabelQry->data))
 			ArchiveEntry(AH, dbCatId, createDumpId(), datname, NULL, NULL,
-						 dba, false, "SECURITY LABEL", SECTION_NONE,
+						 dba, 0, false, "SECURITY LABEL", SECTION_NONE,
 						 seclabelQry->data, "", NULL,
 						 &dbDumpId, 1, NULL, NULL);
 		destroyPQExpBuffer(seclabelQry);
@@ -7302,7 +7304,7 @@ dumpExtension(Archive *fout, ExtensionInfo *extinfo)
 	ArchiveEntry(fout, extinfo->dobj.catId, extinfo->dobj.dumpId,
 				 extinfo->dobj.name,
 				 NULL, NULL,
-				 "",
+				 "", 0,
 				 false, "EXTENSION", SECTION_PRE_DATA,
 				 q->data, delq->data, NULL,
 				 extinfo->dobj.dependencies, extinfo->dobj.nDeps,
@@ -10482,7 +10484,7 @@ dumpCollation(Archive *fout, CollInfo *collinfo)
 				 collinfo->dobj.name,
 				 collinfo->dobj.namespace->dobj.name,
 				 NULL,
-				 collinfo->rolname,
+				 collinfo->rolname, 0,
 				 false, "COLLATION", SECTION_PRE_DATA,
 				 q->data, delq->data, NULL,
 				 collinfo->dobj.dependencies, collinfo->dobj.nDeps,
@@ -14327,8 +14329,8 @@ SetupConnection(PGconn *conn, const char *dumpencoding, const char *use_role)
 	/*
 	 * Disables security label support if server version < v9.1.x
 	 */
-	if (!no_security_label && g_fout->remoteVersion < 90100)
-		no_security_label = 1;
+	if (!no_security_labels && g_fout->remoteVersion < 90100)
+		no_security_labels = 1;
 
 	/*
 	 * Disable timeouts if supported.
