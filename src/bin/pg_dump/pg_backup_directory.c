@@ -701,7 +701,7 @@ static char *
 prependDirectory(ArchiveHandle *AH, const char *relativeFilename)
 {
 	lclContext *ctx = (lclContext *) AH->formatData;
-	static char buf[MAXPGPATH];
+	static char buf[MAXPGPATH];  /* Ummh, not good for Windows multithreaded app */
 	char	   *dname;
 
 	dname = ctx->directory;
@@ -730,7 +730,8 @@ prependDirectory(ArchiveHandle *AH, const char *relativeFilename)
 static char *
 _WorkerJobDumpDirectory(ArchiveHandle *AH, TocEntry *te)
 {
-	static char		buf[64]; /* short fixed-size string + some ID so far */
+	const int buflen = 64; /* short fixed-size string + some ID so far, this needs to be malloc'ed instead of static because we work with threads on windows */
+	char		*buf = (char*) malloc(buflen);
 	lclTocEntry	   *tctx = (lclTocEntry *) te->formatData;
 
 	/* This should never happen */
@@ -743,7 +744,7 @@ _WorkerJobDumpDirectory(ArchiveHandle *AH, TocEntry *te)
 	 */
 	WriteDataChunksForTocEntry(AH, te);
 
-	snprintf(buf, sizeof(buf), "OK DUMP %d", te->dumpId);
+	snprintf(buf, buflen, "OK DUMP %d", te->dumpId);
 
 	return buf;
 }
@@ -755,7 +756,8 @@ _WorkerJobDumpDirectory(ArchiveHandle *AH, TocEntry *te)
 static char *
 _WorkerJobRestoreDirectory(ArchiveHandle *AH, TocEntry *te)
 {
-	static char		buf[64]; /* short fixed-size string + some numbers so far */
+	const int buflen = 64; /* short fixed-size string + some ID so far, this needs to be malloc'ed instead of static because we work with threads on windows */
+	char		*buf = (char*) malloc(buflen);
 	ParallelArgs	pargs;
 	int				status;
 	lclTocEntry	   *tctx;
@@ -767,7 +769,7 @@ _WorkerJobRestoreDirectory(ArchiveHandle *AH, TocEntry *te)
 
 	status = parallel_restore(&pargs);
 
-	snprintf(buf, sizeof(buf), "OK RESTORE %d %d %d", te->dumpId, status,
+	snprintf(buf, buflen, "OK RESTORE %d %d %d", te->dumpId, status,
 			 status == WORKER_IGNORED_ERRORS ? AH->public.n_errors : 0);
 
 	return buf;
