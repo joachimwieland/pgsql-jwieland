@@ -359,12 +359,8 @@ typedef struct _parallel_slot
 	ParallelArgs	   *args;
 	T_ChildStatus		ChildStatus;
 	int					status;
-#ifdef WIN32
-	DWORD				handle;
-#else
 	int					pipeRead;
 	int					pipeWrite;
-#endif
 } ParallelSlot;
 
 #define NO_SLOT (-1)
@@ -372,9 +368,6 @@ typedef struct _parallel_slot
 typedef struct _parallel_state
 {
 	int		numWorkers;
-#ifdef WIN32
-	DWORD	masterHandle;
-#endif
 	ParallelSlot *parallelSlot;
 } ParallelState;
 
