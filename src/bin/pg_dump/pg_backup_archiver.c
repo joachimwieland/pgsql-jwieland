@@ -498,7 +498,7 @@ RestoreArchive(Archive *AHX, RestoreOptions *ropt)
 	if (parallel_mode)
 	{
 		ParallelState *pstate;
-		/* this will actually fork the processes */
+		/* ParallelBackupStart() will actually fork the processes */
 		pstate = ParallelBackupStart(AH, ropt->number_of_jobs, ropt);
 		restore_toc_entries_parallel(AH, pstate);
 		ParallelBackupEnd(AH, pstate);
@@ -4326,11 +4326,15 @@ SetupChild(ArchiveHandle *AH, int pipefd[2], int childId,
 }
 
 #ifdef WIN32
+/*
+ * On Windows the _beginthreadex() function allows us to pass one parameter.
+ * Since we need to pass a few values however, we define a structure here
+ * and then pass a pointer to such a structure in _beginthreadex().
+ */
 typedef struct {
 	ArchiveHandle  *AH;
 	RestoreOptions *ropt;
 	int				childId;
-	ParallelState  *pstate;
 	int				pipeRead;
 	int				pipeWrite;
 } ChildInfo;
@@ -4340,9 +4344,12 @@ init_spawned_child_win32(ChildInfo *ci)
 {
 	ArchiveHandle *AH = ci->AH;
 	int pipefd[2] = { ci->pipeRead, ci->pipeWrite };
+	int childId = ci->childId;
+	RestoreOptions *ropt = ci->ropt;
 
-	SetupChild(AH, pipefd, ci->childId, ci->ropt);
-	printf("Child %d is returning from SetupChild\n", ci->childId);
+	free(ci);
+
+	SetupChild(AH, pipefd, childId, ropt);
 
 	DeCloneArchive(AH);
 	_endthreadex(0);
@@ -4360,6 +4367,7 @@ ParallelBackupStart(ArchiveHandle *AH, int numWorkers, RestoreOptions *ropt)
 {
 	ParallelState  *pstate;
 	int				i;
+	const size_t	slotSize = numWorkers * sizeof(ParallelSlot);
 
 	Assert(numWorkers > 0);
 
@@ -4367,16 +4375,15 @@ ParallelBackupStart(ArchiveHandle *AH, int numWorkers, RestoreOptions *ropt)
 	fflush(NULL);
 
 	pstate = (ParallelState *) malloc(sizeof(ParallelState));
-	if (!pstate)
-		die_horribly(AH, modulename, "out of memory\n");
-	memset((void *) pstate, 0, sizeof(ParallelState));
 
 	pstate->numWorkers = numWorkers;
+	pstate->parallelSlot = NULL;
 
 	if (numWorkers == 1)
 		return pstate;
 
-	pstate->parallelSlot = (ParallelSlot *) malloc(numWorkers * sizeof(ParallelSlot));
+	pstate->parallelSlot = (ParallelSlot *) malloc(slotSize);
+	memset((void *) pstate->parallelSlot, 0, slotSize);
 
 	for (i = 0; i < numWorkers; i++)
 	{
@@ -4391,6 +4398,7 @@ ParallelBackupStart(ArchiveHandle *AH, int numWorkers, RestoreOptions *ropt)
 			die_horribly(AH, modulename, "Cannot create communication channels: %s",
 						 strerror(errno));
 #ifdef WIN32
+		/* Allocate a new structure for every child */
 		ci = (ChildInfo *) malloc(sizeof(ChildInfo));
 
 		ci->ropt = ropt;
@@ -4454,6 +4462,14 @@ ParallelBackupStart(ArchiveHandle *AH, int numWorkers, RestoreOptions *ropt)
 	return pstate;
 }
 
+/*
+ * Tell all of our workers to terminate.
+ *
+ * Pretty straightforward routine, first we tell everyone to
+ * terminate, then we listen to the workers' replies and
+ * finally close the sockets that we have used for
+ * communication.
+ */
 void
 ParallelBackupEnd(ArchiveHandle *AH, ParallelState *pstate)
 {
