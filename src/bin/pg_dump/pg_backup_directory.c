@@ -700,6 +700,7 @@ createDirectory(const char *dir)
 static char *
 prependDirectory(ArchiveHandle *AH, const char *relativeFilename)
 {
+	/* XXX is this safe if run in parallel on Windows at the moment? */
 	lclContext *ctx = (lclContext *) AH->formatData;
 	static char buf[MAXPGPATH];  /* Ummh, not good for Windows multithreaded app */
 	char	   *dname;
@@ -730,6 +731,7 @@ prependDirectory(ArchiveHandle *AH, const char *relativeFilename)
 static char *
 _WorkerJobDumpDirectory(ArchiveHandle *AH, TocEntry *te)
 {
+	/* XXX this is leaking memory at the moment */
 	const int buflen = 64; /* short fixed-size string + some ID so far, this needs to be malloc'ed instead of static because we work with threads on windows */
 	char		*buf = (char*) malloc(buflen);
 	lclTocEntry	   *tctx = (lclTocEntry *) te->formatData;
@@ -756,6 +758,7 @@ _WorkerJobDumpDirectory(ArchiveHandle *AH, TocEntry *te)
 static char *
 _WorkerJobRestoreDirectory(ArchiveHandle *AH, TocEntry *te)
 {
+	/* XXX this is leaking memory at the moment */
 	const int buflen = 64; /* short fixed-size string + some ID so far, this needs to be malloc'ed instead of static because we work with threads on windows */
 	char		*buf = (char*) malloc(buflen);
 	ParallelArgs	pargs;

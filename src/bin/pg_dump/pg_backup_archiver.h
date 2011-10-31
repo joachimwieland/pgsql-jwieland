@@ -323,16 +323,8 @@ typedef struct _tocEntry
 	int			nLockDeps;		/* number of such dependencies */
 } TocEntry;
 
-/* IDs for worker children are either PIDs or thread handles */
-#ifndef WIN32
-#define thandle pid_t
-#else
-#define thandle HANDLE
-#endif
-
 typedef enum
 {
-	CS_INIT,
 	CS_IDLE,
 	CS_WORKING,
 	CS_FINISHED,
@@ -355,7 +347,6 @@ typedef struct _parallel_args
 /* State for each parallel activity slot */
 typedef struct _parallel_slot
 {
-	thandle				child_id;
 	ParallelArgs	   *args;
 	T_ChildStatus		ChildStatus;
 	int					status;

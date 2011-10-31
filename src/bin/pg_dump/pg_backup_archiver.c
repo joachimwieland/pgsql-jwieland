@@ -32,6 +32,46 @@
 
 
 #ifdef WIN32
+		/* WIN32 */
+		/* closesocket is a windows socket function and stays as-is */
+		#define writesocket(fd, s, l) send((fd),(s),(l),0)
+		#define readsocket(fd, s, l)  recv((fd),(s),(l),0)
+		#define setnonblocking(fd) \
+			do { u_long mode = 1; \
+				 ioctlsocket((fd), FIONBIO, &mode); \
+			} while(0);
+		#define setblocking(fd) \
+			do { u_long mode = 0; \
+				 ioctlsocket((fd), FIONBIO, &mode); \
+			} while(0);
+		/* "ret" is the return value of select */
+		#define interrupted_select(ret) \
+			((ret) == SOCKET_ERROR && WSAGetLastError() == WSAEINTR)
+		/* pgpipe is PostgreSQL's own pipe implementation, stays as-is */
+#else
+		/* UNIX */
+		#define closesocket close
+		#define writesocket write
+		#define readsocket  read
+		#define setnonblocking(fd) \
+			do { long flags = (long) fcntl((fd), F_GETFL, 0); \
+				fcntl(fd, F_SETFL, flags | O_NONBLOCK); \
+			} while(0);
+		#define setblocking(fd) \
+			do { long flags = (long) fcntl((fd), F_GETFL, 0); \
+				fcntl(fd, F_SETFL, flags & ~O_NONBLOCK); \
+			} while(0);
+		/* "ret" is the return value of select */
+		#define interrupted_select(ret) \
+			((ret) < 0 && errno == EINTR)
+		#define pgpipe pipe
+#endif
+
+#define PIPE_READ 0
+#define PIPE_WRITE 1
+
+
+#ifdef WIN32
 int
 pgpipe(int handles[2])
 {
@@ -181,26 +221,24 @@ static void mark_create_done(ArchiveHandle *AH, TocEntry *te);
 static void inhibit_data_for_failed_table(ArchiveHandle *AH, TocEntry *te);
 
 static void ListenToChildren(ArchiveHandle *AH, ParallelState *pstate, bool do_wait);
-static void WaitForCommands(ArchiveHandle *AH, ParallelState *pstate, int childId);
 static void PrintStatus(ParallelState *pstate);
 static int GetIdleChild(ParallelState *pstate);
 static int ReapChildStatus(ParallelState *pstate, int *status);
 static bool HasEveryChildTerminated(ParallelState *pstate);
 static bool IsEveryChildIdle(ParallelState *pstate);
 
-#define getMessageFromMaster(a,b,c) getMessageFromMasterUnix((a),(b),(c))
-#define sendMessageToMaster(a,b,c,d) sendMessageToMasterUnix((a),(b),(c),(d))
-#define getMessageFromChild(a,b,c,d) getMessageFromChildUnix((a),(b),(c),(d))
-#define sendMessageToChild(a,b,c,d) sendMessageToChildUnix((a),(b),(c),(d))
-static char *getMessageFromMasterUnix(ArchiveHandle *AH, ParallelState *pstate,
-									  int worker);
-static void sendMessageToMasterUnix(ArchiveHandle *AH, ParallelState *pstate,
-									int worker, const char *str);
-static char *getMessageFromChildUnix(ArchiveHandle *AH, ParallelState *pstate,
-									 bool do_wait, int *childId);
-static void sendMessageToChildUnix(ArchiveHandle *AH, ParallelState *pstate,
-								   int worker, const char *str);
+static char *getMessageFromChild(ArchiveHandle *AH, ParallelState *pstate,
+								 bool do_wait, int *childId);
+static void sendMessageToChild(ArchiveHandle *AH, ParallelState *pstate,
+							   int worker, const char *str);
 static char *readMessageFromPipe(int fd, bool allowBlock);
+
+static void WaitForCommands(ArchiveHandle *AH, int pipefd[2], int childId);
+static char *getMessageFromMaster(ArchiveHandle *AH, int pipefd[2]);
+static void sendMessageToMaster(ArchiveHandle *AH, int pipefd[2], const char *str);
+static void SetupChild(ArchiveHandle *AH, int pipefd[2], int childId,
+					   RestoreOptions *ropt);
+
 
 /* XXX: This will probably go away if the syncSnapshot patch gets committed */
 PGconn *g_conn;
@@ -4239,21 +4277,9 @@ DeCloneArchive(ArchiveHandle *AH)
  * worker process.
  */
 static void
-SetupChild(ArchiveHandle *AH, ParallelState *pstate, int childId, RestoreOptions *ropt,
-	   int pipeRead, int pipeWrite)
+SetupChild(ArchiveHandle *AH, int pipefd[2], int childId,
+		   RestoreOptions *ropt)
 {
-
-	printf("Child %d initializing (SetupChild)\n", childId);
-
-	/*
-	* When we fork here, our information in pstate is still partial
-	* but it already contains all the information we need. Also note
-	* that the master process uses those exact same fields in his copy
-	* of the structure with the exact opposite fd's.
-	*/
-	pstate->parallelSlot[childId].pipeRead = pipeRead;
-	pstate->parallelSlot[childId].pipeWrite = pipeWrite;
-
 	if (ropt)
 	{
 		/*
@@ -4293,29 +4319,10 @@ SetupChild(ArchiveHandle *AH, ParallelState *pstate, int childId, RestoreOptions
 
 	Assert(AH->connection != NULL);
 
-	/*
-	 * We don't actually need that on Unix where we can send to the
-	 * pipe any time. We need it on Windows to make sure that the child
-	 * has already set up its Message Queue when the master process wants to
-	 * send it the first object to dump. For consistency reasons however just
-	 * do it on Unix as well.
-	 */
-	sendMessageToMaster(AH, pstate, childId, "INIT OK");
+	WaitForCommands(AH, pipefd, childId);
 
-	WaitForCommands(AH, pstate, childId);
-
-	printf("Returning from WaitForCommands in childid %d, pstate: %p, pslots: %p, pipeRead: %d, pipeWrite: %d\n",
-	       childId, pstate, pstate->parallelSlot, pstate->parallelSlot[childId].pipeRead, pstate->parallelSlot[childId].pipeWrite);
-
-	Sleep((childId + 1) * 200);
-
-	printf("Returning from WaitForCommands after random sleep in childid %d, pstate: %p\n", childId, pstate);
-	printf("Returning from WaitForCommands after random sleep in childid %d, pstate: %p pslots: %p\n", childId, pstate, pstate->parallelSlot);
-
-	closesocket(pstate->parallelSlot[childId].pipeRead);
-	closesocket(pstate->parallelSlot[childId].pipeWrite);
-
-	printf("Closed after WaitForCommands in childid %d, pipeRead: %d, pipeWrite: %d\n", childId, pstate->parallelSlot[childId].pipeRead, pstate->parallelSlot[childId].pipeWrite);
+	closesocket(pipefd[PIPE_READ]);
+	closesocket(pipefd[PIPE_WRITE]);
 }
 
 #ifdef WIN32
@@ -4332,20 +4339,10 @@ unsigned __stdcall
 init_spawned_child_win32(ChildInfo *ci)
 {
 	ArchiveHandle *AH = ci->AH;
+	int pipefd[2] = { ci->pipeRead, ci->pipeWrite };
 
-	/* need to get a copy of pstate because the master process will use the original one to
-	 * keep track of the file descriptors. We can't scribble on it... */
-
-	ParallelState *pstate_copy = (ParallelState *) malloc(sizeof(ParallelState));
-	memcpy(pstate_copy, ci->pstate, sizeof(ParallelState));
-
-	pstate_copy->parallelSlot = (ParallelSlot *) malloc(pstate_copy->numWorkers * sizeof(ParallelSlot));
-
-	SetupChild(AH, pstate_copy, ci->childId, ci->ropt, ci->pipeRead, ci->pipeWrite);
+	SetupChild(AH, pipefd, ci->childId, ci->ropt);
 	printf("Child %d is returning from SetupChild\n", ci->childId);
-
-	free(pstate_copy->parallelSlot);
-	free(pstate_copy);
 
 	DeCloneArchive(AH);
 	_endthreadex(0);
@@ -4368,8 +4365,6 @@ ParallelBackupStart(ArchiveHandle *AH, int numWorkers, RestoreOptions *ropt)
 
 	/* Ensure stdio state is quiesced before forking */
 	fflush(NULL);
-
-	Sleep(20000);
 
 	pstate = (ParallelState *) malloc(sizeof(ParallelState));
 	if (!pstate)
@@ -4402,10 +4397,9 @@ ParallelBackupStart(ArchiveHandle *AH, int numWorkers, RestoreOptions *ropt)
 		ci->childId = i;
 		ci->AH = CloneArchive(AH);
 		ci->pstate = pstate;
-		ci->pipeRead = pipeMW[0];
-		ci->pipeWrite = pipeWM[1];
+		ci->pipeRead = pipeMW[PIPE_READ];
+		ci->pipeWrite = pipeWM[PIPE_WRITE];
 
-		printf("Forking process %d...\n", i);
 		_beginthreadex(NULL, 0, &init_spawned_child_win32, ci, 0, NULL);
 #else
 		pid = fork();
@@ -4413,18 +4407,26 @@ ParallelBackupStart(ArchiveHandle *AH, int numWorkers, RestoreOptions *ropt)
 		{
 			/* we are the worker */
 			int j;
+			int pipefd[2] = { pipeMW[PIPE_READ], pipeWM[PIPE_WRITE] };
 
-			close(pipeWM[0]);	/* close read end of Worker -> Master */
-			close(pipeMW[1]);	/* close write end of Master -> Worker */
+			closesocket(pipeWM[PIPE_READ]);		/* close read end of Worker -> Master */
+			closesocket(pipeMW[PIPE_WRITE]);	/* close write end of Master -> Worker */
 
-			/* Close all inherited fd's for communication with the other workers */
+			/*
+			 * Close all inherited fd's for communication of the master with
+			 * the other workers.
+			 */
 			for (j = 0; j < i; j++)
 			{
-				close(pstate->parallelSlot[j].pipeRead);
-				close(pstate->parallelSlot[j].pipeWrite);
+				closesocket(pstate->parallelSlot[j].pipeRead);
+				closesocket(pstate->parallelSlot[j].pipeWrite);
 			}
 
-			SetupChild(AH, pstate, i, ropt, pipeWM[0], pipeWM[1]);
+			/* We don't need pstate in the child */
+			free(pstate->parallelSlot);
+			free(pstate);
+
+			SetupChild(AH, pipefd, i, ropt);
 
 			exit(0);
 		}
@@ -4434,23 +4436,20 @@ ParallelBackupStart(ArchiveHandle *AH, int numWorkers, RestoreOptions *ropt)
 						 "could not create worker process: %s\n",
 						 strerror(errno));
 
-		/* we are the Master */
+		/* we are the Master, pid > 0 here */
 		Assert(pid > 0);
-		close(pipeWM[1]);	/* close write end of Worker -> Master */
-		close(pipeMW[0]);	/* close read end of Master -> Worker */
+		closesocket(pipeMW[PIPE_READ]);		/* close read end of Master -> Worker */
+		closesocket(pipeWM[PIPE_WRITE]);	/* close write end of Worker -> Master */
 #endif
 
-		pstate->parallelSlot[i].pipeRead = pipeWM[0];
-		pstate->parallelSlot[i].pipeWrite = pipeMW[1];
+		pstate->parallelSlot[i].pipeRead = pipeWM[PIPE_READ];
+		pstate->parallelSlot[i].pipeWrite = pipeMW[PIPE_WRITE];
 
 		pstate->parallelSlot[i].args = (ParallelArgs *) malloc(sizeof(ParallelArgs));
 		pstate->parallelSlot[i].args->AH = AH;
 		pstate->parallelSlot[i].args->te = NULL;
-		pstate->parallelSlot[i].ChildStatus = CS_INIT;
+		pstate->parallelSlot[i].ChildStatus = CS_IDLE;
 	}
-
-	/* now wait for the children to come up and send their INIT OK message */
-	ListenToChildren(AH, pstate, true);
 
 	return pstate;
 }
@@ -4466,6 +4465,8 @@ ParallelBackupEnd(ArchiveHandle *AH, ParallelState *pstate)
 	PrintStatus(pstate);
 	Assert(IsEveryChildIdle(pstate));
 
+	/* XXX how about the SIGCHLD from the children ? */
+
 	for (i = 0; i < pstate->numWorkers; i++)
 	{
 		sendMessageToChild(AH, pstate, i, "TERMINATE");
@@ -4475,8 +4476,8 @@ ParallelBackupEnd(ArchiveHandle *AH, ParallelState *pstate)
 	while (!HasEveryChildTerminated(pstate))
 	{
 		ListenToChildren(AH, pstate, true);
-		PrintStatus(pstate);
 	}
+	PrintStatus(pstate);
 
 	for (i = 0; i < pstate->numWorkers; i++)
 	{
@@ -4551,9 +4552,6 @@ PrintStatus(ParallelState *pstate)
 		printf("Status of child %d: ", i);
 		switch (pstate->parallelSlot[i].ChildStatus)
 		{
-			case CS_INIT:
-				printf("INIT");
-				break;
 			case CS_IDLE:
 				printf("IDLE");
 				break;
@@ -4669,7 +4667,7 @@ lockTableNoWait(ArchiveHandle *AH, TocEntry *te)
 #define messageEquals(msg, pattern) \
 	(strcmp(msg, pattern) == 0)
 static void
-WaitForCommands(ArchiveHandle *AH, ParallelState *pstate, int childId)
+WaitForCommands(ArchiveHandle *AH, int pipefd[2], int childId)
 {
 	char	   *command;
 	DumpId		dumpId;
@@ -4680,7 +4678,7 @@ WaitForCommands(ArchiveHandle *AH, ParallelState *pstate, int childId)
 
 	for(;;)
 	{
-		command = getMessageFromMaster(AH, pstate, childId);
+		command = getMessageFromMaster(AH, pipefd);
 
 		if (messageStartsWith(command, "DUMP "))
 		{
@@ -4732,12 +4730,9 @@ WaitForCommands(ArchiveHandle *AH, ParallelState *pstate, int childId)
 			die_horribly(AH, modulename,
 						 "Unknown command on communication channel: %s", command);
 		}
-		sendMessageToMaster(AH, pstate, childId, str);
-		if (shouldExit) {
-			printf("Child %d will exit after a little nap\n", childId);
-			Sleep(3000);
+		sendMessageToMaster(AH, pipefd, str);
+		if (shouldExit)
 			return;
-		}
 	}
 }
 
@@ -4768,12 +4763,7 @@ ListenToChildren(ArchiveHandle *AH, ParallelState *pstate, bool do_wait)
 		return;
 	}
 
-	
-	if (messageStartsWith(msg, "INIT OK"))
-	{
-		pstate->parallelSlot[childId].ChildStatus = CS_IDLE;
-	}
-       	else if (messageStartsWith(msg, "OK "))
+	if (messageStartsWith(msg, "OK "))
 	{
 		char	   *statusString;
 		TocEntry   *te;
@@ -4835,76 +4825,38 @@ ReapChildStatus(ParallelState *pstate, int *status)
 	return NO_SLOT;
 }
 
-#ifdef WIN32FOO
 static char *
-getMessageFromMasterWin32(ArchiveHandle *AH, ParallelState *pstate, int worker)
+getMessageFromMaster(ArchiveHandle *AH, int pipefd[2])
 {
-	return getMessageFromMasterUnix(AH, pstate, worker);
-}
-
-static char *
-getMessageFromChildWin32(ArchiveHandle *AH, ParallelState *pstate, bool do_wait, int *childId)
-{
-	return getMessageFromChildUnix(AH, pstate, do_wait, childId);
+	return readMessageFromPipe(pipefd[PIPE_READ], true);
 }
 
 static void
-sendMessageToMasterWin32(ArchiveHandle *AH, ParallelState *pstate, int worker, const char *str)
-{
-	sendMessageToMasterUnix(AH, pstate, worker, str);
-}
-
-static void
-sendMessageToChildWin32(ArchiveHandle *AH, ParallelState *pstate, int worker, const char *str)
-{
-	sendMessageToChildUnix(AH, pstate, worker, str);
-}
-#endif
-
-static char *
-getMessageFromMasterUnix(ArchiveHandle *AH, ParallelState *pstate, int worker)
-{
-	return readMessageFromPipe(pstate->parallelSlot[worker].pipeRead, true);
-}
-
-static void
-sendMessageToMasterUnix(ArchiveHandle *AH, ParallelState *pstate, int worker, const char *str)
+sendMessageToMaster(ArchiveHandle *AH, int pipefd[2], const char *str)
 {
 	int len = strlen(str) + 1;
 
-	printf("Sending message to master: %s from worker %d, sending on fd %d\n", str, worker, pstate->parallelSlot[worker].pipeWrite);
-
-#ifdef WIN32
-	if (send(pstate->parallelSlot[worker].pipeWrite, str, len, 0) != len)
-#else
-	if (write(pstate->parallelSlot[worker].pipeWrite, str, len) != len)
-#endif
+	if (writesocket(pipefd[PIPE_WRITE], str, len) != len)
 		die_horribly(AH, modulename,
 					 "Error writing to the communication channel: %s",
 					 strerror(errno));
-
-	printf("Sent message to master: %s from worker %d, sent on fd %d\n", str, worker, pstate->parallelSlot[worker].pipeWrite);
 }
 
 static void
-sendMessageToChildUnix(ArchiveHandle *AH, ParallelState *pstate, int worker, const char *str)
+sendMessageToChild(ArchiveHandle *AH, ParallelState *pstate, int worker, const char *str)
 {
 	int len = strlen(str) + 1;
 
 	printf("Sending message %s to child %d on fd %d\n", str, worker, pstate->parallelSlot[worker].pipeWrite);
 
-#ifdef WIN32
-	if (send(pstate->parallelSlot[worker].pipeWrite, str, len, 0) != len)
-#else
-	if (write(pstate->parallelSlot[worker].pipeWrite, str, len) != len)
-#endif
+	if (writesocket(pstate->parallelSlot[worker].pipeWrite, str, len) != len)
 		die_horribly(AH, modulename,
 					 "Error writing to the communication channel: %s",
 					 strerror(errno));
 }
 
 static char *
-getMessageFromChildUnix(ArchiveHandle *AH, ParallelState *pstate, bool do_wait, int *childId)
+getMessageFromChild(ArchiveHandle *AH, ParallelState *pstate, bool do_wait, int *childId)
 {
 	int			i;
 	fd_set		childset;
@@ -4913,41 +4865,26 @@ getMessageFromChildUnix(ArchiveHandle *AH, ParallelState *pstate, bool do_wait, 
 
 	FD_ZERO(&childset);
 
-	printf("Getting message from child, num: %d, do_wait: %d\n", pstate->numWorkers, do_wait);
-
 	for (i = 0; i < pstate->numWorkers; i++)
 	{
 		if (pstate->parallelSlot[i].ChildStatus == CS_TERMINATED)
 			continue;
 		FD_SET(pstate->parallelSlot[i].pipeRead, &childset);
-		printf("SEtting %d in childset\n", pstate->parallelSlot[i].pipeRead);
-		/* WIN32 ignores the first select() parameter btw... */
+		/* actually WIN32 ignores the first parameter to select()... */
 		if (pstate->parallelSlot[i].pipeRead > maxFd)
 			maxFd = pstate->parallelSlot[i].pipeRead;
 	}
 
-	printf("maxFd: %d\n", maxFd);
-
 	if (do_wait)
 	{
-		fd_set	backup;
-		bool haveSet;
+		fd_set	backup = childset;
 		do
 		{
-			backup = childset;
-			i = select(maxFd + 1, &backup /* XXX weird to use the backup... */, NULL, NULL, NULL);  /* no timeout */
-			printf("Select returned: %d, SOCKET_ERROR: %d\n", i, SOCKET_ERROR);
-
-			haveSet = false;
-			for (i = 0; i < pstate->numWorkers; i++)
-			{
-				if (FD_ISSET(pstate->parallelSlot[i].pipeRead, &backup))
-					haveSet = true;
-			}
+			childset = backup;
+			i = select(maxFd + 1, &childset, NULL, NULL, NULL);  /* no timeout */
 		}
-		while (i == SOCKET_ERROR /* < 0 && errno == EINTR */);
+		while (interrupted_select(i));
 		Assert(i != 0);
-		childset = backup;
 	}
 	else
 	{
@@ -4965,15 +4902,11 @@ getMessageFromChildUnix(ArchiveHandle *AH, ParallelState *pstate, bool do_wait, 
 	{
 		char	   *msg;
 
-		if (!FD_ISSET(pstate->parallelSlot[i].pipeRead, &childset)) {
-			printf("FD_ISSET(%d): no\n", pstate->parallelSlot[i].pipeRead);
+		if (!FD_ISSET(pstate->parallelSlot[i].pipeRead, &childset))
 			continue;
-		}
 
-		printf("Reading message from child on pipe %d\n", pstate->parallelSlot[i].pipeRead);
 		if ((msg = readMessageFromPipe(pstate->parallelSlot[i].pipeRead, false)))
 		{
-			printf("Read message %s from child %d from fd %d\n", msg, i, pstate->parallelSlot[i].pipeRead);
 			*childId = i;
 			return msg;
 		}
@@ -5016,33 +4949,15 @@ readMessageFromPipe(int fd, bool allowBlock)
 		 * there is any character, we read the message and will find a \0 at
 		 * the end.
 		 */
-#ifdef WIN32
 		if (msgsize == 0 && !allowBlock) {
-			u_long mode = 1;
-			ioctlsocket(fd, FIONBIO, &mode);
+			setnonblocking(fd);
 		}
-		ret = recv(fd, msg + msgsize, 1, 0);
-#else
-		if (msgsize == 0 && !allowBlock)
-		{
-			flags = fcntl(fd, F_GETFL, 0);
-			fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-		}
-		ret = read(fd, msg + msgsize, 1);
-#endif
+		ret = readsocket(fd, msg + msgsize, 1);
 
 		if (msgsize == 0 && !allowBlock)
 		{
 			int		saved_errno = errno;
-#ifdef WIN32
-			{
-				u_long mode = 0;
-				ioctlsocket(fd, FIONBIO, &mode);
-			}
-#else
-			fcntl(fd, F_SETFL, flags);
-#endif
-
+			setblocking(fd);
 			/* no data has been available */
 			if (ret < 0 && saved_errno == EAGAIN)
 				return NULL;
