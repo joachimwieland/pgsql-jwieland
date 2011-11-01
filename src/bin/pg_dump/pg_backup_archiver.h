@@ -325,11 +325,11 @@ typedef struct _tocEntry
 
 typedef enum
 {
-	CS_IDLE,
-	CS_WORKING,
-	CS_FINISHED,
-	CS_TERMINATED
-} T_ChildStatus;
+	WRKR_IDLE,
+	WRKR_WORKING,
+	WRKR_FINISHED,
+	WRKR_TERMINATED
+} T_WorkerStatus;
 
 typedef enum _action
 {
@@ -348,7 +348,7 @@ typedef struct _parallel_args
 typedef struct _parallel_slot
 {
 	ParallelArgs	   *args;
-	T_ChildStatus		ChildStatus;
+	T_WorkerStatus		WorkerStatus;
 	int					status;
 	int					pipeRead;
 	int					pipeWrite;
@@ -370,7 +370,7 @@ extern void ParallelBackupEnd(ArchiveHandle *AH, ParallelState *pstate);
 extern void DispatchJobForTocEntry(ArchiveHandle *AH,
 								   ParallelState *pstate,
 								   TocEntry *te, T_Action act);
-extern void WaitForAllChildren(ArchiveHandle *AH, ParallelState *pstate);
+extern void WaitForAllWorkers(ArchiveHandle *AH, ParallelState *pstate);
 
 extern PGconn *g_conn;
 extern PGconn **g_conn_child;

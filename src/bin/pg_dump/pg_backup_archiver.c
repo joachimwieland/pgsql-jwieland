@@ -220,23 +220,23 @@ static void reduce_dependencies(ArchiveHandle *AH, TocEntry *te,
 static void mark_create_done(ArchiveHandle *AH, TocEntry *te);
 static void inhibit_data_for_failed_table(ArchiveHandle *AH, TocEntry *te);
 
-static void ListenToChildren(ArchiveHandle *AH, ParallelState *pstate, bool do_wait);
+static void ListenToWorkers(ArchiveHandle *AH, ParallelState *pstate, bool do_wait);
 static void PrintStatus(ParallelState *pstate);
-static int GetIdleChild(ParallelState *pstate);
-static int ReapChildStatus(ParallelState *pstate, int *status);
-static bool HasEveryChildTerminated(ParallelState *pstate);
-static bool IsEveryChildIdle(ParallelState *pstate);
+static int GetIdleWorker(ParallelState *pstate);
+static int ReapWorkerStatus(ParallelState *pstate, int *status);
+static bool HasEveryWorkerTerminated(ParallelState *pstate);
+static bool IsEveryWorkerIdle(ParallelState *pstate);
 
-static char *getMessageFromChild(ArchiveHandle *AH, ParallelState *pstate,
-								 bool do_wait, int *childId);
-static void sendMessageToChild(ArchiveHandle *AH, ParallelState *pstate,
+static char *getMessageFromWorker(ArchiveHandle *AH, ParallelState *pstate,
+								 bool do_wait, int *worker);
+static void sendMessageToWorker(ArchiveHandle *AH, ParallelState *pstate,
 							   int worker, const char *str);
 static char *readMessageFromPipe(int fd, bool allowBlock);
 
-static void WaitForCommands(ArchiveHandle *AH, int pipefd[2], int childId);
+static void WaitForCommands(ArchiveHandle *AH, int pipefd[2], int worker);
 static char *getMessageFromMaster(ArchiveHandle *AH, int pipefd[2]);
 static void sendMessageToMaster(ArchiveHandle *AH, int pipefd[2], const char *str);
-static void SetupChild(ArchiveHandle *AH, int pipefd[2], int childId,
+static void SetupWorker(ArchiveHandle *AH, int pipefd[2], int worker,
 					   RestoreOptions *ropt);
 
 
@@ -2181,13 +2181,13 @@ WriteDataChunks(ArchiveHandle *AH)
 		 */
 		if (pstate)
 		{
-			int		ret_child;
+			int		ret_worker;
 			int		work_status;
 
 			for (;;)
 			{
 				int nTerm = 0;
-				while ((ret_child = ReapChildStatus(pstate, &work_status)) != NO_SLOT)
+				while ((ret_worker = ReapWorkerStatus(pstate, &work_status)) != NO_SLOT)
 				{
 					if (work_status != 0)
 						die_horribly(AH, modulename, "Error processing a parallel work item\n");
@@ -2195,23 +2195,23 @@ WriteDataChunks(ArchiveHandle *AH)
 					nTerm++;
 				}
 
-				/* We need to make sure that we have an idle child before dispatching
+				/* We need to make sure that we have an idle worker before dispatching
 				 * the next item. If nTerm > 0 we already have that (quick check). */
 				if (nTerm > 0)
 					break;
 
-				/* explicit check for an idle child */
-				if (GetIdleChild(pstate) != NO_SLOT)
+				/* explicit check for an idle worker */
+				if (GetIdleWorker(pstate) != NO_SLOT)
 					break;
 
 				/*
-				 * If we have no idle child, read the result of one or more
-				 * children and loop the loop to call ReapChildStatus() on them
+				 * If we have no idle worker, read the result of one or more
+				 * workers and loop the loop to call ReapWorkerStatus() on them
 				 */
-				ListenToChildren(AH, pstate, true);
+				ListenToWorkers(AH, pstate, true);
 			}
 
-			Assert(GetIdleChild(pstate) != NO_SLOT);
+			Assert(GetIdleWorker(pstate) != NO_SLOT);
 			DispatchJobForTocEntry(AH, pstate, te, ACT_DUMP);
 		}
 		else
@@ -2221,15 +2221,16 @@ WriteDataChunks(ArchiveHandle *AH)
 	}
 	if (pstate)
 	{
-		int		ret_child;
 		int		work_status;
 
 		/* Waiting for the remaining worker processes to finish */
-		/* XXX "worker" vs "child" */
-		while (!IsEveryChildIdle(pstate))
+		while (!IsEveryWorkerIdle(pstate))
 		{
-			if ((ret_child = ReapChildStatus(pstate, &work_status)) == NO_SLOT)
-				ListenToChildren(AH, pstate, true);
+			if (ReapWorkerStatus(pstate, &work_status) == NO_SLOT)
+				ListenToWorkers(AH, pstate, true);
+
+			if (work_status != 0)
+				die_horribly(AH, modulename, "Error processing a parallel work item\n");
 		}
 	}
 }
@@ -3567,7 +3568,7 @@ restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate)
 
 	while ((next_work_item = get_next_work_item(AH, &ready_list,
 												pstate)) != NULL ||
-		   !IsEveryChildIdle(pstate))
+		   !IsEveryWorkerIdle(pstate))
 	{
 		if (next_work_item != NULL)
 		{
@@ -3593,13 +3594,13 @@ restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate)
 
 			par_list_remove(next_work_item);
 
-			Assert(GetIdleChild(pstate) != NO_SLOT);
+			Assert(GetIdleWorker(pstate) != NO_SLOT);
 			DispatchJobForTocEntry(AH, pstate, next_work_item, ACT_RESTORE);
 		}
 		else
 		{
 			/* at least one child is working and we have nothing ready. */
-			Assert(!IsEveryChildIdle(pstate));
+			Assert(!IsEveryWorkerIdle(pstate));
 		}
 
 		for (;;)
@@ -3615,11 +3616,11 @@ restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate)
 			 * However, if we do not have any other work items currently that
 			 * children can work on, we do not busy-loop here but instead
 			 * really wait for at least one child to terminate. Hence we call
-			 * ListenToChildren(..., ..., true) in this case.
+			 * ListenToWorkers(..., ..., true) in this case.
 			 */
-			ListenToChildren(AH, pstate, !next_work_item);
+			ListenToWorkers(AH, pstate, !next_work_item);
 
-			while ((ret_child = ReapChildStatus(pstate, &work_status)) != NO_SLOT)
+			while ((ret_child = ReapWorkerStatus(pstate, &work_status)) != NO_SLOT)
 			{
 				nTerm++;
 				printf("Marking the child's work as done\n");
@@ -3632,14 +3633,14 @@ restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate)
 				break;
 
 			/* explicit check for an idle child */
-			if (GetIdleChild(pstate) != NO_SLOT)
+			if (GetIdleWorker(pstate) != NO_SLOT)
 				break;
 
 			/*
 			 * If we have no idle child, read the result of one or more
-			 * children and loop the loop to call ReapChildStatus() on them
+			 * children and loop the loop to call ReapWorkerStatus() on them
 			 */
-			ListenToChildren(AH, pstate, true);
+			ListenToWorkers(AH, pstate, true);
 		}
 	}
 
@@ -3781,7 +3782,7 @@ get_next_work_item(ArchiveHandle *AH, TocEntry *ready_list,
 		{
 			TocEntry   *running_te;
 
-			if (pstate->parallelSlot[i].ChildStatus != CS_WORKING)
+			if (pstate->parallelSlot[i].WorkerStatus != WRKR_WORKING)
 				continue;
 			running_te = pstate->parallelSlot[i].args->te;
 
@@ -4277,7 +4278,7 @@ DeCloneArchive(ArchiveHandle *AH)
  * worker process.
  */
 static void
-SetupChild(ArchiveHandle *AH, int pipefd[2], int childId,
+SetupWorker(ArchiveHandle *AH, int pipefd[2], int worker,
 		   RestoreOptions *ropt)
 {
 	if (ropt)
@@ -4301,8 +4302,8 @@ SetupChild(ArchiveHandle *AH, int pipefd[2], int childId,
 		/*
 		 * Dump mode - The parent has opened our connection
 		 */
-		Assert(g_conn_child && g_conn_child[childId]);
-		AH->connection = g_conn_child[childId];
+		Assert(g_conn_child && g_conn_child[worker]);
+		AH->connection = g_conn_child[worker];
 
 #ifndef WIN32
 		free(g_conn_child);
@@ -4319,7 +4320,7 @@ SetupChild(ArchiveHandle *AH, int pipefd[2], int childId,
 
 	Assert(AH->connection != NULL);
 
-	WaitForCommands(AH, pipefd, childId);
+	WaitForCommands(AH, pipefd, worker);
 
 	closesocket(pipefd[PIPE_READ]);
 	closesocket(pipefd[PIPE_WRITE]);
@@ -4334,22 +4335,22 @@ SetupChild(ArchiveHandle *AH, int pipefd[2], int childId,
 typedef struct {
 	ArchiveHandle  *AH;
 	RestoreOptions *ropt;
-	int				childId;
+	int				worker;
 	int				pipeRead;
 	int				pipeWrite;
-} ChildInfo;
+} WorkerInfo;
 
 unsigned __stdcall
-init_spawned_child_win32(ChildInfo *ci)
+init_spawned_worker_win32(WorkerInfo *wi)
 {
-	ArchiveHandle *AH = ci->AH;
-	int pipefd[2] = { ci->pipeRead, ci->pipeWrite };
-	int childId = ci->childId;
-	RestoreOptions *ropt = ci->ropt;
+	ArchiveHandle *AH = wi->AH;
+	int pipefd[2] = { wi->pipeRead, wi->pipeWrite };
+	int worker = wi->worker;
+	RestoreOptions *ropt = wi->ropt;
 
-	free(ci);
+	free(wi);
 
-	SetupChild(AH, pipefd, childId, ropt);
+	SetupWorker(AH, pipefd, worker, ropt);
 
 	DeCloneArchive(AH);
 	_endthreadex(0);
@@ -4358,7 +4359,7 @@ init_spawned_child_win32(ChildInfo *ci)
 #endif
 
 /*
- * This function starts the parallel dump or restore by spawning off the child
+ * This function starts the parallel dump or restore by spawning off the worker
  * processes in both Unix and Windows. For Windows, it creates a number of
  * threads while it does a fork() on Unix.
  */
@@ -4388,7 +4389,7 @@ ParallelBackupStart(ArchiveHandle *AH, int numWorkers, RestoreOptions *ropt)
 	for (i = 0; i < numWorkers; i++)
 	{
 #ifdef WIN32
-		ChildInfo      *ci;
+		WorkerInfo      *wi;
 #else
 		pid_t	pid;
 #endif
@@ -4398,17 +4399,17 @@ ParallelBackupStart(ArchiveHandle *AH, int numWorkers, RestoreOptions *ropt)
 			die_horribly(AH, modulename, "Cannot create communication channels: %s",
 						 strerror(errno));
 #ifdef WIN32
-		/* Allocate a new structure for every child */
-		ci = (ChildInfo *) malloc(sizeof(ChildInfo));
+		/* Allocate a new structure for every worker */
+		wi = (WorkerInfo *) malloc(sizeof(WorkerInfo));
 
-		ci->ropt = ropt;
-		ci->childId = i;
-		ci->AH = CloneArchive(AH);
-		ci->pstate = pstate;
-		ci->pipeRead = pipeMW[PIPE_READ];
-		ci->pipeWrite = pipeWM[PIPE_WRITE];
+		wi->ropt = ropt;
+		wi->worker = i;
+		wi->AH = CloneArchive(AH);
+		wi->pstate = pstate;
+		wi->pipeRead = pipeMW[PIPE_READ];
+		wi->pipeWrite = pipeWM[PIPE_WRITE];
 
-		_beginthreadex(NULL, 0, &init_spawned_child_win32, ci, 0, NULL);
+		_beginthreadex(NULL, 0, &init_spawned_worker_win32, wi, 0, NULL);
 #else
 		pid = fork();
 		if (pid == 0)
@@ -4430,11 +4431,11 @@ ParallelBackupStart(ArchiveHandle *AH, int numWorkers, RestoreOptions *ropt)
 				closesocket(pstate->parallelSlot[j].pipeWrite);
 			}
 
-			/* We don't need pstate in the child */
+			/* We don't need pstate in the worker */
 			free(pstate->parallelSlot);
 			free(pstate);
 
-			SetupChild(AH, pipefd, i, ropt);
+			SetupWorker(AH, pipefd, i, ropt);
 
 			exit(0);
 		}
@@ -4456,7 +4457,7 @@ ParallelBackupStart(ArchiveHandle *AH, int numWorkers, RestoreOptions *ropt)
 		pstate->parallelSlot[i].args = (ParallelArgs *) malloc(sizeof(ParallelArgs));
 		pstate->parallelSlot[i].args->AH = AH;
 		pstate->parallelSlot[i].args->te = NULL;
-		pstate->parallelSlot[i].ChildStatus = CS_IDLE;
+		pstate->parallelSlot[i].WorkerStatus = WRKR_IDLE;
 	}
 
 	return pstate;
@@ -4479,19 +4480,19 @@ ParallelBackupEnd(ArchiveHandle *AH, ParallelState *pstate)
 		return;
 
 	PrintStatus(pstate);
-	Assert(IsEveryChildIdle(pstate));
+	Assert(IsEveryWorkerIdle(pstate));
 
-	/* XXX how about the SIGCHLD from the children ? */
+	/* XXX how about the SIGCHLD from the workers ? */
 
 	for (i = 0; i < pstate->numWorkers; i++)
 	{
-		sendMessageToChild(AH, pstate, i, "TERMINATE");
-		pstate->parallelSlot[i].ChildStatus = CS_WORKING;
+		sendMessageToWorker(AH, pstate, i, "TERMINATE");
+		pstate->parallelSlot[i].WorkerStatus = WRKR_WORKING;
 	}
 
-	while (!HasEveryChildTerminated(pstate))
+	while (!HasEveryWorkerTerminated(pstate))
 	{
-		ListenToChildren(AH, pstate, true);
+		ListenToWorkers(AH, pstate, true);
 	}
 	PrintStatus(pstate);
 
@@ -4524,13 +4525,13 @@ ParallelBackupEnd(ArchiveHandle *AH, ParallelState *pstate)
  *                                          ... dump te ...
  *                                          send: OK DUMP info
  *
- * In ListenToChildren():
+ * In ListenToWorkers():
  *
  * [ Worker is FINISHED ]
  * receive: OK DUMP info
  * status = (EndMasterParallelPtr)(info)
  *
- * In ReapChildStatus(&ptr):
+ * In ReapWorkerStatus(&ptr):
  * *ptr = status;
  * [ Worker is IDLE ]
  */
@@ -4542,17 +4543,17 @@ DispatchJobForTocEntry(ArchiveHandle *AH, ParallelState *pstate, TocEntry *te,
 	int		worker;
 	char   *arg;
 
-	Assert(GetIdleChild(pstate) != NO_SLOT);
+	Assert(GetIdleWorker(pstate) != NO_SLOT);
 
-	/* our caller must make sure that at least one child is idle */
-	worker = GetIdleChild(pstate);
+	/* our caller must make sure that at least one worker is idle */
+	worker = GetIdleWorker(pstate);
 	Assert(worker != NO_SLOT);
 
 	arg = (AH->StartMasterParallelPtr)(AH, te, act);
 
-	sendMessageToChild(AH, pstate, worker, arg);
+	sendMessageToWorker(AH, pstate, worker, arg);
 
-	pstate->parallelSlot[worker].ChildStatus = CS_WORKING;
+	pstate->parallelSlot[worker].WorkerStatus = WRKR_WORKING;
 	pstate->parallelSlot[worker].args->te = te;
 	PrintStatus(pstate);
 }
@@ -4565,19 +4566,19 @@ PrintStatus(ParallelState *pstate)
 	printf("------Status------\n");
 	for (i = 0; i < pstate->numWorkers; i++)
 	{
-		printf("Status of child %d: ", i);
-		switch (pstate->parallelSlot[i].ChildStatus)
+		printf("Status of worker %d: ", i);
+		switch (pstate->parallelSlot[i].WorkerStatus)
 		{
-			case CS_IDLE:
+			case WRKR_IDLE:
 				printf("IDLE");
 				break;
-			case CS_WORKING:
+			case WRKR_WORKING:
 				printf("WORKING");
 				break;
-			case CS_FINISHED:
+			case WRKR_FINISHED:
 				printf("FINISHED");
 				break;
-			case CS_TERMINATED:
+			case WRKR_TERMINATED:
 				printf("TERMINATED");
 				break;
 		}
@@ -4591,31 +4592,31 @@ PrintStatus(ParallelState *pstate)
  * find the first free parallel slot (if any).
  */
 static int
-GetIdleChild(ParallelState *pstate)
+GetIdleWorker(ParallelState *pstate)
 {
 	int i;
 	for (i = 0; i < pstate->numWorkers; i++)
-		if (pstate->parallelSlot[i].ChildStatus == CS_IDLE)
+		if (pstate->parallelSlot[i].WorkerStatus == WRKR_IDLE)
 			return i;
 	return NO_SLOT;
 }
 
 static bool
-HasEveryChildTerminated(ParallelState *pstate)
+HasEveryWorkerTerminated(ParallelState *pstate)
 {
 	int i;
 	for (i = 0; i < pstate->numWorkers; i++)
-		if (pstate->parallelSlot[i].ChildStatus != CS_TERMINATED)
+		if (pstate->parallelSlot[i].WorkerStatus != WRKR_TERMINATED)
 			return false;
 	return true;
 }
 
 static bool
-IsEveryChildIdle(ParallelState *pstate)
+IsEveryWorkerIdle(ParallelState *pstate)
 {
 	int i;
 	for (i = 0; i < pstate->numWorkers; i++)
-		if (pstate->parallelSlot[i].ChildStatus != CS_IDLE)
+		if (pstate->parallelSlot[i].WorkerStatus != WRKR_IDLE)
 			return false;
 	return true;
 }
@@ -4683,7 +4684,7 @@ lockTableNoWait(ArchiveHandle *AH, TocEntry *te)
 #define messageEquals(msg, pattern) \
 	(strcmp(msg, pattern) == 0)
 static void
-WaitForCommands(ArchiveHandle *AH, int pipefd[2], int childId)
+WaitForCommands(ArchiveHandle *AH, int pipefd[2], int worker)
 {
 	char	   *command;
 	DumpId		dumpId;
@@ -4755,23 +4756,23 @@ WaitForCommands(ArchiveHandle *AH, int pipefd[2], int childId)
 /*
  * Note the status change:
  *
- * DispatchJobForTocEntry		CS_IDLE -> CS_WORKING
- * ListenToChildren				CS_WORKING -> CS_FINISHED / CS_TERMINATED
- * ReapChildStatus				CS_FINISHED -> CS_IDLE
+ * DispatchJobForTocEntry		WRKR_IDLE -> WRKR_WORKING
+ * ListenToWorkers				WRKR_WORKING -> WRKR_FINISHED / WRKR_TERMINATED
+ * ReapWorkerStatus				WRKR_FINISHED -> WRKR_IDLE
  *
- * Just calling ReapChildStatus() when all children are working might or might
- * not give you an idle child because you need to call ListenToChildren() in
- * between and only thereafter ReapChildStatus(). This is necessary in order to
- * get and deal with the status (=result) of the child's execution.
+ * Just calling ReapWorkerStatus() when all workers are working might or might
+ * not give you an idle worker because you need to call ListenToWorkers() in
+ * between and only thereafter ReapWorkerStatus(). This is necessary in order to
+ * get and deal with the status (=result) of the worker's execution.
  */
 static void
-ListenToChildren(ArchiveHandle *AH, ParallelState *pstate, bool do_wait)
+ListenToWorkers(ArchiveHandle *AH, ParallelState *pstate, bool do_wait)
 {
-	int		childId;
+	int		worker;
 	char   *msg;
 
-	printf("In ListenToChildren()\n");
-	msg = getMessageFromChild(AH, pstate, do_wait, &childId);
+	printf("In ListenToWorkers()\n");
+	msg = getMessageFromWorker(AH, pstate, do_wait, &worker);
 
 	if (!msg)
 	{
@@ -4784,37 +4785,37 @@ ListenToChildren(ArchiveHandle *AH, ParallelState *pstate, bool do_wait)
 		char	   *statusString;
 		TocEntry   *te;
 
-		printf("Got OK with information from child %d (%s)\n", childId, msg);
+		printf("Got OK with information from worker %d (%s)\n", worker, msg);
 
-		pstate->parallelSlot[childId].ChildStatus = CS_FINISHED;
-		te = pstate->parallelSlot[childId].args->te;
+		pstate->parallelSlot[worker].WorkerStatus = WRKR_FINISHED;
+		te = pstate->parallelSlot[worker].args->te;
 		if (messageStartsWith(msg, "OK RESTORE "))
 		{
 			statusString = msg + strlen("OK RESTORE ");
-			pstate->parallelSlot[childId].status =
+			pstate->parallelSlot[worker].status =
 				(AH->EndMasterParallelPtr)
 					(AH, te, statusString, ACT_RESTORE);
 		}
 		else if (messageStartsWith(msg, "OK DUMP "))
 		{
 			statusString = msg + strlen("OK DUMP ");
-			pstate->parallelSlot[childId].status =
+			pstate->parallelSlot[worker].status =
 				(AH->EndMasterParallelPtr)
 					(AH, te, statusString, ACT_DUMP);
 		}
 		else
-			die_horribly(AH, modulename, "Invalid message received from child: %s", msg);
+			die_horribly(AH, modulename, "Invalid message received from worker: %s", msg);
 	}
 	else if (messageStartsWith(msg, "TERMINATE OK"))
 	{
-		/* this child is idle again */
-		printf("Child %d has terminated\n", childId);
-		pstate->parallelSlot[childId].ChildStatus = CS_TERMINATED;
-		pstate->parallelSlot[childId].status = 0;
+		/* this worker is idle again */
+		printf("Worker %d has terminated\n", worker);
+		pstate->parallelSlot[worker].WorkerStatus = WRKR_TERMINATED;
+		pstate->parallelSlot[worker].status = 0;
 	}
 	else
 	{
-		die_horribly(AH, modulename, "Invalid message received from child: %s", msg);
+		die_horribly(AH, modulename, "Invalid message received from worker: %s", msg);
 	}
 	PrintStatus(pstate);
 
@@ -4823,17 +4824,17 @@ ListenToChildren(ArchiveHandle *AH, ParallelState *pstate, bool do_wait)
 }
 
 static int
-ReapChildStatus(ParallelState *pstate, int *status)
+ReapWorkerStatus(ParallelState *pstate, int *status)
 {
 	int i;
 
 	for (i = 0; i < pstate->numWorkers; i++)
 	{
-		if (pstate->parallelSlot[i].ChildStatus == CS_FINISHED)
+		if (pstate->parallelSlot[i].WorkerStatus == WRKR_FINISHED)
 		{
 			*status = pstate->parallelSlot[i].status;
 			pstate->parallelSlot[i].status = 0;
-			pstate->parallelSlot[i].ChildStatus = CS_IDLE;
+			pstate->parallelSlot[i].WorkerStatus = WRKR_IDLE;
 			PrintStatus(pstate);
 			return i;
 		}
@@ -4859,11 +4860,11 @@ sendMessageToMaster(ArchiveHandle *AH, int pipefd[2], const char *str)
 }
 
 static void
-sendMessageToChild(ArchiveHandle *AH, ParallelState *pstate, int worker, const char *str)
+sendMessageToWorker(ArchiveHandle *AH, ParallelState *pstate, int worker, const char *str)
 {
 	int len = strlen(str) + 1;
 
-	printf("Sending message %s to child %d on fd %d\n", str, worker, pstate->parallelSlot[worker].pipeWrite);
+	printf("Sending message %s to worker %d on fd %d\n", str, worker, pstate->parallelSlot[worker].pipeWrite);
 
 	if (writesocket(pstate->parallelSlot[worker].pipeWrite, str, len) != len)
 		die_horribly(AH, modulename,
@@ -4872,20 +4873,20 @@ sendMessageToChild(ArchiveHandle *AH, ParallelState *pstate, int worker, const c
 }
 
 static char *
-getMessageFromChild(ArchiveHandle *AH, ParallelState *pstate, bool do_wait, int *childId)
+getMessageFromWorker(ArchiveHandle *AH, ParallelState *pstate, bool do_wait, int *worker)
 {
 	int			i;
-	fd_set		childset;
+	fd_set		workerset;
 	int			maxFd = -1;
 	struct		timeval nowait = { 0, 0 };
 
-	FD_ZERO(&childset);
+	FD_ZERO(&workerset);
 
 	for (i = 0; i < pstate->numWorkers; i++)
 	{
-		if (pstate->parallelSlot[i].ChildStatus == CS_TERMINATED)
+		if (pstate->parallelSlot[i].WorkerStatus == WRKR_TERMINATED)
 			continue;
-		FD_SET(pstate->parallelSlot[i].pipeRead, &childset);
+		FD_SET(pstate->parallelSlot[i].pipeRead, &workerset);
 		/* actually WIN32 ignores the first parameter to select()... */
 		if (pstate->parallelSlot[i].pipeRead > maxFd)
 			maxFd = pstate->parallelSlot[i].pipeRead;
@@ -4893,24 +4894,24 @@ getMessageFromChild(ArchiveHandle *AH, ParallelState *pstate, bool do_wait, int 
 
 	if (do_wait)
 	{
-		fd_set	backup = childset;
+		fd_set	backup = workerset;
 		do
 		{
-			childset = backup;
-			i = select(maxFd + 1, &childset, NULL, NULL, NULL);  /* no timeout */
+			workerset = backup;
+			i = select(maxFd + 1, &workerset, NULL, NULL, NULL);  /* no timeout */
 		}
 		while (interrupted_select(i));
 		Assert(i != 0);
 	}
 	else
 	{
-		if ((i = select(maxFd + 1, &childset, NULL, NULL, &nowait)) == 0)
+		if ((i = select(maxFd + 1, &workerset, NULL, NULL, &nowait)) == 0)
 			return NULL;
 	}
 
 	if (i < 0)
 	{
-		write_msg(NULL, "Error in ListenToChildren(): %s", strerror(errno));
+		write_msg(NULL, "Error in ListenToWorkers(): %s", strerror(errno));
 		exit(1);
 	}
 
@@ -4918,12 +4919,12 @@ getMessageFromChild(ArchiveHandle *AH, ParallelState *pstate, bool do_wait, int 
 	{
 		char	   *msg;
 
-		if (!FD_ISSET(pstate->parallelSlot[i].pipeRead, &childset))
+		if (!FD_ISSET(pstate->parallelSlot[i].pipeRead, &workerset))
 			continue;
 
 		if ((msg = readMessageFromPipe(pstate->parallelSlot[i].pipeRead, false)))
 		{
-			*childId = i;
+			*worker = i;
 			return msg;
 		}
 	}
@@ -4981,7 +4982,7 @@ readMessageFromPipe(int fd, bool allowBlock)
 
 		if (ret == 0)
 		{
-			/* child has closed the connection */
+			/* worker has closed the connection */
 			write_msg(NULL, "the communication partner died\n");
 			exit(1);
 		}
