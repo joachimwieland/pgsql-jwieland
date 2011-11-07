@@ -376,9 +376,11 @@ RestoreArchive(Archive *AHX, RestoreOptions *ropt)
 		AHX->minRemoteVersion = 070100;
 		AHX->maxRemoteVersion = 999999;
 
-		ConnectDatabase(AHX, ropt->dbname,
-						ropt->pghost, ropt->pgport, ropt->username,
-						ropt->promptPassword);
+		ConnectDatabase(AHX, ropt->connParams.dbname,
+							 ropt->connParams.pghost,
+							 ropt->connParams.pgport,
+							 ropt->connParams.username,
+							 ropt->promptPassword);
 
 		/*
 		 * If we're talking to the DB directly, don't send comments since they
@@ -499,7 +501,7 @@ RestoreArchive(Archive *AHX, RestoreOptions *ropt)
 	{
 		ParallelState *pstate;
 		/* ParallelBackupStart() will actually fork the processes */
-		pstate = ParallelBackupStart(AH, ropt->number_of_jobs, ropt);
+		pstate = ParallelBackupStart(AH, ropt);
 		restore_toc_entries_parallel(AH, pstate);
 		ParallelBackupEnd(AH, pstate);
 	}
@@ -635,7 +637,7 @@ restore_toc_entry(ArchiveHandle *AH, TocEntry *te,
 		{
 			ahlog(AH, 1, "connecting to new database \"%s\"\n", te->tag);
 			_reconnectToDB(AH, te->tag);
-			ropt->dbname = strdup(te->tag);
+			ropt->connParams.dbname = strdup(te->tag);
 		}
 	}
 
@@ -2667,8 +2669,8 @@ _doSetFixedOutputState(ArchiveHandle *AH)
 			 AH->public.std_strings ? "on" : "off");
 
 	/* Select the role to be used during restore */
-	if (AH->ropt && AH->ropt->use_role)
-		ahprintf(AH, "SET ROLE %s;\n", fmtId(AH->ropt->use_role));
+	if (AH->connParams.use_role)
+		ahprintf(AH, "SET ROLE %s;\n", fmtId(AH->connParams.use_role));
 
 	/* Make sure function checking is disabled */
 	ahprintf(AH, "SET check_function_bodies = false;\n");
@@ -3649,9 +3651,7 @@ restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate)
 	/*
 	 * Now reconnect the single parent connection.
 	 */
-	ConnectDatabase((Archive *) AH, ropt->dbname,
-					ropt->pghost, ropt->pgport, ropt->username,
-					ropt->promptPassword);
+	CloneDatabaseConnection((Archive *) AH);
 
 	_doSetFixedOutputState(AH);
 
@@ -4234,10 +4234,6 @@ CloneArchive(ArchiveHandle *AH)
 	clone->currTablespace = NULL;
 	clone->currWithOids = -1;
 
-	/* savedPassword must be local in case we change it while connecting */
-	if (clone->savedPassword)
-		clone->savedPassword = strdup(clone->savedPassword);
-
 	/* clone has its own error count, too */
 	clone->public.n_errors = 0;
 
@@ -4267,8 +4263,9 @@ DeCloneArchive(ArchiveHandle *AH)
 		free(AH->currSchema);
 	if (AH->currTablespace)
 		free(AH->currTablespace);
-	if (AH->savedPassword)
-		free(AH->savedPassword);
+
+	if (AH->connParams.savedPassword)
+		free(AH->connParams.savedPassword);
 
 	free(AH);
 }
@@ -4284,31 +4281,27 @@ SetupWorker(ArchiveHandle *AH, int pipefd[2], int worker,
 	if (ropt)
 	{
 		/*
-		 * Restore mode - We need our own database connection, too
+		 * Restore mode
 		 */
-		AH->connection = NULL;
-		printf("Connecting: Db: %s host %s port %s user %s\n", ropt->dbname,
-						ropt->pghost ? ropt->pghost : "(null)",
-						ropt->pgport ? ropt->pgport : "(null)",
-						ropt->username ? ropt->username : "(null)");
 
-		ConnectDatabase((Archive *) AH, ropt->dbname,
-						ropt->pghost, ropt->pgport, ropt->username,
-						ropt->promptPassword);
+		CloneDatabaseConnection((Archive *) AH);
 		(AH->ReopenPtr) (AH);
 	}
 	else
 	{
 		/*
-		 * Dump mode - The parent has opened our connection
+		 * Dump mode
 		 */
-		Assert(g_conn_child && g_conn_child[worker]);
-		AH->connection = g_conn_child[worker];
 
-#ifndef WIN32
-		free(g_conn_child);
-		g_conn_child = NULL;
-#endif
+		CloneDatabaseConnection((Archive *) AH);
+
+		/*
+		 * dumpencoding and use_role are both NULL on a clone, we have saved
+		 * their values when we set up the master's connection.
+		 */
+		SetupConnection((Archive *) AH, NULL, NULL);
+
+		/* We cannot disconnect the master, it is holding the locks */
 	}
 
 	/*
@@ -4364,29 +4357,29 @@ init_spawned_worker_win32(WorkerInfo *wi)
  * threads while it does a fork() on Unix.
  */
 ParallelState *
-ParallelBackupStart(ArchiveHandle *AH, int numWorkers, RestoreOptions *ropt)
+ParallelBackupStart(ArchiveHandle *AH, RestoreOptions *ropt)
 {
 	ParallelState  *pstate;
 	int				i;
-	const size_t	slotSize = numWorkers * sizeof(ParallelSlot);
+	const size_t	slotSize = AH->public.numWorkers * sizeof(ParallelSlot);
 
-	Assert(numWorkers > 0);
+	Assert(AH->public.numWorkers > 0);
 
 	/* Ensure stdio state is quiesced before forking */
 	fflush(NULL);
 
 	pstate = (ParallelState *) malloc(sizeof(ParallelState));
 
-	pstate->numWorkers = numWorkers;
+	pstate->numWorkers = AH->public.numWorkers;
 	pstate->parallelSlot = NULL;
 
-	if (numWorkers == 1)
+	if (AH->public.numWorkers == 1)
 		return pstate;
 
 	pstate->parallelSlot = (ParallelSlot *) malloc(slotSize);
 	memset((void *) pstate->parallelSlot, 0, slotSize);
 
-	for (i = 0; i < numWorkers; i++)
+	for (i = 0; i < AH->public.numWorkers; i++)
 	{
 #ifdef WIN32
 		WorkerInfo      *wi;
@@ -4689,7 +4682,6 @@ WaitForCommands(ArchiveHandle *AH, int pipefd[2], int worker)
 	char	   *command;
 	DumpId		dumpId;
 	int			nBytes;
-	bool		shouldExit = false;
 	char	   *str = NULL;
 	TocEntry   *te;
 
@@ -4718,8 +4710,9 @@ WaitForCommands(ArchiveHandle *AH, int pipefd[2], int worker)
 				lockTableNoWait(AH, te);
 
 			str = (AH->WorkerJobDumpPtr)(AH, te);
-
 			Assert(AH->connection != NULL);
+			sendMessageToMaster(AH, pipefd, str);
+			free(str);
 		}
 		else if (messageStartsWith(command, "RESTORE "))
 		{
@@ -4732,24 +4725,23 @@ WaitForCommands(ArchiveHandle *AH, int pipefd[2], int worker)
 			te = getTocEntryByDumpId(AH, dumpId);
 			Assert(te != NULL);
 			str = (AH->WorkerJobRestorePtr)(AH, te);
-
 			Assert(AH->connection != NULL);
+			sendMessageToMaster(AH, pipefd, str);
+			free(str);
 		}
 		else if (messageEquals(command, "TERMINATE"))
 		{
 			printf("Terminating in %d\n", getpid());
 			PQfinish(AH->connection);
 			str = "TERMINATE OK";
-			shouldExit = true;
+			sendMessageToMaster(AH, pipefd, str);
+			return;
 		}
 		else
 		{
 			die_horribly(AH, modulename,
 						 "Unknown command on communication channel: %s", command);
 		}
-		sendMessageToMaster(AH, pipefd, str);
-		if (shouldExit)
-			return;
 	}
 }
 

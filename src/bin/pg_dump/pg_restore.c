@@ -72,6 +72,7 @@ main(int argc, char **argv)
 	RestoreOptions *opts;
 	int			c;
 	int			exit_code;
+	int			numWorkers;
 	Archive    *AH;
 	char	   *inputFileSpec;
 	static int	disable_triggers = 0;
@@ -161,7 +162,7 @@ main(int argc, char **argv)
 				opts->createDB = 1;
 				break;
 			case 'd':
-				opts->dbname = strdup(optarg);
+				opts->connParams.dbname = strdup(optarg);
 				break;
 			case 'e':
 				opts->exit_on_error = true;
@@ -175,14 +176,14 @@ main(int argc, char **argv)
 				break;
 			case 'h':
 				if (strlen(optarg) != 0)
-					opts->pghost = strdup(optarg);
+					opts->connParams.pghost = strdup(optarg);
 				break;
 			case 'i':
 				/* ignored, deprecated option */
 				break;
 
 			case 'j':			/* number of restore jobs */
-				opts->number_of_jobs = atoi(optarg);
+				numWorkers = atoi(optarg);
 				break;
 
 			case 'l':			/* Dump the TOC summary */
@@ -203,7 +204,7 @@ main(int argc, char **argv)
 
 			case 'p':
 				if (strlen(optarg) != 0)
-					opts->pgport = strdup(optarg);
+					opts->connParams.pgport = strdup(optarg);
 				break;
 			case 'R':
 				/* no-op, still accepted for backwards compatibility */
@@ -237,7 +238,7 @@ main(int argc, char **argv)
 				break;
 
 			case 'U':
-				opts->username = optarg;
+				opts->connParams.username = optarg;
 				break;
 
 			case 'v':			/* verbose */
@@ -269,7 +270,7 @@ main(int argc, char **argv)
 				break;
 
 			case 2:				/* SET ROLE */
-				opts->use_role = optarg;
+				opts->connParams.use_role = optarg;
 				break;
 
 			default:
@@ -295,7 +296,7 @@ main(int argc, char **argv)
 	}
 
 	/* Should get at most one of -d and -f, else user is confused */
-	if (opts->dbname)
+	if (opts->connParams.dbname)
 	{
 		if (opts->filename)
 		{
@@ -309,7 +310,7 @@ main(int argc, char **argv)
 	}
 
 	/* Can't do single-txn mode with multiple connections */
-	if (opts->single_txn && opts->number_of_jobs > 1)
+	if (opts->single_txn && numWorkers > 1)
 	{
 		fprintf(stderr, _("%s: cannot specify both --single-transaction and multiple jobs\n"),
 				progname);
@@ -373,6 +374,8 @@ main(int argc, char **argv)
 		 */
 		InitDummyWantedList(AH, opts);
 	}
+
+	AH->numWorkers = numWorkers;
 
 	if (opts->tocSummary)
 		PrintTOCSummary(AH, opts);
@@ -449,3 +452,4 @@ usage(const char *progname)
 	printf(_("\nIf no input file name is supplied, then standard input is used.\n\n"));
 	printf(_("Report bugs to <pgsql-bugs@postgresql.org>.\n"));
 }
+

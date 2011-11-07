@@ -51,7 +51,6 @@ typedef struct
 
 	/* this is for a parallel backup or restore */
 	ParallelState	   *pstate;
-	int					numWorkers;
 } lclContext;
 
 typedef struct
@@ -95,7 +94,6 @@ static char *_WorkerJobDumpDirectory(ArchiveHandle *AH, TocEntry *te);
 static char *prependDirectory(ArchiveHandle *AH, const char *relativeFilename);
 
 static void createDirectory(const char *dir);
-
 
 /*
  *	Init routine required by ALL formats. This is a global routine
@@ -546,7 +544,7 @@ _CloseArchive(ArchiveHandle *AH)
 		char	   *fname = prependDirectory(AH, "toc.dat");
 
 		/* this will actually fork the processes for a parallel backup */
-		ctx->pstate = ParallelBackupStart(AH, ctx->numWorkers, NULL);
+		ctx->pstate = ParallelBackupStart(AH, NULL);
 
 		/* The TOC is always created uncompressed */
 		tocFH = cfopen_write(fname, PG_BINARY_W, 0);
@@ -801,8 +799,7 @@ _Clone(ArchiveHandle *AH)
 
 	/*
 	 * We also don't copy the ParallelState pointer (pstate), only the master
-	 * process would write to it, worker threads only access pstate->masterThread
-	 * in read only mode.
+	 * process would write to it.
 	 */
 }
 
@@ -821,16 +818,6 @@ _GetParallelState(ArchiveHandle *AH)
 		return ctx->pstate;
 	else
 		return NULL;
-}
-
-/* XXX if numWorkers is the only piece of information that we pass to the
- * format this way, consider generating a AH->number_of_jobs or the like.
- * Parallel restore handles this via a data element in its RestoreOptions. */
-void
-setupArchDirectory(ArchiveHandle *AH, int numWorkers)
-{
-	lclContext	   *ctx = (lclContext *) AH->formatData;
-	ctx->numWorkers = numWorkers;
 }
 
 /*

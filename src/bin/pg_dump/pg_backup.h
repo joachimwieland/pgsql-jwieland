@@ -82,6 +82,8 @@ typedef struct _Archive
 	int			minRemoteVersion;		/* allowable range */
 	int			maxRemoteVersion;
 
+	int			numWorkers;		/* number of parallel processes */
+
 	/* info needed for string escaping */
 	int			encoding;		/* libpq code for client_encoding */
 	bool		std_strings;	/* standard_conforming_strings */
@@ -95,6 +97,19 @@ typedef struct _Archive
 
 typedef int (*DataDumperPtr) (Archive *AH, void *userArg);
 
+typedef struct _connParams
+{
+	char	   *dbname;
+	char	   *pgport;
+	char	   *pghost;
+	char	   *username;
+	char       *savedPassword;
+	char	   *use_role;		/* Issue SET ROLE to this */
+	char	   *encoding;
+	char	   *sync_snapshot_id;
+	bool		is_clone;
+} ConnParams;
+
 typedef struct _restoreOptions
 {
 	int			createDB;		/* Issue commands to create the database */
@@ -106,7 +121,6 @@ typedef struct _restoreOptions
 								 * instead of OWNER TO */
 	int			no_security_labels;		/* Skip security label entries */
 	char	   *superuser;		/* Username to use as superuser */
-	char	   *use_role;		/* Issue SET ROLE to this */
 	int			dataOnly;
 	int			dropSchema;
 	char	   *filename;
@@ -129,13 +143,11 @@ typedef struct _restoreOptions
 	char	   *schemaNames;
 	char	   *triggerNames;
 
-	int			useDB;
-	char	   *dbname;
-	char	   *pgport;
-	char	   *pghost;
-	char	   *username;
-	int			noDataForFailedTables;
+	ConnParams	connParams;
 	enum trivalue promptPassword;
+
+	int			useDB;
+	int			noDataForFailedTables;
 	int			exit_on_error;
 	int			compression;
 	int			suppressDumpWarnings;	/* Suppress output of WARNING entries
@@ -157,12 +169,9 @@ __attribute__((format(PG_PRINTF_ATTRIBUTE, 3, 4)));
 
 /* Lets the archive know we have a DB connection to shutdown if it dies */
 
-PGconn *ConnectDatabase(Archive *AH,
-				const char *dbname,
-				const char *pghost,
-				const char *pgport,
-				const char *username,
-				enum trivalue prompt_password);
+PGconn *ConnectDatabase(Archive *AHX, const char *dbname, const char *pghost,
+						const char *pgport, const char *username,
+						enum trivalue prompt_password);
 
 /* Called to add a TOC entry */
 extern void ArchiveEntry(Archive *AHX,

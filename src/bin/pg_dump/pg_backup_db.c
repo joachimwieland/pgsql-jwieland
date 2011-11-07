@@ -27,6 +27,8 @@ static const char *modulename = gettext_noop("archiver (db)");
 static void _check_database_version(ArchiveHandle *AH);
 static PGconn *_connectDB(ArchiveHandle *AH, const char *newdbname, const char *newUser);
 static void notice_processor(void *arg, const char *message);
+static char* get_synchronized_snapshot(ArchiveHandle *AH);
+static void ExecuteSqlCommand(ArchiveHandle *AH, const char *qry, const char *desc);
 
 static int
 _parse_version(ArchiveHandle *AH, const char *versionString)
@@ -124,7 +126,7 @@ _connectDB(ArchiveHandle *AH, const char *reqdb, const char *requser)
 	PGconn	   *newConn;
 	const char *newdb;
 	const char *newuser;
-	char	   *password = AH->savedPassword;
+	char	   *password = AH->connParams.savedPassword;
 	bool		new_pass;
 
 	if (!reqdb)
@@ -207,7 +209,7 @@ _connectDB(ArchiveHandle *AH, const char *reqdb, const char *requser)
 		}
 	} while (new_pass);
 
-	AH->savedPassword = password;
+	AH->connParams.savedPassword = password;
 
 	/* check for version mismatch */
 	_check_database_version(AH);
@@ -236,7 +238,7 @@ ConnectDatabase(Archive *AHX,
 				enum trivalue prompt_password)
 {
 	ArchiveHandle *AH = (ArchiveHandle *) AHX;
-	char	   *password = AH->savedPassword;
+	char	   *password = AH->connParams.savedPassword;
 	bool		new_pass;
 
 	if (AH->connection)
@@ -300,7 +302,16 @@ ConnectDatabase(Archive *AHX,
 		}
 	} while (new_pass);
 
-	AH->savedPassword = password;
+	if (dbname)
+		AH->connParams.dbname = strdup(dbname);
+	if (pgport)
+		AH->connParams.pgport = strdup(pgport);
+	if (pghost)
+		AH->connParams.pghost = strdup(pghost);
+	if (username)
+		AH->connParams.username = strdup(username);
+	if (password)
+		AH->connParams.savedPassword = strdup(password);
 
 	/* check to see that the backend connection was successfully made */
 	if (PQstatus(AH->connection) == CONNECTION_BAD)
@@ -315,13 +326,208 @@ ConnectDatabase(Archive *AHX,
 	return AH->connection;
 }
 
+PGconn *
+CloneDatabaseConnection(Archive *AHX)
+{
+	ArchiveHandle *AH = (ArchiveHandle *) AHX;
+
+	AH->connection = NULL;
+	AH->connParams.is_clone = 1;
+
+	printf("Connecting: Db: %s host %s port %s user %s\n",
+					AH->connParams.dbname,
+					AH->connParams.pghost ? AH->connParams.pghost : "(null)",
+					AH->connParams.pgport ? AH->connParams.pgport : "(null)",
+					AH->connParams.username ? AH->connParams.username : "(null)");
+
+	/* savedPassword must be local in case we change it while connecting */
+	if (AH->connParams.savedPassword)
+		AH->connParams.savedPassword = strdup(AH->connParams.savedPassword);
+
+	return ConnectDatabase(AHX,
+						   AH->connParams.dbname,
+						   AH->connParams.pghost,
+						   AH->connParams.pgport,
+						   AH->connParams.username,
+						   TRI_NO);
+}
+
+void
+SetupConnection(Archive *AHX, const char *dumpencoding, const char *use_role, int serializable_deferrable)
+{
+#define do_sql_command(conn, sql) \
+		ExecuteSqlCommand(AH, sql, "could not set up the connection")
+	ArchiveHandle *AH = (ArchiveHandle *) AHX;
+	const char *std_strings;
+	PGconn *conn = AH->connection;
+
+	/* Set the client encoding if requested */
+	if (!dumpencoding && AH->connParams.encoding)
+		dumpencoding = AH->connParams.encoding;
+
+	if (dumpencoding)
+	{
+		if (PQsetClientEncoding(AH->connection, dumpencoding) < 0)
+		{
+			write_msg(NULL, "invalid client encoding \"%s\" specified\n",
+					  dumpencoding);
+			exit(1);
+		}
+
+		/* save this for later use on parallel connections */
+		if (!AH->connParams.encoding)
+			AH->connParams.encoding = strdup(dumpencoding);
+	}
+
+	/*
+	 * Get the active encoding and the standard_conforming_strings setting, so
+	 * we know how to escape strings.
+	 */
+	AHX->encoding = PQclientEncoding(conn);
+
+	std_strings = PQparameterStatus(conn, "standard_conforming_strings");
+	AHX->std_strings = (std_strings && strcmp(std_strings, "on") == 0);
+
+	/* Set the role if requested */
+	if (!use_role && AH->connParams.use_role)
+		use_role = AH->connParams.use_role;
+
+	if (use_role && AHX->remoteVersion >= 80100)
+	{
+		PQExpBuffer query = createPQExpBuffer();
+
+		appendPQExpBuffer(query, "SET ROLE %s", fmtId(use_role));
+		do_sql_command(conn, query->data);
+		destroyPQExpBuffer(query);
+
+		/* save this for later use on parallel connections */
+		if (!AH->connParams.use_role)
+			AH->connParams.use_role = strdup(use_role);
+	}
+
+	/* Set the datestyle to ISO to ensure the dump's portability */
+	do_sql_command(conn, "SET DATESTYLE = ISO");
+
+	/* Likewise, avoid using sql_standard intervalstyle */
+	if (AHX->remoteVersion >= 80400)
+		do_sql_command(conn, "SET INTERVALSTYLE = POSTGRES");
+
+	/*
+	 * If supported, set extra_float_digits so that we can dump float data
+	 * exactly (given correctly implemented float I/O code, anyway)
+	 */
+	if (AHX->remoteVersion >= 80500)
+		do_sql_command(conn, "SET extra_float_digits TO 3");
+	else if (AHX->remoteVersion >= 70400)
+		do_sql_command(conn, "SET extra_float_digits TO 2");
+
+	/*
+	 * If synchronized scanning is supported, disable it, to prevent
+	 * unpredictable changes in row ordering across a dump and reload.
+	 */
+	if (AHX->remoteVersion >= 80300)
+		do_sql_command(conn, "SET synchronize_seqscans TO off");
+
+	/*
+	 * Quote all identifiers, if requested.
+	 */
+	if (quote_all_identifiers && AHX->remoteVersion >= 90100)
+		do_sql_command(conn, "SET quote_all_identifiers = true");
+
+	/*
+	 * Disable timeouts if supported.
+	 */
+	if (AHX->remoteVersion >= 70300)
+		do_sql_command(conn, "SET statement_timeout = 0");
+
+	/*
+	 * Start serializable transaction to dump consistent data.
+	 */
+	do_sql_command(conn, "BEGIN");
+
+	do_sql_command(conn, "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE");
+
+	/*
+	 * Quote all identifiers, if requested.
+	 */
+	if (quote_all_identifiers && AHX->remoteVersion >= 90100)
+		do_sql_command(conn, "SET quote_all_identifiers = true");
+
+	/*
+	 * Start transaction-snapshot mode transaction to dump consistent data.
+	 */
+	do_sql_command(conn, "BEGIN");
+	if (AHX->remoteVersion >= 90100)
+	{
+		if (serializable_deferrable)
+			do_sql_command(conn,
+						   "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE, "
+						   "READ ONLY, DEFERRABLE");
+		else
+			do_sql_command(conn,
+						   "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+	}
+	else
+	{
+		do_sql_command(conn, "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE");
+	}
+
+	if (AHX->numWorkers > 1 && AHX->remoteVersion >= 90200)
+	{
+		if (AH->connParams.is_clone)
+		{
+			PQExpBuffer query = createPQExpBuffer();
+			appendPQExpBuffer(query, "SET TRANSACTION SNAPSHOT ");
+			appendStringLiteralConn(query, AH->connParams.sync_snapshot_id, conn);
+			destroyPQExpBuffer(query);
+		}
+		else {
+			/*
+			 * If the version is lower and we don't have synchronized snapshots
+			 * yet, we will error out earlier already. So either we have the
+			 * feature or the user has given the explicit command not to use it.
+			 * Note: If we have it, we always use it, you cannot switch it off
+			 * then.
+			 */
+			if (AHX->remoteVersion >= 90200)
+				AH->connParams.sync_snapshot_id = get_synchronized_snapshot(AH);
+		}
+	}
+#undef do_sql_command
+}
+
+static char*
+get_synchronized_snapshot(ArchiveHandle *AH)
+{
+	const char *query = "select pg_export_snapshot()";
+	char	   *result;
+	int			ntups;
+	PGconn	   *conn = AH->connection;
+	PGresult   *res = PQexec(conn, query);
+
+//	check_sql_result(res, conn, query, PGRES_TUPLES_OK);
+
+	/* Expecting a single result only */
+	ntups = PQntuples(res);
+	if (ntups != 1)
+	{
+		die_horribly(AH, modulename, ngettext("query returned %d row instead of one: %s\n",
+							   "query returned %d rows instead of one: %s\n",
+								 ntups),
+				  ntups, query);
+	}
+
+	result = strdup(PQgetvalue(res, 0, 0));
+	PQclear(res);
+
+	return result;
+}
 
 static void
 notice_processor(void *arg, const char *message)
 {
 	write_msg(NULL, "%s", message);
 }
-
 
 /*
  * Convenience function to send a query.
@@ -474,3 +680,4 @@ DropBlobIfExists(ArchiveHandle *AH, Oid oid)
 				 oid, oid);
 	}
 }
+

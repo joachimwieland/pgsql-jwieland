@@ -237,11 +237,11 @@ typedef struct _archiveHandle
 
 	/* Stuff for direct DB connection */
 	char	   *archdbname;		/* DB name *read* from archive */
-	enum trivalue promptPassword;
-	char	   *savedPassword;	/* password for ropt->username, if known */
+	ConnParams	connParams;
 	PGconn	   *connection;
 	int			connectToDB;	/* Flag to indicate if direct DB connection is
 								 * required */
+	enum trivalue promptPassword;
 	bool		writingCopyData;	/* True when we are sending COPY data */
 	bool		pgCopyIn;		/* Currently in libpq 'COPY IN' mode. */
 
@@ -266,6 +266,7 @@ typedef struct _archiveHandle
 	ArchiveMode mode;			/* File mode - r or w */
 	void	   *formatData;		/* Header data specific to file format */
 
+	/* XXX this also contains a connParams now */
 	RestoreOptions *ropt;		/* Used to check restore options in ahwrite
 								 * etc */
 
@@ -365,7 +366,7 @@ typedef struct _parallel_state
 extern int parallel_restore(ParallelArgs *args);
 
 extern ParallelState *ParallelBackupStart(ArchiveHandle *AH,
-										  int numWorker, RestoreOptions *ropt);
+										  RestoreOptions *ropt);
 extern void ParallelBackupEnd(ArchiveHandle *AH, ParallelState *pstate);
 extern void DispatchJobForTocEntry(ArchiveHandle *AH,
 								   ParallelState *pstate,

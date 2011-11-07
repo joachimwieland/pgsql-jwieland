@@ -85,10 +85,6 @@ typedef struct
 bool		g_verbose;			/* User wants verbose narration of our
 								 * activities. */
 Archive    *g_fout;				/* the script file */
-//extern PGconn   *g_conn;		/* the database connection */
-//extern PGconn  **g_conn_child; 
- /* the connections for any children in a
-								 * parallel backup */
 
 /* various user-settable parameters */
 bool		schemaOnly;
@@ -139,6 +135,7 @@ static int	disable_dollar_quoting = 0;
 static int	dump_inserts = 0;
 static int	column_inserts = 0;
 static int	no_security_labels = 0;
+static int  no_synchronized_snapshots = 0;
 static int	no_unlogged_table_data = 0;
 static int	serializable_deferrable = 0;
 
@@ -249,8 +246,8 @@ static const char *fmtCopyColumnList(const TableInfo *ti);
 static void do_sql_command(PGconn *conn, const char *query);
 static void check_sql_result(PGresult *res, PGconn *conn, const char *query,
 				 ExecStatusType expected);
-
-void SetupConnection(PGconn *conn, const char *dumpencoding, const char *use_role);
+void SetupConnection(Archive *AHX, const char *dumpencoding, const char *use_role, int serializable_deferrable);
+static char* get_synchronized_snapshot(PGconn *conn);
 
 int
 main(int argc, char **argv)
@@ -258,11 +255,11 @@ main(int argc, char **argv)
 	int			c;
 	const char *filename = NULL;
 	const char *format = "p";
-	const char *dbname = NULL;
-	const char *pghost = NULL;
-	const char *pgport = NULL;
-	const char *username = NULL;
 	const char *dumpencoding = NULL;
+	char	   *dbname = NULL;
+	char	   *pghost = NULL;
+	char	   *pgport = NULL;
+	char	   *username = NULL;
 	bool		oids = false;
 	TableInfo  *tblinfo;
 	int			numTables;
@@ -336,6 +333,7 @@ main(int argc, char **argv)
 		{"serializable-deferrable", no_argument, &serializable_deferrable, 1},
 		{"use-set-session-authorization", no_argument, &use_setsessauth, 1},
 		{"no-security-labels", no_argument, &no_security_labels, 1},
+		{"no-synchronized-snapshots", no_argument, &no_synchronized_snapshots, 1},
 		{"no-unlogged-table-data", no_argument, &no_unlogged_table_data, 1},
 
 		{NULL, 0, NULL, 0}
@@ -545,12 +543,6 @@ main(int argc, char **argv)
 	if (archiveFormat == archNull)
 		plainText = 1;
 
-	if (numWorkers <= 0)
-	{
-		write_msg(NULL, "invalid number of parallel jobs\n");
-		exit(1);
-	}
-
 	/*
 	 * Ignore compression level for plain format. XXX: This is a bit
 	 * inconsistent, tar-format throws an error instead.
@@ -565,6 +557,12 @@ main(int argc, char **argv)
 			compressLevel = Z_DEFAULT_COMPRESSION;
 		else
 			compressLevel = 0;
+	}
+
+	if (numWorkers <= 0)
+	{
+		write_msg(NULL, "invalid number of parallel jobs\n");
+		exit(1);
 	}
 
 	if (archiveFormat != archDirectory)
@@ -603,56 +601,24 @@ main(int argc, char **argv)
 	g_fout->minRemoteVersion = 70000;
 	g_fout->maxRemoteVersion = (my_version / 100) * 100 + 99;
 
+	g_fout->numWorkers = numWorkers;
+
 	/*
 	 * Open the database using the Archiver, so it knows about it. Errors mean
 	 * death.
 	 */
+	g_conn = ConnectDatabase(g_fout, dbname, pghost, pgport, username, prompt_password);
 
-	g_conn = ConnectDatabase(g_fout, dbname, pghost, pgport,
-							 username, prompt_password);
-	SetupConnection(g_conn, dumpencoding, use_role);
-
-	/* As we do not have synchronized snapshots we want to make all of our
-	 * workers connect at more or less the same time at least. Also we want
-	 * to make every worker know the TOC so we cannot fork right now. The
-	 * compromise is that the parent now prepares all of the connections
-	 * and later on when we fork, each child inherits a different
-	 * connection from the parent.
-	 */
-	if (numWorkers > 0)
+	/* Find the last built-in OID, if needed */
+	if (g_fout->remoteVersion < 70300)
 	{
-		ArchiveHandle  *AH = (ArchiveHandle *) g_fout;
-
-		PGconn *backup = AH->connection;
-
-		/* use printf() instead of write_msg() for writing to stdout */
-		printf("snapshots are not synchronized, make sure there is no write activity on the database\nwhile the connections are being opened.\n");
-
-		printf("Opening connections...\n");
-		g_conn_child = (PGconn**) malloc(numWorkers * sizeof(PGconn *));
-		for (i = 0; i < numWorkers; i++)
-		{
-			AH->connection = NULL;
-			g_conn_child[i] = ConnectDatabase(g_fout, dbname,
-											   pghost, pgport,
-											   username, prompt_password);
-			SetupConnection(g_conn_child[i], dumpencoding, use_role);
-		}
-		printf("All connections opened...\n");
-
-		AH->connection = backup;
-
-		/* XXX there should be a better way to pass the number of workers down
-		 * to the archive */
-		if (archiveFormat == archDirectory)
-			setupArchDirectory(AH, numWorkers);
+		if (g_fout->remoteVersion >= 70100)
+			g_last_builtin_oid = findLastBuiltinOid_V71(PQdb(g_conn));
+		else
+			g_last_builtin_oid = findLastBuiltinOid_V70();
+		if (g_verbose)
+			write_msg(NULL, "last built-in OID is %u\n", g_last_builtin_oid);
 	}
-
-	/*
-	 * Quote all identifiers, if requested.
-	 */
-	if (quote_all_identifiers && g_fout->remoteVersion >= 90100)
-		do_sql_command(g_conn, "SET quote_all_identifiers = true");
 
 	/*
 	 * Disables security label support if server version < v9.1.x
@@ -660,24 +626,29 @@ main(int argc, char **argv)
 	if (!no_security_labels && g_fout->remoteVersion < 90100)
 		no_security_labels = 1;
 
-	/*
-	 * Start transaction-snapshot mode transaction to dump consistent data.
-	 */
-	do_sql_command(g_conn, "BEGIN");
-	if (g_fout->remoteVersion >= 90100)
-	{
-		if (serializable_deferrable)
-			do_sql_command(g_conn,
-						   "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE, "
-						   "READ ONLY, DEFERRABLE");
-		else
-			do_sql_command(g_conn,
-						   "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
-	}
+	/* Select the appropriate subquery to convert user IDs to names */
+	if (g_fout->remoteVersion >= 80100)
+		username_subquery = "SELECT rolname FROM pg_catalog.pg_roles WHERE oid =";
+	else if (g_fout->remoteVersion >= 70300)
+		username_subquery = "SELECT usename FROM pg_catalog.pg_user WHERE usesysid =";
 	else
+		username_subquery = "SELECT usename FROM pg_user WHERE usesysid =";
+
+	if (numWorkers > 1)
 	{
-		do_sql_command(g_conn, "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE");
+		printf("Versoin: %d\n", g_fout->remoteVersion);
+		/* check the version for the synchronized snapshots feature */
+		if (g_fout->remoteVersion < 90200 && !no_synchronized_snapshots)
+		{
+			write_msg(NULL, "No synchronized snapshots available in this version\n"
+						 "You might have to run with --no-synchronized-snapshots\n");
+			exit(1);
+		} else if (g_fout->remoteVersion >= 90200 && no_synchronized_snapshots)
+			write_msg(NULL, "Ignoring --no-synchronized-snapshots\n");
 	}
+
+
+	SetupConnection(g_fout, dumpencoding, use_role, serializable_deferrable);
 
 	/* Expand schema selection patterns into OID lists */
 	if (schema_include_patterns.head != NULL)
@@ -14259,109 +14230,5 @@ check_sql_result(PGresult *res, PGconn *conn, const char *query,
 	write_msg(NULL, "Error message from server: %s", err);
 	write_msg(NULL, "The command was: %s\n", query);
 	exit_nicely();
-}
-
-
-void
-SetupConnection(PGconn *conn, const char *dumpencoding, const char *use_role)
-{
-	const char *std_strings;
-
-	/* Set the client encoding if requested */
-	if (dumpencoding)
-	{
-		if (PQsetClientEncoding(conn, dumpencoding) < 0)
-		{
-			write_msg(NULL, "invalid client encoding \"%s\" specified\n",
-					  dumpencoding);
-			exit(1);
-		}
-	}
-
-	/*
-	 * Get the active encoding and the standard_conforming_strings setting, so
-	 * we know how to escape strings.
-	 */
-	g_fout->encoding = PQclientEncoding(conn);
-
-	std_strings = PQparameterStatus(conn, "standard_conforming_strings");
-	g_fout->std_strings = (std_strings && strcmp(std_strings, "on") == 0);
-
-	/* Set the role if requested */
-	if (use_role && g_fout->remoteVersion >= 80100)
-	{
-		PQExpBuffer query = createPQExpBuffer();
-
-		appendPQExpBuffer(query, "SET ROLE %s", fmtId(use_role));
-		do_sql_command(conn, query->data);
-		destroyPQExpBuffer(query);
-	}
-
-	/* Set the datestyle to ISO to ensure the dump's portability */
-	do_sql_command(conn, "SET DATESTYLE = ISO");
-
-	/* Likewise, avoid using sql_standard intervalstyle */
-	if (g_fout->remoteVersion >= 80400)
-		do_sql_command(conn, "SET INTERVALSTYLE = POSTGRES");
-
-	/*
-	 * If supported, set extra_float_digits so that we can dump float data
-	 * exactly (given correctly implemented float I/O code, anyway)
-	 */
-	if (g_fout->remoteVersion >= 80500)
-		do_sql_command(conn, "SET extra_float_digits TO 3");
-	else if (g_fout->remoteVersion >= 70400)
-		do_sql_command(conn, "SET extra_float_digits TO 2");
-
-	/*
-	 * If synchronized scanning is supported, disable it, to prevent
-	 * unpredictable changes in row ordering across a dump and reload.
-	 */
-	if (g_fout->remoteVersion >= 80300)
-		do_sql_command(conn, "SET synchronize_seqscans TO off");
-
-	/*
-	 * Quote all identifiers, if requested.
-	 */
-	if (quote_all_identifiers && g_fout->remoteVersion >= 90100)
-		do_sql_command(g_conn, "SET quote_all_identifiers = true");
-
-	/*
-	 * Disables security label support if server version < v9.1.x
-	 */
-	if (!no_security_labels && g_fout->remoteVersion < 90100)
-		no_security_labels = 1;
-
-	/*
-	 * Disable timeouts if supported.
-	 */
-	if (g_fout->remoteVersion >= 70300)
-		do_sql_command(conn, "SET statement_timeout = 0");
-
-	/*
-	 * Start serializable transaction to dump consistent data.
-	 */
-	do_sql_command(conn, "BEGIN");
-
-	do_sql_command(conn, "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE");
-
-	/* Select the appropriate subquery to convert user IDs to names */
-	if (g_fout->remoteVersion >= 80100)
-		username_subquery = "SELECT rolname FROM pg_catalog.pg_roles WHERE oid =";
-	else if (g_fout->remoteVersion >= 70300)
-		username_subquery = "SELECT usename FROM pg_catalog.pg_user WHERE usesysid =";
-	else
-		username_subquery = "SELECT usename FROM pg_user WHERE usesysid =";
-
-	/* Find the last built-in OID, if needed */
-	if (g_fout->remoteVersion < 70300)
-	{
-		if (g_fout->remoteVersion >= 70100)
-			g_last_builtin_oid = findLastBuiltinOid_V71(PQdb(conn));
-		else
-			g_last_builtin_oid = findLastBuiltinOid_V70();
-		if (g_verbose)
-			write_msg(NULL, "last built-in OID is %u\n", g_last_builtin_oid);
-	}
 }
 
