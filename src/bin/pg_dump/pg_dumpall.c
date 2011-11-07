@@ -1906,3 +1906,6 @@ doShellQuoting(PQExpBuffer buf, const char *str)
 	appendPQExpBufferChar(buf, '"');
 #endif   /* WIN32 */
 }
+
+/* dummy */
+void _SetupWorker(void) {}

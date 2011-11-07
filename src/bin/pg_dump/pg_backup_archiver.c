@@ -4366,7 +4366,6 @@ ParallelBackupStart(ArchiveHandle *AH, RestoreOptions *ropt)
 		wi->ropt = ropt;
 		wi->worker = i;
 		wi->AH = CloneArchive(AH);
-		wi->pstate = pstate;
 		wi->pipeRead = pipeMW[PIPE_READ];
 		wi->pipeWrite = pipeWM[PIPE_WRITE];
 
@@ -4760,9 +4759,11 @@ ListenToWorkers(ArchiveHandle *AH, ParallelState *pstate, bool do_wait)
 		else if (messageStartsWith(msg, "OK DUMP "))
 		{
 			statusString = msg + strlen("OK DUMP ");
+			printf("Got status string %s from worker %d\n", statusString, worker);
 			pstate->parallelSlot[worker].status =
 				(AH->EndMasterParallelPtr)
 					(AH, te, statusString, ACT_DUMP);
+			printf("Making that a status of %d for worker %d\n", pstate->parallelSlot[worker].status, worker);
 		}
 		else
 		{
@@ -4798,6 +4799,7 @@ ReapWorkerStatus(ParallelState *pstate, int *status)
 		if (pstate->parallelSlot[i].WorkerStatus == WRKR_FINISHED)
 		{
 			*status = pstate->parallelSlot[i].status;
+			printf("Reaping worker status %d from %d\n", *status, i);
 			pstate->parallelSlot[i].status = 0;
 			pstate->parallelSlot[i].WorkerStatus = WRKR_IDLE;
 			PrintStatus(pstate);

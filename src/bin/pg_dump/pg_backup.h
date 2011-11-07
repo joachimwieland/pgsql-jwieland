@@ -171,6 +171,7 @@ __attribute__((format(PG_PRINTF_ATTRIBUTE, 3, 4)));
 PGconn *ConnectDatabase(Archive *AHX, const char *dbname, const char *pghost,
 						const char *pgport, const char *username,
 						enum trivalue prompt_password);
+PGconn *CloneDatabaseConnection(Archive *AHX);
 
 /* Called to add a TOC entry */
 extern void ArchiveEntry(Archive *AHX,
