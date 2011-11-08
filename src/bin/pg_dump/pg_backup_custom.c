@@ -133,8 +133,7 @@ InitArchiveFmt_Custom(ArchiveHandle *AH)
 	AH->EndMasterParallelPtr = _EndMasterParallel;
 
 	AH->GetParallelStatePtr = NULL;
-	/* no parallel dump in the custom archive */
-	AH->WorkerJobDumpPtr = NULL;
+	AH->WorkerJobDumpPtr = NULL; /* no parallel dump in the custom archive */
 	AH->WorkerJobRestorePtr = _WorkerJobRestoreCustom;
 
 	/* Set up a private area. */
@@ -815,7 +814,10 @@ _DeClone(ArchiveHandle *AH)
 char *
 _WorkerJobRestoreCustom(ArchiveHandle *AH, TocEntry *te)
 {
-	static char	buf[64]; /* short fixed-size string + some numbers so far */
+	/* short fixed-size string + some ID so far, this needs to be malloc'ed
+	 * instead of static because we work with threads on windows */
+	const int	buflen = 64;
+	char	   *buf = (char*) malloc(buflen);
 	ParallelArgs pargs;
 	int			status;
 	lclTocEntry *tctx;
@@ -827,7 +829,7 @@ _WorkerJobRestoreCustom(ArchiveHandle *AH, TocEntry *te)
 
 	status = parallel_restore(&pargs);
 
-	snprintf(buf, sizeof(buf), "OK RESTORE %d %d %d", te->dumpId, status,
+	snprintf(buf, buflen, "OK RESTORE %d %d %d", te->dumpId, status,
 			 status == WORKER_IGNORED_ERRORS ? AH->public.n_errors : 0);
 
 	return buf;

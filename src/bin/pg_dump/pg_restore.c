@@ -72,7 +72,7 @@ main(int argc, char **argv)
 	RestoreOptions *opts;
 	int			c;
 	int			exit_code;
-	int			numWorkers;
+	int			numWorkers = 1;
 	Archive    *AH;
 	char	   *inputFileSpec;
 	static int	disable_triggers = 0;
@@ -393,6 +393,14 @@ main(int argc, char **argv)
 	CloseArchive(AH);
 
 	return exit_code;
+}
+
+void
+_SetupWorker(Archive *AHX, RestoreOptions *ropt)
+{
+	ArchiveHandle *AH = (ArchiveHandle *) AHX;
+	CloneDatabaseConnection(AHX);
+	(AH->ReopenPtr) (AH);
 }
 
 static void

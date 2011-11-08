@@ -239,12 +239,6 @@ static void sendMessageToMaster(ArchiveHandle *AH, int pipefd[2], const char *st
 static void SetupWorker(ArchiveHandle *AH, int pipefd[2], int worker,
 					   RestoreOptions *ropt);
 
-
-/* XXX: This will probably go away if the syncSnapshot patch gets committed */
-PGconn *g_conn;
-PGconn **g_conn_child;
-
-
 /*
  *	Wrapper functions.
  *
@@ -330,7 +324,7 @@ RestoreArchive(Archive *AHX, RestoreOptions *ropt)
 	/*
 	 * If we're going to do parallel restore, there are some restrictions.
 	 */
-	parallel_mode = (ropt->number_of_jobs > 1 && ropt->useDB);
+	parallel_mode = (AH->public.numWorkers > 1 && ropt->useDB);
 	if (parallel_mode)
 	{
 		/* We haven't got round to making this work for all archive formats */
@@ -3451,7 +3445,7 @@ restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate)
 	if (AH->version < K_VERS_1_8)
 		die_horribly(AH, modulename, "parallel restore is not supported with archives made by pre-8.0 pg_dump\n");
 
-	slots = (ParallelSlot *) calloc(sizeof(ParallelSlot), ropt->number_of_jobs);
+	slots = (ParallelSlot *) calloc(sizeof(ParallelSlot), AH->public.numWorkers);
 
 	/* Adjust dependency information */
 	fix_dependencies(AH);
@@ -4278,38 +4272,12 @@ static void
 SetupWorker(ArchiveHandle *AH, int pipefd[2], int worker,
 		   RestoreOptions *ropt)
 {
-	if (ropt)
-	{
-		/*
-		 * Restore mode
-		 */
-
-		CloneDatabaseConnection((Archive *) AH);
-		(AH->ReopenPtr) (AH);
-	}
-	else
-	{
-		/*
-		 * Dump mode
-		 */
-
-		CloneDatabaseConnection((Archive *) AH);
-
-		/*
-		 * dumpencoding and use_role are both NULL on a clone, we have saved
-		 * their values when we set up the master's connection.
-		 */
-		SetupConnection((Archive *) AH, NULL, NULL);
-
-		/* We cannot disconnect the master, it is holding the locks */
-	}
-
 	/*
-	 * The child must not use g_conn. The unix version (multiple processes)
-	 * actually could but the windows version can't (single process, multiple
-	 * threads).
+	 * In dump mode (pg_dump) this calls _SetupWorker() as defined in
+	 * pg_dump.c, while in restore mode (pg_restore) it calls _SetupWorker() as
+	 * defined in pg_restore.c.
 	 */
-	g_conn = NULL;
+	_SetupWorker((Archive *) AH, ropt);
 
 	Assert(AH->connection != NULL);
 
@@ -4726,6 +4694,7 @@ WaitForCommands(ArchiveHandle *AH, int pipefd[2], int worker)
 			Assert(te != NULL);
 			str = (AH->WorkerJobRestorePtr)(AH, te);
 			Assert(AH->connection != NULL);
+			printf("Got from workerjob: %s\n", str);
 			sendMessageToMaster(AH, pipefd, str);
 			free(str);
 		}
@@ -4796,7 +4765,11 @@ ListenToWorkers(ArchiveHandle *AH, ParallelState *pstate, bool do_wait)
 					(AH, te, statusString, ACT_DUMP);
 		}
 		else
+		{
+			write_msg(NULL, "Invalid message received from worker: %s", msg);
+			Assert(false);
 			die_horribly(AH, modulename, "Invalid message received from worker: %s", msg);
+		}
 	}
 	else if (messageStartsWith(msg, "TERMINATE OK"))
 	{
@@ -4844,6 +4817,8 @@ static void
 sendMessageToMaster(ArchiveHandle *AH, int pipefd[2], const char *str)
 {
 	int len = strlen(str) + 1;
+
+	printf("Sending message %s to master on fd %d\n", str, pipefd[PIPE_WRITE]);
 
 	if (writesocket(pipefd[PIPE_WRITE], str, len) != len)
 		die_horribly(AH, modulename,
@@ -4952,6 +4927,7 @@ readMessageFromPipe(int fd, bool allowBlock)
 	msgsize = 0;
 	for (;;)
 	{
+		Assert(msgsize <= bufsize);
 		/*
 		 * If we do non-blocking read, only set the channel non-blocking for
 		 * the very first character. We trust in our messages to terminate, if
@@ -4984,6 +4960,8 @@ readMessageFromPipe(int fd, bool allowBlock)
 					  strerror(errno));
 			exit(1);
 		}
+
+		Assert(ret == 1);
 
 		if (msg[msgsize] == '\0') {
 			printf("Got message %s from fd %d\n", msg, fd);
