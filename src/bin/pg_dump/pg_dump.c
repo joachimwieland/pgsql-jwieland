@@ -949,13 +949,6 @@ SetupConnection(Archive *AHX, const char *dumpencoding, const char *use_role)
 		do_sql_command(conn, "SET statement_timeout = 0");
 
 	/*
-	 * Start serializable transaction to dump consistent data.
-	 */
-	do_sql_command(conn, "BEGIN");
-
-	do_sql_command(conn, "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE");
-
-	/*
 	 * Quote all identifiers, if requested.
 	 */
 	if (quote_all_identifiers && AHX->remoteVersion >= 90100)
@@ -976,9 +969,7 @@ SetupConnection(Archive *AHX, const char *dumpencoding, const char *use_role)
 						   "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
 	}
 	else
-	{
 		do_sql_command(conn, "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE");
-	}
 
 	if (AHX->numWorkers > 1 && AHX->remoteVersion >= 90200)
 	{
