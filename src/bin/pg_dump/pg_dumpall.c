@@ -1908,4 +1908,4 @@ doShellQuoting(PQExpBuffer buf, const char *str)
 }
 
 /* dummy */
-void _SetupWorker(Archive *AHX, RestoreOptions *ropt) {}
+void _SetupWorker(Archive *AHX, RestoreOptions *ropt, PGconn **conn) {}

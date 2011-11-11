@@ -349,10 +349,16 @@ typedef struct _parallel_args
 typedef struct _parallel_slot
 {
 	ParallelArgs	   *args;
-	T_WorkerStatus		WorkerStatus;
+	T_WorkerStatus		workerStatus;
 	int					status;
 	int					pipeRead;
 	int					pipeWrite;
+#ifdef WIN32
+	HANDLE				hThread;
+	PGconn			   *conn;
+#else
+	pid_t				pid;
+#endif
 } ParallelSlot;
 
 #define NO_SLOT (-1)
@@ -374,7 +380,6 @@ extern void DispatchJobForTocEntry(ArchiveHandle *AH,
 extern void WaitForAllWorkers(ArchiveHandle *AH, ParallelState *pstate);
 
 extern PGconn *g_conn;
-extern PGconn **g_conn_child;
 
 /* Used everywhere */
 extern const char *progname;

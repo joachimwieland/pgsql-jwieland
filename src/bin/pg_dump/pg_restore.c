@@ -396,10 +396,10 @@ main(int argc, char **argv)
 }
 
 void
-_SetupWorker(Archive *AHX, RestoreOptions *ropt)
+_SetupWorker(Archive *AHX, RestoreOptions *ropt, PGconn **conn)
 {
 	ArchiveHandle *AH = (ArchiveHandle *) AHX;
-	CloneDatabaseConnection(AHX);
+	*conn = CloneDatabaseConnection(AHX);
 	(AH->ReopenPtr) (AH);
 }
 

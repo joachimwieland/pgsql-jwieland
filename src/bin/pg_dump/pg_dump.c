@@ -854,9 +854,9 @@ exit_nicely(void)
 }
 
 void
-_SetupWorker(Archive *AHX, RestoreOptions *ropt)
+_SetupWorker(Archive *AHX, RestoreOptions *ropt, PGconn **conn)
 {
-	CloneDatabaseConnection(AHX);
+	*conn = CloneDatabaseConnection(AHX);
 	SetupConnection(AHX, NULL, NULL);
 
 	/* Note that we cannot disconnect the master, it is holding the locks. */
@@ -988,8 +988,10 @@ SetupConnection(Archive *AHX, const char *dumpencoding, const char *use_role)
 			 * Note: If we have it, we always use it, you cannot switch it off
 			 * then.
 			 */
-			if (AHX->remoteVersion >= 90200)
+			if (AHX->remoteVersion >= 90200) {
 				AH->connParams.sync_snapshot_id = get_synchronized_snapshot(AH);
+				printf("snapshotid: %s\n", AH->connParams.sync_snapshot_id);
+			}
 		}
 	}
 }
