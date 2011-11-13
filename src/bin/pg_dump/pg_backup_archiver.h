@@ -354,7 +354,7 @@ typedef struct _parallel_slot
 	int					pipeRead;
 	int					pipeWrite;
 #ifdef WIN32
-	HANDLE				hThread;
+	uintptr_t			hThread;
 	PGconn			   *conn;
 #else
 	pid_t				pid;
@@ -370,7 +370,6 @@ typedef struct _parallel_state
 } ParallelState;
 
 extern int parallel_restore(ParallelArgs *args);
-
 extern ParallelState *ParallelBackupStart(ArchiveHandle *AH,
 										  RestoreOptions *ropt);
 extern void ParallelBackupEnd(ArchiveHandle *AH, ParallelState *pstate);
@@ -378,6 +377,7 @@ extern void DispatchJobForTocEntry(ArchiveHandle *AH,
 								   ParallelState *pstate,
 								   TocEntry *te, T_Action act);
 extern void WaitForAllWorkers(ArchiveHandle *AH, ParallelState *pstate);
+extern void checkTerm(void);
 
 extern PGconn *g_conn;
 

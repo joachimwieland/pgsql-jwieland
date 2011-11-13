@@ -89,7 +89,10 @@ static size_t _CustomReadFunc(ArchiveHandle *AH, char **buf, size_t *buflen);
 
 static const char *modulename = gettext_noop("custom archiver");
 
-
+/* shortcut to avoid the function call on non-Win32 platforms */
+#ifndef WIN32
+#define checkTerm()
+#endif
 
 /*
  *	Init routine required by ALL formats. This is a global routine
@@ -958,6 +961,12 @@ _CustomReadFunc(ArchiveHandle *AH, char **buf, size_t *buflen)
 {
 	size_t		blkLen;
 	size_t		cnt;
+
+	/*
+	 * Should we terminate? (only applicable on Windows and when in parallel
+	 * mode)
+	 */
+	checkTerm();
 
 	/* Read length */
 	blkLen = ReadInt(AH);

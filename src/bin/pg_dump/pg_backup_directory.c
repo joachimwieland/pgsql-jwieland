@@ -332,6 +332,7 @@ _WriteData(ArchiveHandle *AH, const void *data, size_t dLen)
 	if (dLen == 0)
 		return 0;
 
+	checkTerm();
 	return cfwrite(data, dLen, ctx->dataFH);
 }
 
@@ -378,7 +379,10 @@ _PrintFileData(ArchiveHandle *AH, char *filename, RestoreOptions *ropt)
 	buflen = ZLIB_OUT_SIZE;
 
 	while ((cnt = cfread(buf, buflen, cfp)))
+	{
+		checkTerm();
 		ahwrite(buf, 1, cnt, AH);
+	}
 
 	free(buf);
 }
@@ -497,6 +501,7 @@ _WriteBuf(ArchiveHandle *AH, const void *buf, size_t len)
 	lclContext *ctx = (lclContext *) AH->formatData;
 	size_t		res;
 
+	checkTerm();
 	res = cfwrite(buf, len, ctx->dataFH);
 	if (res != len)
 		die_horribly(AH, modulename, "could not write to output file: %s\n",
@@ -516,6 +521,7 @@ _ReadBuf(ArchiveHandle *AH, void *buf, size_t len)
 	lclContext *ctx = (lclContext *) AH->formatData;
 	size_t		res;
 
+	checkTerm();
 	res = cfread(buf, len, ctx->dataFH);
 
 	return res;
