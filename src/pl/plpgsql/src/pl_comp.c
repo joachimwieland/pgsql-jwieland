@@ -490,6 +490,8 @@ do_compile(FunctionCallInfo fcinfo,
 				{
 					if (rettypeid == ANYARRAYOID)
 						rettypeid = INT4ARRAYOID;
+					else if (rettypeid == ANYRANGEOID)
+						rettypeid = INT4RANGEOID;
 					else	/* ANYELEMENT or ANYNONARRAY */
 						rettypeid = INT4OID;
 					/* XXX what could we use for ANYENUM? */
@@ -1719,12 +1721,13 @@ plpgsql_parse_cwordtype(List *idents)
 	classStruct = (Form_pg_class) GETSTRUCT(classtup);
 
 	/*
-	 * It must be a relation, sequence, view, or type
+	 * It must be a relation, sequence, view, composite type, or foreign table
 	 */
 	if (classStruct->relkind != RELKIND_RELATION &&
 		classStruct->relkind != RELKIND_SEQUENCE &&
 		classStruct->relkind != RELKIND_VIEW &&
-		classStruct->relkind != RELKIND_COMPOSITE_TYPE)
+		classStruct->relkind != RELKIND_COMPOSITE_TYPE &&
+		classStruct->relkind != RELKIND_FOREIGN_TABLE)
 		goto done;
 
 	/*
@@ -1940,11 +1943,12 @@ build_row_from_class(Oid classOid)
 	classStruct = RelationGetForm(rel);
 	relname = RelationGetRelationName(rel);
 
-	/* accept relation, sequence, view, or composite type entries */
+	/* accept relation, sequence, view, composite type, or foreign table */
 	if (classStruct->relkind != RELKIND_RELATION &&
 		classStruct->relkind != RELKIND_SEQUENCE &&
 		classStruct->relkind != RELKIND_VIEW &&
-		classStruct->relkind != RELKIND_COMPOSITE_TYPE)
+		classStruct->relkind != RELKIND_COMPOSITE_TYPE &&
+		classStruct->relkind != RELKIND_FOREIGN_TABLE)
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("relation \"%s\" is not a table", relname)));
@@ -2119,6 +2123,7 @@ build_datatype(HeapTuple typeTup, int32 typmod, Oid collation)
 		case TYPTYPE_BASE:
 		case TYPTYPE_DOMAIN:
 		case TYPTYPE_ENUM:
+		case TYPTYPE_RANGE:
 			typ->ttype = PLPGSQL_TTYPE_SCALAR;
 			break;
 		case TYPTYPE_COMPOSITE:
@@ -2373,8 +2378,8 @@ compute_function_hashkey(FunctionCallInfo fcinfo,
 /*
  * This is the same as the standard resolve_polymorphic_argtypes() function,
  * but with a special case for validation: assume that polymorphic arguments
- * are integer or integer-array.  Also, we go ahead and report the error
- * if we can't resolve the types.
+ * are integer, integer-range or integer-array.  Also, we go ahead and report
+ * the error if we can't resolve the types.
  */
 static void
 plpgsql_resolve_polymorphic_argtypes(int numargs,
@@ -2406,6 +2411,9 @@ plpgsql_resolve_polymorphic_argtypes(int numargs,
 				case ANYNONARRAYOID:
 				case ANYENUMOID:		/* XXX dubious */
 					argtypes[i] = INT4OID;
+					break;
+				case ANYRANGEOID:
+					argtypes[i] = INT4RANGEOID;
 					break;
 				case ANYARRAYOID:
 					argtypes[i] = INT4ARRAYOID;
