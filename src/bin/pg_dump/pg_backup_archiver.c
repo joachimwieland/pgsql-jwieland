@@ -281,6 +281,25 @@ CheckForWorkerTermination(ParallelState *pstate, bool do_wait)
 static void
 WorkerExit(int signum)
 {
+	/*
+	 * Signal Handler. We could get multiple signals delivered and then we
+	 * might get interrupted in the Signal handler only to enter a
+	 * different incarnation of this function.
+	 *
+	 * The following holds for this function:
+	 * - At least one function sees wantExit == 0 and increases it to 1.
+	 * - there could be several of them, even though wantExit++ is most
+	 *   probably atomic, it's strictly speaking wantExit = wantExit + 1.
+	 *   Now if the value has been read, is found to be 0 and then we get
+	 *   another signal, we get interrupted again and we will first service
+	 *   this interrupt.
+	 * - The first signal handler that succeeds setting wantExit to 1 will not be
+	 *   interrupted further by new signal handler invocations
+	 * - This process sees worker_conn != NULL and calls ShutdownConnection().
+	 * - That function sets the worker_conn to NULL
+	 * - The function that did the actual work terminates
+	 * - Any other signal handler that is now continued sees worker_conn == NULL already.
+	 */
 	if (wantExit++ > 0)
 		return;
 
@@ -5266,6 +5285,20 @@ readMessageFromPipe(int fd, bool do_wait)
 		if (msgsize == 0 && !do_wait) {
 			setnonblocking(fd);
 		}
+
+		if (do_wait)
+		{
+			fd_set read_set;
+			int i;
+
+			FD_ZERO(&read_set);
+			FD_SET(fd, &read_set);
+
+			/* abort on error, on Windows checks if we should terminate */
+			i = select_loop(fd, &read_set);
+			Assert(i != 0);
+		}
+
 		ret = readsocket(fd, msg + msgsize, 1);
 
 		if (msgsize == 0 && !do_wait)
