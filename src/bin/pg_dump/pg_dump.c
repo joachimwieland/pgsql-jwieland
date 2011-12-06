@@ -857,9 +857,10 @@ exit_nicely(void)
 }
 
 void
-_SetupWorker(Archive *AHX, RestoreOptions *ropt, PGconn **conn)
+_SetupWorker(Archive *AHX, RestoreOptions *ropt, PGconn ***conn)
 {
-	*conn = CloneDatabaseConnection(AHX);
+	CloneDatabaseConnection(AHX);
+	*conn = &AH->connection;
 	SetupConnection(AHX, NULL, NULL);
 
 	/* Note that we cannot disconnect the master, it is holding the locks. */
@@ -7770,7 +7771,7 @@ dumpRangeType(Archive *fout, TypeInfo *tyinfo)
 				 tyinfo->dobj.name,
 				 tyinfo->dobj.namespace->dobj.name,
 				 NULL,
-				 tyinfo->rolname, false,
+				 tyinfo->rolname, 0, false,
 				 "TYPE", SECTION_PRE_DATA,
 				 q->data, delq->data, NULL,
 				 tyinfo->dobj.dependencies, tyinfo->dobj.nDeps,

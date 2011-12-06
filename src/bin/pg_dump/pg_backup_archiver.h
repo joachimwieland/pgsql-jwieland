@@ -355,7 +355,7 @@ typedef struct _parallel_slot
 	int					pipeWrite;
 #ifdef WIN32
 	uintptr_t			hThread;
-	PGconn			   *conn;
+	PGconn			  **conn;
 #else
 	pid_t				pid;
 #endif
