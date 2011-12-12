@@ -37,7 +37,7 @@ static unsigned int __stdcall ShutdownConnection(PGconn **conn);
 static int ShutdownConnection(PGconn **conn);
 #endif
 
-static void ShutdownWorkersSoft(ArchiveHandle *AH, ParallelState *pstate);
+static void ShutdownWorkersSoft(ArchiveHandle *AH, ParallelState *pstate, bool do_wait);
 static bool HasEveryWorkerTerminated(ParallelState *pstate);
 
 
@@ -181,7 +181,7 @@ CheckForWorkerTermination(ParallelState *pstate, bool do_wait)
 	int i, ret, j = 0;
 
 	if (!lpHandles)
-		lpHandles = malloc(sizeof(HANDLE) * pstate->numWorkers);
+		lpHandles = (HANDLE *) malloc(sizeof(HANDLE) * pstate->numWorkers);
 
 	for(i = 0; i < pstate->numWorkers; i++)
 		if (pstate->parallelSlot[i].workerStatus != WRKR_TERMINATED)
@@ -316,9 +316,6 @@ ShutdownWorkersHard(ArchiveHandle *AH, ParallelState *pstate)
 static void
 WorkerExit(int signum)
 {
-
-	XXX need signal handler for parents death
-
 	/*
 	 * Signal Handler. We could get multiple signals delivered and then we
 	 * might get interrupted in the Signal handler only to enter a
@@ -327,10 +324,7 @@ WorkerExit(int signum)
 	 * The following holds for this function:
 	 * - At least one function sees wantExit == 0 and increases it to 1.
 	 * - there could be several of them, even though wantExit++ is most
-	 *   probably atomic, it's strictly speaking wantExit = wantExit + 1.
-	 *   Now if the value has been read, is found to be 0 and then we get
-	 *   another signal, we get interrupted again and we will first service
-	 *   this interrupt.
+	 *   probably atomic.
 	 * - The first signal handler that succeeds setting wantExit to 1 will not be
 	 *   interrupted further by new signal handler invocations
 	 * - This process sees worker_conn != NULL and calls ShutdownConnection().
@@ -343,6 +337,7 @@ WorkerExit(int signum)
 	if (wantExit++ > 0)
 		return;
 
+	/* worker_conn == NULL is only true in the parent */
 	if (worker_conn == NULL)
 		return;
 
@@ -352,8 +347,6 @@ WorkerExit(int signum)
 	/* we were here first */
 	if (*worker_conn)
 		ShutdownConnection(worker_conn);
-	else
-		printf("Gconn is NULL in %d\n", getpid());
 
 	exit(1);
 }
@@ -537,7 +530,7 @@ static void WaitForCommands(ArchiveHandle *AH, int pipefd[2], int worker);
 static char *getMessageFromMaster(ArchiveHandle *AH, int pipefd[2]);
 static void sendMessageToMaster(ArchiveHandle *AH, int pipefd[2], const char *str);
 static void SetupWorker(ArchiveHandle *AH, int pipefd[2], int worker,
-					   RestoreOptions *ropt, PGconn ***conn);
+					   RestoreOptions *ropt);
 
 /*
  *	Wrapper functions.
@@ -4572,7 +4565,7 @@ DeCloneArchive(ArchiveHandle *AH)
  */
 static void
 SetupWorker(ArchiveHandle *AH, int pipefd[2], int worker,
-		   RestoreOptions *ropt, PGconn **conn)
+		   RestoreOptions *ropt)
 {
 	/*
 	 * In dump mode (pg_dump) this calls _SetupWorker() as defined in
@@ -4583,10 +4576,9 @@ SetupWorker(ArchiveHandle *AH, int pipefd[2], int worker,
 	 * properly when we shut down. This happens only that way when it is
 	 * brought down because of an error.
 	 */
-	_SetupWorker((Archive *) AH, ropt, conn);
+	_SetupWorker((Archive *) AH, ropt);
 
 	Assert(AH->connection != NULL);
-	Assert(**conn == AH->connection);
 
 	WaitForCommands(AH, pipefd, worker);
 
@@ -4625,7 +4617,7 @@ init_spawned_worker_win32(WorkerInfo *wi)
 	SetupWorker(AH, pipefd, worker, ropt, &conn);
 
 	DeCloneArchive(AH);
-//	_endthreadex(0);
+	_endthreadex(0);
 	return 0;
 }
 #endif
@@ -4663,6 +4655,11 @@ ParallelBackupStart(ArchiveHandle *AH, RestoreOptions *ropt)
 	termEvent = CreateEvent(NULL, true, false, "Terminate");
 #else
 	worker_conn = NULL;
+	/*
+	 * Set up our signal handler, it doesn't do anything in the parent but that
+	 * way we have it in every child right from the beginning.
+	 */
+	signal(SIGTERM, WorkerExit);
 #endif
 
 	for (i = 0; i < pstate->numWorkers; i++)
@@ -4701,15 +4698,11 @@ ParallelBackupStart(ArchiveHandle *AH, RestoreOptions *ropt)
 			int j;
 			int pipefd[2] = { pipeMW[PIPE_READ], pipeWM[PIPE_WRITE] };
 
-			/* Forget the parent's connection and set up our signal handler */
-			/* XXX */
-			signal(SIGTERM, WorkerExit);
-
 			closesocket(pipeWM[PIPE_READ]);		/* close read end of Worker -> Master */
 			closesocket(pipeMW[PIPE_WRITE]);	/* close write end of Master -> Worker */
 
 			/*
-			 * Close all inherited fd's for communication of the master with
+			 * Close all inherited fds for communication of the master with
 			 * the other workers.
 			 */
 			for (j = 0; j < i; j++)
@@ -4722,8 +4715,11 @@ ParallelBackupStart(ArchiveHandle *AH, RestoreOptions *ropt)
 			free(pstate->parallelSlot);
 			free(pstate);
 
+			/* Forget the parent's connection */
+			AH->connection = NULL;
 			worker_conn = &AH->connection;
 			SetupWorker(AH, pipefd, i, ropt);
+			Assert(*worker_conn == AH->connection);
 
 			exit(0);
 		}
@@ -4772,8 +4768,8 @@ ParallelBackupEnd(ArchiveHandle *AH, ParallelState *pstate)
 	PrintStatus(pstate);
 	Assert(IsEveryWorkerIdle(pstate));
 
-	/* no hard shutdown, let workers exit by themselves */
-	ShutdownWorkersSoft(AH, pstate);
+	/* no hard shutdown, let workers exit by themselves and wait for them */
+	ShutdownWorkersSoft(AH, pstate, true);
 
 	PrintStatus(pstate);
 
@@ -4944,10 +4940,11 @@ ShutdownConnection(PGconn **conn)
 	if (PQisBusy(*conn))
 	{
 		/*
-		 * Do some effort to gracefully shut down the connection, but not too much
-		 * as the parent is waiting for us to terminate. The cancellation is
-		 * asynchronous, so if we just cancelled and immediately afterwards called
-		 * PQfinish, we would still abort active busy connections.
+		 * Do some effort to gracefully shut down the connection, but not too much,
+		 * since the parent is waiting for us to terminate. The cancellation is
+		 * asynchronous, so we need to wait a bit after sending PQcancel().
+		 * Calling PQcancel() and PQfinish() immediately afterwards would still
+		 * cancel an active connection.
 		 */
 		if ((cancel = PQgetCancel(*conn)))
 		{
@@ -5046,10 +5043,13 @@ WaitForCommands(ArchiveHandle *AH, int pipefd[2], int worker)
 	{
 		command = getMessageFromMaster(AH, pipefd);
 
+/* XXX
 		if (worker == 5) {
 			PQfinish(*worker_conn);
 			die_horribly(AH, modulename, "Null bock mehr\n");
 		}
+  XXX
+*/
 
 		if (messageStartsWith(command, "DUMP "))
 		{

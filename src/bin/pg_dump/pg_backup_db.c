@@ -325,7 +325,7 @@ ConnectDatabase(Archive *AHX,
 	return AH->connection;
 }
 
-PGconn **
+PGconn *
 CloneDatabaseConnection(Archive *AHX)
 {
 	ArchiveHandle *AH = (ArchiveHandle *) AHX;

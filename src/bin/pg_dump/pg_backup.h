@@ -209,7 +209,7 @@ extern void PrintTOCSummary(Archive *AH, RestoreOptions *ropt);
 extern RestoreOptions *NewRestoreOptions(void);
 
 /* We have one in pg_dump.c and another one in pg_restore.c */
-void _SetupWorker(Archive *AHX, RestoreOptions *ropt, PGconn **conn);
+void _SetupWorker(Archive *AHX, RestoreOptions *ropt);
 
 /* Rearrange and filter TOC entries */
 extern void SortTocFromFile(Archive *AHX, RestoreOptions *ropt);

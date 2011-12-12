@@ -857,10 +857,9 @@ exit_nicely(void)
 }
 
 void
-_SetupWorker(Archive *AHX, RestoreOptions *ropt, PGconn ***conn)
+_SetupWorker(Archive *AHX, RestoreOptions *ropt)
 {
 	CloneDatabaseConnection(AHX);
-	*conn = &AH->connection;
 	SetupConnection(AHX, NULL, NULL);
 
 	/* Note that we cannot disconnect the master, it is holding the locks. */
