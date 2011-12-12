@@ -4896,7 +4896,10 @@ lockTableNoWait(ArchiveHandle *AH, TocEntry *te)
 	res = PQexec(AH->connection, query->data);
 
 	if (!res || PQresultStatus(res) != PGRES_COMMAND_OK)
-		die_horribly(AH, modulename, "could not lock table %s: %s",
+		die_horribly(AH, modulename, "could not obtain lock on relation \"%s\". This "
+					 "usually means that someone requested an ACCESS EXCLUSIVE lock "
+					 "on the table after the pg_dump parent process has gotten the "
+					 "initial ACCESS SHARE lock on the table.",
 					 qualId, PQerrorMessage(AH->connection));
 
 	PQclear(res);
@@ -5022,7 +5025,6 @@ ListenToWorkers(ArchiveHandle *AH, ParallelState *pstate, bool do_wait)
 
 	if ((i = CheckForWorkerTermination(pstate, false)) != NO_SLOT)
 	{
-		printf("Error, process %d has died, shutting down all child processes\n", i);
 		ShutdownWorkersHard(AH, pstate);
 		die_horribly(AH, modulename,
 					 "A worker died while working on %s %s\n",
@@ -5044,8 +5046,6 @@ ListenToWorkers(ArchiveHandle *AH, ParallelState *pstate, bool do_wait)
 		char	   *statusString;
 		TocEntry   *te;
 
-		printf("Got OK with information from worker %d (%s)\n", worker, msg);
-
 		pstate->parallelSlot[worker].workerStatus = WRKR_FINISHED;
 		te = pstate->parallelSlot[worker].args->te;
 		if (messageStartsWith(msg, "OK RESTORE "))
@@ -5058,11 +5058,9 @@ ListenToWorkers(ArchiveHandle *AH, ParallelState *pstate, bool do_wait)
 		else if (messageStartsWith(msg, "OK DUMP "))
 		{
 			statusString = msg + strlen("OK DUMP ");
-			printf("Got status string %s from worker %d\n", statusString, worker);
 			pstate->parallelSlot[worker].status =
 				(AH->EndMasterParallelPtr)
 					(AH, te, statusString, ACT_DUMP);
-			printf("Making that a status of %d for worker %d\n", pstate->parallelSlot[worker].status, worker);
 		}
 		else
 		{
@@ -5091,7 +5089,6 @@ ReapWorkerStatus(ParallelState *pstate, int *status)
 		if (pstate->parallelSlot[i].workerStatus == WRKR_FINISHED)
 		{
 			*status = pstate->parallelSlot[i].status;
-			printf("Reaping worker status %d from %d\n", *status, i);
 			pstate->parallelSlot[i].status = 0;
 			pstate->parallelSlot[i].workerStatus = WRKR_IDLE;
 			PrintStatus(pstate);
