@@ -65,6 +65,14 @@ ExecRenameStmt(RenameStmt *stmt)
 			RenameDatabase(stmt->subname, stmt->newname);
 			break;
 
+		case OBJECT_FDW:
+			RenameForeignDataWrapper(stmt->subname, stmt->newname);
+			break;
+
+		case OBJECT_FOREIGN_SERVER:
+			RenameForeignServer(stmt->subname, stmt->newname);
+			break;
+
 		case OBJECT_FUNCTION:
 			RenameFunction(stmt->object, stmt->objarg, stmt->newname);
 			break;
@@ -111,7 +119,7 @@ ExecRenameStmt(RenameStmt *stmt)
 				 * in RenameRelation, renameatt, or renametrig.
 				 */
 				relid = RangeVarGetRelid(stmt->relation, AccessExclusiveLock,
-										 false, false);
+										 false);
 
 				switch (stmt->renameType)
 				{

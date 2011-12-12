@@ -201,8 +201,7 @@ CreateTrigger(CreateTrigStmt *stmt, const char *queryString,
 		 * we might end up creating a pg_constraint entry referencing a
 		 * nonexistent table.
 		 */
-		constrrelid = RangeVarGetRelid(stmt->constrrel, AccessShareLock, false,
-									   false);
+		constrrelid = RangeVarGetRelid(stmt->constrrel, AccessShareLock, false);
 	}
 
 	/* permission checks */
@@ -1024,42 +1023,6 @@ ConvertTriggerToFK(CreateTrigStmt *stmt, Oid funcoid)
 		pfree(info);
 		/* We leak the copied args ... not worth worrying about */
 	}
-}
-
-
-/*
- * DropTrigger - drop an individual trigger by name
- */
-void
-DropTrigger(RangeVar *relation, const char *trigname, DropBehavior behavior,
-			bool missing_ok)
-{
-	Oid			relid;
-	ObjectAddress object;
-
-	/* lock level should match RemoveTriggerById */
-	relid = RangeVarGetRelid(relation, AccessExclusiveLock, false, false);
-
-	object.classId = TriggerRelationId;
-	object.objectId = get_trigger_oid(relid, trigname, missing_ok);
-	object.objectSubId = 0;
-
-	if (!OidIsValid(object.objectId))
-	{
-		ereport(NOTICE,
-		  (errmsg("trigger \"%s\" for table \"%s\" does not exist, skipping",
-				  trigname, get_rel_name(relid))));
-		return;
-	}
-
-	if (!pg_class_ownercheck(relid, GetUserId()))
-		aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_CLASS,
-					   get_rel_name(relid));
-
-	/*
-	 * Do the deletion
-	 */
-	performDeletion(&object, behavior);
 }
 
 /*

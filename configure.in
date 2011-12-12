@@ -1101,6 +1101,9 @@ if test "$with_ossp_uuid" = yes ; then
       [AC_MSG_ERROR([header file <ossp/uuid.h> or <uuid.h> is required for OSSP-UUID])])])
 fi
 
+if test "$PORTNAME" = "win32" ; then
+   AC_CHECK_HEADERS(crtdefs.h)
+fi
 
 ##
 ## Types, structures, compiler characteristics
@@ -1174,7 +1177,9 @@ fi
 # compiler characteristic, but you'd be wrong.  We must check this before
 # probing existence of related functions such as fseeko, since the largefile
 # defines can affect what is generated for that.
-AC_SYS_LARGEFILE
+if test "$PORTNAME" != "win32"; then
+   AC_SYS_LARGEFILE
+fi
 
 # Check for largefile support (must be after AC_SYS_LARGEFILE)
 AC_CHECK_SIZEOF([off_t])
@@ -1193,7 +1198,7 @@ PGAC_VAR_INT_TIMEZONE
 AC_FUNC_ACCEPT_ARGTYPES
 PGAC_FUNC_GETTIMEOFDAY_1ARG
 
-AC_CHECK_FUNCS([cbrt dlopen fcvt fdatasync getifaddrs getpeerucred getrlimit memmove poll pstat readlink scandir setproctitle setsid sigprocmask symlink sysconf towlower utime utimes waitpid wcstombs wcstombs_l])
+AC_CHECK_FUNCS([cbrt dlopen fcvt fdatasync getifaddrs getpeerucred getrlimit memmove poll pstat readlink setproctitle setsid sigprocmask symlink sysconf towlower utime utimes waitpid wcstombs wcstombs_l])
 
 AC_REPLACE_FUNCS(fseeko)
 case $host_os in

@@ -40,6 +40,8 @@
  */
 
 #include "pg_backup_archiver.h"
+
+#include "dumpmem.h"
 #include "dumputils.h"
 
 #include <ctype.h>
@@ -162,21 +164,21 @@ main(int argc, char **argv)
 				opts->createDB = 1;
 				break;
 			case 'd':
-				opts->connParams.dbname = strdup(optarg);
+				opts->connParams.dbname = pg_strdup(optarg);
 				break;
 			case 'e':
 				opts->exit_on_error = true;
 				break;
 			case 'f':			/* output file name */
-				opts->filename = strdup(optarg);
+				opts->filename = pg_strdup(optarg);
 				break;
 			case 'F':
 				if (strlen(optarg) != 0)
-					opts->formatName = strdup(optarg);
+					opts->formatName = pg_strdup(optarg);
 				break;
 			case 'h':
 				if (strlen(optarg) != 0)
-					opts->connParams.pghost = strdup(optarg);
+					opts->connParams.pghost = pg_strdup(optarg);
 				break;
 			case 'i':
 				/* ignored, deprecated option */
@@ -191,11 +193,11 @@ main(int argc, char **argv)
 				break;
 
 			case 'L':			/* input TOC summary file name */
-				opts->tocFile = strdup(optarg);
+				opts->tocFile = pg_strdup(optarg);
 				break;
 
 			case 'n':			/* Dump data for this schema only */
-				opts->schemaNames = strdup(optarg);
+				opts->schemaNames = pg_strdup(optarg);
 				break;
 
 			case 'O':
@@ -204,7 +206,7 @@ main(int argc, char **argv)
 
 			case 'p':
 				if (strlen(optarg) != 0)
-					opts->connParams.pgport = strdup(optarg);
+					opts->connParams.pgport = pg_strdup(optarg);
 				break;
 			case 'R':
 				/* no-op, still accepted for backwards compatibility */
@@ -212,29 +214,29 @@ main(int argc, char **argv)
 			case 'P':			/* Function */
 				opts->selTypes = 1;
 				opts->selFunction = 1;
-				opts->functionNames = strdup(optarg);
+				opts->functionNames = pg_strdup(optarg);
 				break;
 			case 'I':			/* Index */
 				opts->selTypes = 1;
 				opts->selIndex = 1;
-				opts->indexNames = strdup(optarg);
+				opts->indexNames = pg_strdup(optarg);
 				break;
 			case 'T':			/* Trigger */
 				opts->selTypes = 1;
 				opts->selTrigger = 1;
-				opts->triggerNames = strdup(optarg);
+				opts->triggerNames = pg_strdup(optarg);
 				break;
 			case 's':			/* dump schema only */
 				opts->schemaOnly = 1;
 				break;
 			case 'S':			/* Superuser username */
 				if (strlen(optarg) != 0)
-					opts->superuser = strdup(optarg);
+					opts->superuser = pg_strdup(optarg);
 				break;
 			case 't':			/* Dump data for this table only */
 				opts->selTypes = 1;
 				opts->selTable = 1;
-				opts->tableNames = strdup(optarg);
+				opts->tableNames = pg_strdup(optarg);
 				break;
 
 			case 'U':

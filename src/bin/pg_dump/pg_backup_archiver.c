@@ -21,6 +21,7 @@
  */
 
 #include "pg_backup_db.h"
+#include "dumpmem.h"
 #include "dumputils.h"
 
 #include <ctype.h>
@@ -447,8 +448,6 @@ typedef struct _outputContext
 	int			gzOut;
 } OutputContext;
 
-const char *progname;
-
 static const char *modulename = gettext_noop("archiver");
 
 /* index array created by fix_dependencies -- only used in parallel restore */
@@ -483,8 +482,9 @@ static int	_discoverArchiveFormat(ArchiveHandle *AH);
 
 static int	RestoringToDB(ArchiveHandle *AH);
 static void dump_lo_buf(ArchiveHandle *AH);
-static void _write_msg(const char *modulename, const char *fmt, va_list ap) __attribute__((format(PG_PRINTF_ATTRIBUTE, 2, 0)));
-static void _die_horribly(ArchiveHandle *AH, const char *modulename, const char *fmt, va_list ap) __attribute__((format(PG_PRINTF_ATTRIBUTE, 3, 0)));
+static void vdie_horribly(ArchiveHandle *AH, const char *modulename,
+						  const char *fmt, va_list ap)
+	__attribute__((format(PG_PRINTF_ATTRIBUTE, 3, 0)));
 
 static void dumpTimestamp(ArchiveHandle *AH, const char *msg, time_t tim);
 static void SetOutput(ArchiveHandle *AH, char *filename, int compression);
@@ -924,7 +924,7 @@ restore_toc_entry(ArchiveHandle *AH, TocEntry *te,
 		{
 			ahlog(AH, 1, "connecting to new database \"%s\"\n", te->tag);
 			_reconnectToDB(AH, te->tag);
-			ropt->connParams.dbname = strdup(te->tag);
+			ropt->connParams.dbname = pg_strdup(te->tag);
 		}
 	}
 
@@ -1046,7 +1046,7 @@ NewRestoreOptions(void)
 {
 	RestoreOptions *opts;
 
-	opts = (RestoreOptions *) calloc(1, sizeof(RestoreOptions));
+	opts = (RestoreOptions *) pg_calloc(1, sizeof(RestoreOptions));
 
 	/* set any fields that shouldn't default to zeroes */
 	opts->format = archUnknown;
@@ -1146,9 +1146,7 @@ ArchiveEntry(Archive *AHX,
 	ArchiveHandle *AH = (ArchiveHandle *) AHX;
 	TocEntry   *newToc;
 
-	newToc = (TocEntry *) calloc(1, sizeof(TocEntry));
-	if (!newToc)
-		die_horribly(AH, modulename, "out of memory\n");
+	newToc = (TocEntry *) pg_calloc(1, sizeof(TocEntry));
 
 	AH->tocCount++;
 	if (dumpId > AH->maxDumpId)
@@ -1163,19 +1161,19 @@ ArchiveEntry(Archive *AHX,
 	newToc->dumpId = dumpId;
 	newToc->section = section;
 
-	newToc->tag = strdup(tag);
-	newToc->namespace = namespace ? strdup(namespace) : NULL;
-	newToc->tablespace = tablespace ? strdup(tablespace) : NULL;
-	newToc->owner = strdup(owner);
+	newToc->tag = pg_strdup(tag);
+	newToc->namespace = namespace ? pg_strdup(namespace) : NULL;
+	newToc->tablespace = tablespace ? pg_strdup(tablespace) : NULL;
+	newToc->owner = pg_strdup(owner);
 	newToc->withOids = withOids;
-	newToc->desc = strdup(desc);
-	newToc->defn = strdup(defn);
-	newToc->dropStmt = strdup(dropStmt);
-	newToc->copyStmt = copyStmt ? strdup(copyStmt) : NULL;
+	newToc->desc = pg_strdup(desc);
+	newToc->defn = pg_strdup(defn);
+	newToc->dropStmt = pg_strdup(dropStmt);
+	newToc->copyStmt = copyStmt ? pg_strdup(copyStmt) : NULL;
 
 	if (nDeps > 0)
 	{
-		newToc->dependencies = (DumpId *) malloc(nDeps * sizeof(DumpId));
+		newToc->dependencies = (DumpId *) pg_malloc(nDeps * sizeof(DumpId));
 		memcpy(newToc->dependencies, deps, nDeps * sizeof(DumpId));
 		newToc->nDeps = nDeps;
 	}
@@ -1419,7 +1417,7 @@ SortTocFromFile(Archive *AHX, RestoreOptions *ropt)
 	bool		incomplete_line;
 
 	/* Allocate space for the 'wanted' array, and init it */
-	ropt->idWanted = (bool *) malloc(sizeof(bool) * AH->maxDumpId);
+	ropt->idWanted = (bool *) pg_malloc(sizeof(bool) * AH->maxDumpId);
 	memset(ropt->idWanted, 0, sizeof(bool) * AH->maxDumpId);
 
 	/* Setup the file */
@@ -1507,7 +1505,7 @@ InitDummyWantedList(Archive *AHX, RestoreOptions *ropt)
 	ArchiveHandle *AH = (ArchiveHandle *) AHX;
 
 	/* Allocate space for the 'wanted' array, and init it to 1's */
-	ropt->idWanted = (bool *) malloc(sizeof(bool) * AH->maxDumpId);
+	ropt->idWanted = (bool *) pg_malloc(sizeof(bool) * AH->maxDumpId);
 	memset(ropt->idWanted, 1, sizeof(bool) * AH->maxDumpId);
 }
 
@@ -1542,9 +1540,7 @@ archprintf(Archive *AH, const char *fmt,...)
 		if (p != NULL)
 			free(p);
 		bSize *= 2;
-		p = (char *) malloc(bSize);
-		if (p == NULL)
-			exit_horribly(AH, modulename, "out of memory\n");
+		p = (char *) pg_malloc(bSize);
 		va_start(ap, fmt);
 		cnt = vsnprintf(p, bSize, fmt, ap);
 		va_end(ap);
@@ -1673,9 +1669,7 @@ ahprintf(ArchiveHandle *AH, const char *fmt,...)
 		if (p != NULL)
 			free(p);
 		bSize *= 2;
-		p = (char *) malloc(bSize);
-		if (p == NULL)
-			die_horribly(AH, modulename, "out of memory\n");
+		p = (char *) pg_malloc(bSize);
 		va_start(ap, fmt);
 		cnt = vsnprintf(p, bSize, fmt, ap);
 		va_end(ap);
@@ -1694,7 +1688,7 @@ ahlog(ArchiveHandle *AH, int level, const char *fmt,...)
 		return;
 
 	va_start(ap, fmt);
-	_write_msg(NULL, fmt, ap);
+	vwrite_msg(NULL, fmt, ap);
 	va_end(ap);
 }
 
@@ -1812,32 +1806,13 @@ ahwrite(const void *ptr, size_t size, size_t nmemb, ArchiveHandle *AH)
 	}
 }
 
-/* Common exit code */
+
+/* Report a fatal error and exit(1) */
 static void
-_write_msg(const char *modulename, const char *fmt, va_list ap)
+vdie_horribly(ArchiveHandle *AH, const char *modulename,
+			  const char *fmt, va_list ap)
 {
-	if (modulename)
-		fprintf(stderr, "%s: [%s] ", progname, _(modulename));
-	else
-		fprintf(stderr, "%s: ", progname);
-	vfprintf(stderr, _(fmt), ap);
-}
-
-void
-write_msg(const char *modulename, const char *fmt,...)
-{
-	va_list		ap;
-
-	va_start(ap, fmt);
-	_write_msg(modulename, fmt, ap);
-	va_end(ap);
-}
-
-
-static void
-_die_horribly(ArchiveHandle *AH, const char *modulename, const char *fmt, va_list ap)
-{
-	_write_msg(modulename, fmt, ap);
+	vwrite_msg(modulename, fmt, ap);
 
 	if (AH)
 	{
@@ -1852,25 +1827,14 @@ _die_horribly(ArchiveHandle *AH, const char *modulename, const char *fmt, va_lis
 	myExit(1);
 }
 
-/* External use */
-void
-exit_horribly(Archive *AH, const char *modulename, const char *fmt,...)
-{
-	va_list		ap;
-
-	va_start(ap, fmt);
-	_die_horribly((ArchiveHandle *) AH, modulename, fmt, ap);
-	va_end(ap);
-}
-
-/* Archiver use (just different arg declaration) */
+/* As above, but with variable arg list */
 void
 die_horribly(ArchiveHandle *AH, const char *modulename, const char *fmt,...)
 {
 	va_list		ap;
 
 	va_start(ap, fmt);
-	_die_horribly(AH, modulename, fmt, ap);
+	vdie_horribly(AH, modulename, fmt, ap);
 	va_end(ap);
 }
 
@@ -1915,10 +1879,10 @@ warn_or_die_horribly(ArchiveHandle *AH,
 
 	va_start(ap, fmt);
 	if (AH->public.exit_on_error)
-		_die_horribly(AH, modulename, fmt, ap);
+		vdie_horribly(AH, modulename, fmt, ap);
 	else
 	{
-		_write_msg(modulename, fmt, ap);
+		vwrite_msg(modulename, fmt, ap);
 		AH->public.n_errors++;
 	}
 	va_end(ap);
@@ -2145,10 +2109,7 @@ ReadStr(ArchiveHandle *AH)
 		buf = NULL;
 	else
 	{
-		buf = (char *) malloc(l + 1);
-		if (!buf)
-			die_horribly(AH, modulename, "out of memory\n");
-
+		buf = (char *) pg_malloc(l + 1);
 		if ((*AH->ReadBufPtr) (AH, (void *) buf, l) != l)
 			die_horribly(AH, modulename, "unexpected end of file\n");
 
@@ -2174,7 +2135,7 @@ _discoverArchiveFormat(ArchiveHandle *AH)
 		free(AH->lookahead);
 
 	AH->lookaheadSize = 512;
-	AH->lookahead = calloc(1, 512);
+	AH->lookahead = pg_calloc(1, 512);
 	AH->lookaheadLen = 0;
 	AH->lookaheadPos = 0;
 
@@ -2339,9 +2300,7 @@ _allocAH(const char *FileSpec, const ArchiveFormat fmt,
 	write_msg(modulename, "allocating AH for %s, format %d\n", FileSpec, fmt);
 #endif
 
-	AH = (ArchiveHandle *) calloc(1, sizeof(ArchiveHandle));
-	if (!AH)
-		die_horribly(AH, modulename, "out of memory\n");
+	AH = (ArchiveHandle *) pg_calloc(1, sizeof(ArchiveHandle));
 
 	/* AH->debugLevel = 100; */
 
@@ -2368,12 +2327,12 @@ _allocAH(const char *FileSpec, const ArchiveFormat fmt,
 	AH->offSize = sizeof(pgoff_t);
 	if (FileSpec)
 	{
-		AH->fSpec = strdup(FileSpec);
+		AH->fSpec = pg_strdup(FileSpec);
 
 		/*
 		 * Not used; maybe later....
 		 *
-		 * AH->workDir = strdup(FileSpec); for(i=strlen(FileSpec) ; i > 0 ;
+		 * AH->workDir = pg_strdup(FileSpec); for(i=strlen(FileSpec) ; i > 0 ;
 		 * i--) if (AH->workDir[i-1] == '/')
 		 */
 	}
@@ -2385,9 +2344,7 @@ _allocAH(const char *FileSpec, const ArchiveFormat fmt,
 	AH->currTablespace = NULL;	/* ditto */
 	AH->currWithOids = -1;		/* force SET */
 
-	AH->toc = (TocEntry *) calloc(1, sizeof(TocEntry));
-	if (!AH->toc)
-		die_horribly(AH, modulename, "out of memory\n");
+	AH->toc = (TocEntry *) pg_calloc(1, sizeof(TocEntry));
 
 	AH->toc->next = AH->toc;
 	AH->toc->prev = AH->toc;
@@ -2621,7 +2578,7 @@ ReadToc(ArchiveHandle *AH)
 
 	for (i = 0; i < AH->tocCount; i++)
 	{
-		te = (TocEntry *) calloc(1, sizeof(TocEntry));
+		te = (TocEntry *) pg_calloc(1, sizeof(TocEntry));
 		te->dumpId = ReadInt(AH);
 
 		if (te->dumpId > AH->maxDumpId)
@@ -2707,7 +2664,7 @@ ReadToc(ArchiveHandle *AH)
 		if (AH->version >= K_VERS_1_5)
 		{
 			depSize = 100;
-			deps = (DumpId *) malloc(sizeof(DumpId) * depSize);
+			deps = (DumpId *) pg_malloc(sizeof(DumpId) * depSize);
 			depIdx = 0;
 			for (;;)
 			{
@@ -2717,7 +2674,7 @@ ReadToc(ArchiveHandle *AH)
 				if (depIdx >= depSize)
 				{
 					depSize *= 2;
-					deps = (DumpId *) realloc(deps, sizeof(DumpId) * depSize);
+					deps = (DumpId *) pg_realloc(deps, sizeof(DumpId) * depSize);
 				}
 				sscanf(tmp, "%d", &deps[depIdx]);
 				free(tmp);
@@ -2726,7 +2683,7 @@ ReadToc(ArchiveHandle *AH)
 
 			if (depIdx > 0)		/* We have a non-null entry */
 			{
-				deps = (DumpId *) realloc(deps, sizeof(DumpId) * depIdx);
+				deps = (DumpId *) pg_realloc(deps, sizeof(DumpId) * depIdx);
 				te->dependencies = deps;
 				te->nDeps = depIdx;
 			}
@@ -2767,7 +2724,7 @@ static void
 processEncodingEntry(ArchiveHandle *AH, TocEntry *te)
 {
 	/* te->defn should have the form SET client_encoding = 'foo'; */
-	char	   *defn = strdup(te->defn);
+	char	   *defn = pg_strdup(te->defn);
 	char	   *ptr1;
 	char	   *ptr2 = NULL;
 	int			encoding;
@@ -3112,7 +3069,7 @@ _becomeUser(ArchiveHandle *AH, const char *user)
 	 */
 	if (AH->currUser)
 		free(AH->currUser);
-	AH->currUser = strdup(user);
+	AH->currUser = pg_strdup(user);
 }
 
 /*
@@ -3181,7 +3138,7 @@ _selectOutputSchema(ArchiveHandle *AH, const char *schemaName)
 
 	if (AH->currSchema)
 		free(AH->currSchema);
-	AH->currSchema = strdup(schemaName);
+	AH->currSchema = pg_strdup(schemaName);
 
 	destroyPQExpBuffer(qry);
 }
@@ -3242,7 +3199,7 @@ _selectTablespace(ArchiveHandle *AH, const char *tablespace)
 
 	if (AH->currTablespace)
 		free(AH->currTablespace);
-	AH->currTablespace = strdup(want);
+	AH->currTablespace = pg_strdup(want);
 
 	destroyPQExpBuffer(qry);
 }
@@ -3324,7 +3281,7 @@ _getObjectDescription(PQExpBuffer buf, TocEntry *te, ArchiveHandle *AH)
 		strcmp(type, "OPERATOR FAMILY") == 0)
 	{
 		/* Chop "DROP " off the front and make a modifiable copy */
-		char	   *first = strdup(te->dropStmt + 5);
+		char	   *first = pg_strdup(te->dropStmt + 5);
 		char	   *last;
 
 		/* point to last character in string */
@@ -3740,7 +3697,7 @@ restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate)
 	if (AH->version < K_VERS_1_8)
 		die_horribly(AH, modulename, "parallel restore is not supported with archives made by pre-8.0 pg_dump\n");
 
-	slots = (ParallelSlot *) calloc(sizeof(ParallelSlot), AH->public.numWorkers);
+	slots = (ParallelSlot *) pg_calloc(sizeof(ParallelSlot), AH->public.numWorkers);
 
 	/* Adjust dependency information */
 	fix_dependencies(AH);
@@ -3893,6 +3850,13 @@ restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate)
 			/* at least one child is working and we have nothing ready. */
 			Assert(!IsEveryWorkerIdle(pstate));
 		}
+
+		/*
+				/+ this memory is dealloced in mark_work_done() +/
+				args = pg_malloc(sizeof(RestoreArgs));
+				args->AH = CloneArchive(AH);
+				args->te = next_work_item;
+		*/
 
 		for (;;)
 		{
@@ -4205,7 +4169,7 @@ fix_dependencies(ArchiveHandle *AH)
 	 * the TOC items are marked as not being in any parallel-processing list.
 	 */
 	maxDumpId = AH->maxDumpId;
-	tocsByDumpId = (TocEntry **) calloc(maxDumpId, sizeof(TocEntry *));
+	tocsByDumpId = (TocEntry **) pg_calloc(maxDumpId, sizeof(TocEntry *));
 	for (te = AH->toc->next; te != AH->toc; te = te->next)
 	{
 		tocsByDumpId[te->dumpId - 1] = te;
@@ -4265,7 +4229,7 @@ fix_dependencies(ArchiveHandle *AH)
 				{
 					if (strcmp(te2->desc, "BLOBS") == 0)
 					{
-						te->dependencies = (DumpId *) malloc(sizeof(DumpId));
+						te->dependencies = (DumpId *) pg_malloc(sizeof(DumpId));
 						te->dependencies[0] = te2->dumpId;
 						te->nDeps++;
 						te->depCount++;
@@ -4307,7 +4271,7 @@ fix_dependencies(ArchiveHandle *AH)
 	for (te = AH->toc->next; te != AH->toc; te = te->next)
 	{
 		if (te->nRevDeps > 0)
-			te->revDeps = (DumpId *) malloc(te->nRevDeps * sizeof(DumpId));
+			te->revDeps = (DumpId *) pg_malloc(te->nRevDeps * sizeof(DumpId));
 		te->nRevDeps = 0;
 	}
 
@@ -4399,7 +4363,7 @@ identify_locking_dependencies(TocEntry *te)
 	 * that all the entry types we are interested in here are POST_DATA, so
 	 * they will all have been changed this way.)
 	 */
-	lockids = (DumpId *) malloc(te->nDeps * sizeof(DumpId));
+	lockids = (DumpId *) pg_malloc(te->nDeps * sizeof(DumpId));
 	nlockids = 0;
 	for (i = 0; i < te->nDeps; i++)
 	{
@@ -4416,7 +4380,7 @@ identify_locking_dependencies(TocEntry *te)
 		return;
 	}
 
-	te->lockDeps = realloc(lockids, nlockids * sizeof(DumpId));
+	te->lockDeps = pg_realloc(lockids, nlockids * sizeof(DumpId));
 	te->nLockDeps = nlockids;
 }
 
@@ -4509,9 +4473,7 @@ CloneArchive(ArchiveHandle *AH)
 	ArchiveHandle *clone;
 
 	/* Make a "flat" copy */
-	clone = (ArchiveHandle *) malloc(sizeof(ArchiveHandle));
-	if (clone == NULL)
-		die_horribly(AH, modulename, "out of memory\n");
+	clone = (ArchiveHandle *) pg_malloc(sizeof(ArchiveHandle));
 	memcpy(clone, AH, sizeof(ArchiveHandle));
 
 	/* Handle format-independent fields ... none at the moment */

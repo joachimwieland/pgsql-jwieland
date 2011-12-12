@@ -11,6 +11,7 @@
  */
 
 #include "pg_backup_db.h"
+#include "dumpmem.h"
 #include "dumputils.h"
 
 #include <unistd.h>
@@ -56,7 +57,7 @@ _check_database_version(ArchiveHandle *AH)
 
 	remoteversion = _parse_version(AH, remoteversion_str);
 
-	AH->public.remoteVersionStr = strdup(remoteversion_str);
+	AH->public.remoteVersionStr = pg_strdup(remoteversion_str);
 	AH->public.remoteVersion = remoteversion;
 	if (!AH->archiveRemoteVersion)
 		AH->archiveRemoteVersion = AH->public.remoteVersionStr;
@@ -151,11 +152,8 @@ _connectDB(ArchiveHandle *AH, const char *reqdb, const char *requser)
 	do
 	{
 #define PARAMS_ARRAY_SIZE	7
-		const char **keywords = malloc(PARAMS_ARRAY_SIZE * sizeof(*keywords));
-		const char **values = malloc(PARAMS_ARRAY_SIZE * sizeof(*values));
-
-		if (!keywords || !values)
-			die_horribly(AH, modulename, "out of memory\n");
+		const char **keywords = pg_malloc(PARAMS_ARRAY_SIZE * sizeof(*keywords));
+		const char **values = pg_malloc(PARAMS_ARRAY_SIZE * sizeof(*values));
 
 		keywords[0] = "host";
 		values[0] = PQhost(AH->connection);
@@ -258,11 +256,8 @@ ConnectDatabase(Archive *AHX,
 	do
 	{
 #define PARAMS_ARRAY_SIZE	7
-		const char **keywords = malloc(PARAMS_ARRAY_SIZE * sizeof(*keywords));
-		const char **values = malloc(PARAMS_ARRAY_SIZE * sizeof(*values));
-
-		if (!keywords || !values)
-			die_horribly(AH, modulename, "out of memory\n");
+		const char **keywords = pg_malloc(PARAMS_ARRAY_SIZE * sizeof(*keywords));
+		const char **values = pg_malloc(PARAMS_ARRAY_SIZE * sizeof(*values));
 
 		keywords[0] = "host";
 		values[0] = pghost;
@@ -341,7 +336,7 @@ CloneDatabaseConnection(Archive *AHX)
 
 	/* savedPassword must be local in case we change it while connecting */
 	if (AH->connParams.savedPassword)
-		AH->connParams.savedPassword = strdup(AH->connParams.savedPassword);
+		AH->connParams.savedPassword = pg_strdup(AH->connParams.savedPassword);
 
 	return ConnectDatabase(AHX,
 						   AH->connParams.dbname,
@@ -431,10 +426,8 @@ ExecuteSqlCommandBuf(ArchiveHandle *AH, const char *buf, size_t bufLen)
 			ExecuteSqlCommand(AH, buf, "could not execute query");
 		else
 		{
-			char   *str = (char *) malloc(bufLen + 1);
+			char   *str = (char *) pg_malloc(bufLen + 1);
 
-			if (!str)
-				die_horribly(AH, modulename, "out of memory\n");
 			memcpy(str, buf, bufLen);
 			str[bufLen] = '\0';
 			ExecuteSqlCommand(AH, str, "could not execute query");
