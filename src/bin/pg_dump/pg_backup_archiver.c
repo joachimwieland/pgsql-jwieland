@@ -39,7 +39,6 @@ static int ShutdownConnection(PGconn **conn);
 #endif
 
 static void ShutdownWorkersSoft(ArchiveHandle *AH, ParallelState *pstate, bool do_wait);
-static bool HasEveryWorkerTerminated(ParallelState *pstate);
 
 
 /* file-scope variables */
@@ -54,9 +53,6 @@ static PGconn     **worker_conn = NULL;
 /* architecture dependent #defines */
 #ifdef WIN32
 	/* WIN32 */
-	/* closesocket is a windows socket function and stays as-is */
-	#define writesocket(fd, s, l) send((fd),(s),(l),0)
-	#define readsocket(fd, s, l)  recv((fd),(s),(l),0)
 	/* pgpipe implemented in src/backend/port/pipe.c */
 	/*
 	 * Call exit() if we are the master and ExitThread() if we are
@@ -76,10 +72,6 @@ static PGconn     **worker_conn = NULL;
 			 ioctlsocket((fd), FIONBIO, &mode); \
 		} while(0);
 #else /* UNIX */
-	#define closesocket		close
-	#define writesocket		write
-	#define readsocket		read
-	#define pgpipe			pipe
 	#define myExit(x)		exit(x)
 	#define setnonblocking(fd) \
 		do { long flags = (long) fcntl((fd), F_GETFL, 0); \
@@ -182,7 +174,7 @@ CheckForWorkerTermination(ParallelState *pstate, bool do_wait)
 	int i, ret, j = 0;
 
 	if (!lpHandles)
-		lpHandles = (HANDLE *) malloc(sizeof(HANDLE) * pstate->numWorkers);
+		lpHandles = (HANDLE *) pg_malloc(sizeof(HANDLE) * pstate->numWorkers);
 
 	for(i = 0; i < pstate->numWorkers; i++)
 		if (pstate->parallelSlot[i].workerStatus != WRKR_TERMINATED)
@@ -365,75 +357,6 @@ masterExit(int signum)
 #define PIPE_WRITE							1
 #define SHUTDOWN_GRACE_PERIOD				(500)
 
-#ifdef WIN32
-int
-pgpipe(int handles[2])
-{
-	SOCKET		s;
-	struct sockaddr_in serv_addr;
-	int			len = sizeof(serv_addr);
-
-	handles[0] = handles[1] = INVALID_SOCKET;
-
-	if ((s = socket(AF_INET, SOCK_STREAM, 0)) == INVALID_SOCKET)
-	{
-		perror("pgpipe could not create socket: %ui", WSAGetLastError());
-		return -1;
-	}
-
-	memset((void *) &serv_addr, 0, sizeof(serv_addr));
-	serv_addr.sin_family = AF_INET;
-	serv_addr.sin_port = htons(0);
-	serv_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-	if (bind(s, (SOCKADDR *) &serv_addr, len) == SOCKET_ERROR)
-	{
-		perror("pgpipe could not bind: %ui", WSAGetLastError());
-		closesocket(s);
-		return -1;
-	}
-	if (listen(s, 1) == SOCKET_ERROR)
-	{
-		perror("pgpipe could not listen: %ui", WSAGetLastError());
-		closesocket(s);
-		return -1;
-	}
-	if (getsockname(s, (SOCKADDR *) &serv_addr, &len) == SOCKET_ERROR)
-	{
-		perror("pgpipe could not getsockname: %ui", WSAGetLastError());
-		closesocket(s);
-		return -1;
-	}
-	if ((handles[1] = socket(PF_INET, SOCK_STREAM, 0)) == INVALID_SOCKET)
-	{
-		perror("pgpipe could not create socket 2: %ui", WSAGetLastError());
-		closesocket(s);
-		return -1;
-	}
-
-	if (connect(handles[1], (SOCKADDR *) &serv_addr, len) == SOCKET_ERROR)
-	{
-		perror("pgpipe could not connect socket: %ui", WSAGetLastError());
-		closesocket(s);
-		return -1;
-	}
-	if ((handles[0] = accept(s, (SOCKADDR *) &serv_addr, &len)) == INVALID_SOCKET)
-	{
-		perror("pgpipe could not accept socket: %ui", WSAGetLastError());
-		closesocket(handles[1]);
-		handles[1] = INVALID_SOCKET;
-		closesocket(s);
-		return -1;
-	}
-	closesocket(s);
-	printf("Returning pair %d (read) and %d (write)\n", handles[0], handles[1]);
-	return 0;
-}
-#endif
-
-
-
-
-
 
 #ifdef WIN32
 #include <io.h>
@@ -513,24 +436,26 @@ static void reduce_dependencies(ArchiveHandle *AH, TocEntry *te,
 static void mark_create_done(ArchiveHandle *AH, TocEntry *te);
 static void inhibit_data_for_failed_table(ArchiveHandle *AH, TocEntry *te);
 
-static void ListenToWorkers(ArchiveHandle *AH, ParallelState *pstate, bool do_wait);
 static void PrintStatus(ParallelState *pstate);
 static int GetIdleWorker(ParallelState *pstate);
-static int ReapworkerStatus(ParallelState *pstate, int *status);
 static bool HasEveryWorkerTerminated(ParallelState *pstate);
 static bool IsEveryWorkerIdle(ParallelState *pstate);
+static void ShutdownWorkersSoft(ArchiveHandle *AH, ParallelState *pstate, bool do_wait);
 
+static void lockTableNoWait(ArchiveHandle *AH, TocEntry *te);
+static void WaitForCommands(ArchiveHandle *AH, int pipefd[2], int worker);
+static void ListenToWorkers(ArchiveHandle *AH, ParallelState *pstate, bool do_wait);
+static int ReapWorkerStatus(ParallelState *pstate, int *status);
+static char *getMessageFromMaster(ArchiveHandle *AH, int pipefd[2]);
+static void sendMessageToMaster(ArchiveHandle *AH, int pipefd[2], const char *str);
 static char *getMessageFromWorker(ArchiveHandle *AH, ParallelState *pstate,
 								 bool do_wait, int *worker);
 static void sendMessageToWorker(ArchiveHandle *AH, ParallelState *pstate,
 							   int worker, const char *str);
 static char *readMessageFromPipe(int fd, bool do_wait);
 
-static void WaitForCommands(ArchiveHandle *AH, int pipefd[2], int worker);
-static char *getMessageFromMaster(ArchiveHandle *AH, int pipefd[2]);
-static void sendMessageToMaster(ArchiveHandle *AH, int pipefd[2], const char *str);
 static void SetupWorker(ArchiveHandle *AH, int pipefd[2], int worker,
-					   RestoreOptions *ropt);
+						RestoreOptions *ropt);
 
 /*
  *	Wrapper functions.
@@ -2435,7 +2360,7 @@ WriteDataChunks(ArchiveHandle *AH)
 			for (;;)
 			{
 				int nTerm = 0;
-				while ((ret_worker = ReapworkerStatus(pstate, &work_status)) != NO_SLOT)
+				while ((ret_worker = ReapWorkerStatus(pstate, &work_status)) != NO_SLOT)
 				{
 					if (work_status != 0)
 						die_horribly(AH, modulename, "Error processing a parallel work item\n");
@@ -2454,7 +2379,7 @@ WriteDataChunks(ArchiveHandle *AH)
 
 				/*
 				 * If we have no idle worker, read the result of one or more
-				 * workers and loop the loop to call ReapworkerStatus() on them
+				 * workers and loop the loop to call ReapWorkerStatus() on them
 				 */
 				ListenToWorkers(AH, pstate, true);
 			}
@@ -2474,7 +2399,7 @@ WriteDataChunks(ArchiveHandle *AH)
 		/* Waiting for the remaining worker processes to finish */
 		while (!IsEveryWorkerIdle(pstate))
 		{
-			if (ReapworkerStatus(pstate, &work_status) == NO_SLOT)
+			if (ReapWorkerStatus(pstate, &work_status) == NO_SLOT)
 				ListenToWorkers(AH, pstate, true);
 
 			if (work_status != 0)
@@ -3875,7 +3800,7 @@ restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate)
 			 */
 			ListenToWorkers(AH, pstate, !next_work_item);
 
-			while ((ret_child = ReapworkerStatus(pstate, &work_status)) != NO_SLOT)
+			while ((ret_child = ReapWorkerStatus(pstate, &work_status)) != NO_SLOT)
 			{
 				nTerm++;
 				printf("Marking the child's work as done\n");
@@ -3893,7 +3818,7 @@ restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate)
 
 			/*
 			 * If we have no idle child, read the result of one or more
-			 * children and loop the loop to call ReapworkerStatus() on them
+			 * children and loop the loop to call ReapWorkerStatus() on them
 			 */
 			ListenToWorkers(AH, pstate, true);
 		}
@@ -4601,7 +4526,7 @@ ParallelBackupStart(ArchiveHandle *AH, RestoreOptions *ropt)
 	/* Ensure stdio state is quiesced before forking */
 	fflush(NULL);
 
-	pstate = (ParallelState *) malloc(sizeof(ParallelState));
+	pstate = (ParallelState *) pg_malloc(sizeof(ParallelState));
 
 	pstate->numWorkers = AH->public.numWorkers;
 	pstate->parallelSlot = NULL;
@@ -4609,7 +4534,7 @@ ParallelBackupStart(ArchiveHandle *AH, RestoreOptions *ropt)
 	if (AH->public.numWorkers == 1)
 		return pstate;
 
-	pstate->parallelSlot = (ParallelSlot *) malloc(slotSize);
+	pstate->parallelSlot = (ParallelSlot *) pg_malloc(slotSize);
 	memset((void *) pstate->parallelSlot, 0, slotSize);
 
 #ifdef WIN32
@@ -4639,7 +4564,7 @@ ParallelBackupStart(ArchiveHandle *AH, RestoreOptions *ropt)
 						 strerror(errno));
 #ifdef WIN32
 		/* Allocate a new structure for every worker */
-		wi = (WorkerInfo *) malloc(sizeof(WorkerInfo));
+		wi = (WorkerInfo *) pg_malloc(sizeof(WorkerInfo));
 
 		wi->ropt = ropt;
 		wi->worker = i;
@@ -4702,7 +4627,7 @@ ParallelBackupStart(ArchiveHandle *AH, RestoreOptions *ropt)
 		pstate->parallelSlot[i].pipeRead = pipeWM[PIPE_READ];
 		pstate->parallelSlot[i].pipeWrite = pipeMW[PIPE_WRITE];
 
-		pstate->parallelSlot[i].args = (ParallelArgs *) malloc(sizeof(ParallelArgs));
+		pstate->parallelSlot[i].args = (ParallelArgs *) pg_malloc(sizeof(ParallelArgs));
 		pstate->parallelSlot[i].args->AH = AH;
 		pstate->parallelSlot[i].args->te = NULL;
 		pstate->parallelSlot[i].workerStatus = WRKR_IDLE;
@@ -4770,7 +4695,7 @@ ParallelBackupEnd(ArchiveHandle *AH, ParallelState *pstate)
  * receive: OK DUMP info
  * status = (EndMasterParallelPtr)(info)
  *
- * In ReapworkerStatus(&ptr):
+ * In ReapWorkerStatus(&ptr):
  * *ptr = status;
  * [ Worker is IDLE ]
  */
@@ -4796,7 +4721,6 @@ DispatchJobForTocEntry(ArchiveHandle *AH, ParallelState *pstate, TocEntry *te,
 	pstate->parallelSlot[worker].args->te = te;
 	PrintStatus(pstate);
 }
-
 
 static void
 PrintStatus(ParallelState *pstate)
@@ -5033,6 +4957,10 @@ WaitForCommands(ArchiveHandle *AH, int pipefd[2], int worker)
 			if (strcmp(te->desc, "BLOBS") != 0)
 				lockTableNoWait(AH, te);
 
+			/*
+			 * The message we return here has been pg_malloc()ed and we are
+			 * responsible for free()ing it.
+			 */
 			str = (AH->WorkerJobDumpPtr)(AH, te);
 			Assert(AH->connection != NULL);
 			sendMessageToMaster(AH, pipefd, str);
@@ -5048,6 +4976,10 @@ WaitForCommands(ArchiveHandle *AH, int pipefd[2], int worker)
 
 			te = getTocEntryByDumpId(AH, dumpId);
 			Assert(te != NULL);
+			/*
+			 * The message we return here has been pg_malloc()ed and we are
+			 * responsible for free()ing it.
+			 */
 			str = (AH->WorkerJobRestorePtr)(AH, te);
 			Assert(AH->connection != NULL);
 			printf("Got from workerjob: %s\n", str);
@@ -5074,11 +5006,11 @@ WaitForCommands(ArchiveHandle *AH, int pipefd[2], int worker)
  *
  * DispatchJobForTocEntry		WRKR_IDLE -> WRKR_WORKING
  * ListenToWorkers				WRKR_WORKING -> WRKR_FINISHED / WRKR_TERMINATED
- * ReapworkerStatus				WRKR_FINISHED -> WRKR_IDLE
+ * ReapWorkerStatus				WRKR_FINISHED -> WRKR_IDLE
  *
- * Just calling ReapworkerStatus() when all workers are working might or might
+ * Just calling ReapWorkerStatus() when all workers are working might or might
  * not give you an idle worker because you need to call ListenToWorkers() in
- * between and only thereafter ReapworkerStatus(). This is necessary in order to
+ * between and only thereafter ReapWorkerStatus(). This is necessary in order to
  * get and deal with the status (=result) of the worker's execution.
  */
 static void
@@ -5145,12 +5077,12 @@ ListenToWorkers(ArchiveHandle *AH, ParallelState *pstate, bool do_wait)
 	}
 	PrintStatus(pstate);
 
-	/* both Unix and Win32 return malloc()ed space */
+	/* both Unix and Win32 return pg_malloc()ed space */
 	free(msg);
 }
 
 static int
-ReapworkerStatus(ParallelState *pstate, int *status)
+ReapWorkerStatus(ParallelState *pstate, int *status)
 {
 	int i;
 
@@ -5182,20 +5114,7 @@ sendMessageToMaster(ArchiveHandle *AH, int pipefd[2], const char *str)
 
 	printf("Sending message %s to master on fd %d\n", str, pipefd[PIPE_WRITE]);
 
-	if (writesocket(pipefd[PIPE_WRITE], str, len) != len)
-		die_horribly(AH, modulename,
-					 "Error writing to the communication channel: %s",
-					 strerror(errno));
-}
-
-static void
-sendMessageToWorker(ArchiveHandle *AH, ParallelState *pstate, int worker, const char *str)
-{
-	int len = strlen(str) + 1;
-
-	printf("Sending message %s to worker %d on fd %d\n", str, worker, pstate->parallelSlot[worker].pipeWrite);
-
-	if (writesocket(pstate->parallelSlot[worker].pipeWrite, str, len) != len)
+	if (pipewrite(pipefd[PIPE_WRITE], str, len) != len)
 		die_horribly(AH, modulename,
 					 "Error writing to the communication channel: %s",
 					 strerror(errno));
@@ -5269,6 +5188,19 @@ getMessageFromWorker(ArchiveHandle *AH, ParallelState *pstate, bool do_wait, int
 	return NULL;
 }
 
+static void
+sendMessageToWorker(ArchiveHandle *AH, ParallelState *pstate, int worker, const char *str)
+{
+	int len = strlen(str) + 1;
+
+	printf("Sending message %s to worker %d on fd %d\n", str, worker, pstate->parallelSlot[worker].pipeWrite);
+
+	if (pipewrite(pstate->parallelSlot[worker].pipeWrite, str, len) != len)
+		die_horribly(AH, modulename,
+					 "Error writing to the communication channel: %s",
+					 strerror(errno));
+}
+
 static char *
 readMessageFromPipe(int fd, bool do_wait)
 {
@@ -5291,7 +5223,7 @@ readMessageFromPipe(int fd, bool do_wait)
 
 	/* XXX set this to some reasonable initial value for a release */
 	bufsize = 1;
-	msg = (char *) malloc(bufsize);
+	msg = (char *) pg_malloc(bufsize);
 
 	msgsize = 0;
 	for (;;)
@@ -5307,7 +5239,7 @@ readMessageFromPipe(int fd, bool do_wait)
 			setnonblocking(fd);
 		}
 
-		ret = readsocket(fd, msg + msgsize, 1);
+		ret = piperead(fd, msg + msgsize, 1);
 
 		if (msgsize == 0 && !do_wait)
 		{

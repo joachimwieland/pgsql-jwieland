@@ -92,9 +92,13 @@ static int _EndMasterParallel(ArchiveHandle *AH, TocEntry *te, const char *str, 
 static char *_WorkerJobRestoreDirectory(ArchiveHandle *AH, TocEntry *te);
 static char *_WorkerJobDumpDirectory(ArchiveHandle *AH, TocEntry *te);
 
-static char *prependDirectory(ArchiveHandle *AH, const char *relativeFilename);
-
 static void createDirectory(const char *dir);
+static char *prependDirectory(ArchiveHandle *AH, char *buf, const char *relativeFilename);
+static char *_WorkerJobDumpDirectory(ArchiveHandle *AH, TocEntry *te);
+static char *_WorkerJobRestoreDirectory(ArchiveHandle *AH, TocEntry *te);
+static ParallelState *_GetParallelState(ArchiveHandle *AH);
+static char *_StartMasterParallel(ArchiveHandle *AH, TocEntry *te, T_Action act);
+static int _EndMasterParallel(ArchiveHandle *AH, TocEntry *te, const char *str, T_Action act);
 
 /*
  *	Init routine required by ALL formats. This is a global routine
@@ -169,10 +173,10 @@ InitArchiveFmt_Directory(ArchiveHandle *AH)
 	}
 	else
 	{							/* Read Mode */
-		char	   *fname;
+		char	   fname[MAXPGPATH];
 		cfp		   *tocFH;
 
-		fname = prependDirectory(AH, "toc.dat");
+		prependDirectory(AH, fname, "toc.dat");
 
 		tocFH = cfopen_read(fname, PG_BINARY_R);
 		if (tocFH == NULL)
@@ -298,9 +302,9 @@ _StartData(ArchiveHandle *AH, TocEntry *te)
 {
 	lclTocEntry *tctx = (lclTocEntry *) te->formatData;
 	lclContext *ctx = (lclContext *) AH->formatData;
-	char	   *fname;
+	char		fname[MAXPGPATH];
 
-	fname = prependDirectory(AH, tctx->filename);
+	prependDirectory(AH, fname, tctx->filename);
 
 	ctx->dataFH = cfopen_write(fname, PG_BINARY_W, AH->compression);
 	if (ctx->dataFH == NULL)
@@ -393,8 +397,9 @@ _PrintTocData(ArchiveHandle *AH, TocEntry *te, RestoreOptions *ropt)
 		_LoadBlobs(AH, ropt);
 	else
 	{
-		char	   *fname = prependDirectory(AH, tctx->filename);
+		char		fname[MAXPGPATH];
 
+		prependDirectory(AH, fname, tctx->filename);
 		_PrintFileData(AH, fname, ropt);
 	}
 }
@@ -404,12 +409,12 @@ _LoadBlobs(ArchiveHandle *AH, RestoreOptions *ropt)
 {
 	Oid			oid;
 	lclContext *ctx = (lclContext *) AH->formatData;
-	char	   *fname;
+	char		fname[MAXPGPATH];
 	char		line[MAXPGPATH];
 
 	StartRestoreBlobs(AH);
 
-	fname = prependDirectory(AH, "blobs.toc");
+	prependDirectory(AH, fname, "blobs.toc");
 
 	ctx->blobsTocFH = cfopen_read(fname, PG_BINARY_R);
 
@@ -538,7 +543,9 @@ _CloseArchive(ArchiveHandle *AH)
 	if (AH->mode == archModeWrite)
 	{
 		cfp		   *tocFH;
-		char	   *fname = prependDirectory(AH, "toc.dat");
+		char		fname[MAXPGPATH];
+
+		prependDirectory(AH, fname, "toc.dat");
 
 		/* this will actually fork the processes for a parallel backup */
 		ctx->pstate = ParallelBackupStart(AH, NULL);
@@ -597,9 +604,9 @@ static void
 _StartBlobs(ArchiveHandle *AH, TocEntry *te)
 {
 	lclContext *ctx = (lclContext *) AH->formatData;
-	char	   *fname;
+	char		fname[MAXPGPATH];
 
-	fname = prependDirectory(AH, "blobs.toc");
+	prependDirectory(AH, fname, "blobs.toc");
 
 	/* The blob TOC file is never compressed */
 	ctx->blobsTocFH = cfopen_write(fname, "ab", 0);
@@ -693,11 +700,9 @@ createDirectory(const char *dir)
 }
 
 static char *
-prependDirectory(ArchiveHandle *AH, const char *relativeFilename)
+prependDirectory(ArchiveHandle *AH, char* buf, const char *relativeFilename)
 {
-	/* XXX is this safe if run in parallel on Windows at the moment? */
 	lclContext *ctx = (lclContext *) AH->formatData;
-	static char buf[MAXPGPATH];  /* Ummh, not good for Windows multithreaded app */
 	char	   *dname;
 
 	dname = ctx->directory;
@@ -729,8 +734,8 @@ _WorkerJobDumpDirectory(ArchiveHandle *AH, TocEntry *te)
 	/* short fixed-size string + some ID so far, this needs to be malloc'ed
 	 * instead of static because we work with threads on windows */
 	const int	buflen = 64;
-	char	   *buf = (char*) malloc(buflen);
-	lclTocEntry	   *tctx = (lclTocEntry *) te->formatData;
+	char	   *buf = (char*) pg_malloc(buflen);
+	lclTocEntry *tctx = (lclTocEntry *) te->formatData;
 
 	/* This should never happen */
 	if (!tctx)
@@ -757,7 +762,7 @@ _WorkerJobRestoreDirectory(ArchiveHandle *AH, TocEntry *te)
 	/* short fixed-size string + some ID so far, this needs to be malloc'ed
 	 * instead of static because we work with threads on windows */
 	const int	buflen = 64;
-	char	   *buf = (char*) malloc(buflen);
+	char	   *buf = (char*) pg_malloc(buflen);
 	ParallelArgs pargs;
 	int			status;
 	lclTocEntry *tctx;
@@ -783,7 +788,7 @@ _Clone(ArchiveHandle *AH)
 {
 	lclContext *ctx = (lclContext *) AH->formatData;
 
-	AH->formatData = (lclContext *) malloc(sizeof(lclContext));
+	AH->formatData = (lclContext *) pg_malloc(sizeof(lclContext));
 	if (AH->formatData == NULL)
 		die_horribly(AH, modulename, "out of memory\n");
 	memcpy(AH->formatData, ctx, sizeof(lclContext));
@@ -828,6 +833,10 @@ _GetParallelState(ArchiveHandle *AH)
 static char *
 _StartMasterParallel(ArchiveHandle *AH, TocEntry *te, T_Action act)
 {
+	/*
+	 * A static char is okay here, even on Windows because we call this
+	 * function only from one process (the master).
+	 */
 	static char	buf[64];
 
 	if (act == ACT_DUMP)

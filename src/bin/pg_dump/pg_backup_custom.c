@@ -816,7 +816,7 @@ _WorkerJobRestoreCustom(ArchiveHandle *AH, TocEntry *te)
 	/* short fixed-size string + some ID so far, this needs to be malloc'ed
 	 * instead of static because we work with threads on windows */
 	const int	buflen = 64;
-	char	   *buf = (char*) malloc(buflen);
+	char	   *buf = (char*) pg_malloc(buflen);
 	ParallelArgs pargs;
 	int			status;
 	lclTocEntry *tctx;
