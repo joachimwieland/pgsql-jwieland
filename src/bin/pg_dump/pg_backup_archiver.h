@@ -140,13 +140,12 @@ typedef void (*PrintTocDataPtr) (struct _archiveHandle * AH, struct _tocEntry * 
 typedef void (*ClonePtr) (struct _archiveHandle * AH);
 typedef void (*DeClonePtr) (struct _archiveHandle * AH);
 
-typedef struct _parallel_state *(*GetParallelStatePtr)(struct _archiveHandle * AH);
 typedef char *(*WorkerJobRestorePtr)(struct _archiveHandle * AH, struct _tocEntry * te);
 typedef char *(*WorkerJobDumpPtr)(struct _archiveHandle * AH, struct _tocEntry * te);
-typedef char *(*StartMasterParallelPtr)(struct _archiveHandle * AH, struct _tocEntry * te,
-										enum _action act);
-typedef int (*EndMasterParallelPtr)(struct _archiveHandle * AH, struct _tocEntry * te,
-									const char *str, enum _action act);
+typedef char *(*MasterStartParallelItemPtr)(struct _archiveHandle * AH, struct _tocEntry * te,
+											enum _action act);
+typedef int (*MasterEndParallelItemPtr)(struct _archiveHandle * AH, struct _tocEntry * te,
+										const char *str, enum _action act);
 
 typedef size_t (*CustomOutPtr) (struct _archiveHandle * AH, const void *buf, size_t len);
 
@@ -223,10 +222,9 @@ typedef struct _archiveHandle
 	StartBlobPtr StartBlobPtr;
 	EndBlobPtr EndBlobPtr;
 
-	StartMasterParallelPtr StartMasterParallelPtr;
-	EndMasterParallelPtr EndMasterParallelPtr;
+	MasterStartParallelItemPtr MasterStartParallelItemPtr;
+	MasterEndParallelItemPtr MasterEndParallelItemPtr;
 
-	GetParallelStatePtr GetParallelStatePtr;
 	WorkerJobDumpPtr WorkerJobDumpPtr;
 	WorkerJobRestorePtr WorkerJobRestorePtr;
 
@@ -393,7 +391,7 @@ extern void WriteHead(ArchiveHandle *AH);
 extern void ReadHead(ArchiveHandle *AH);
 extern void WriteToc(ArchiveHandle *AH);
 extern void ReadToc(ArchiveHandle *AH);
-extern void WriteDataChunks(ArchiveHandle *AH);
+extern void WriteDataChunks(ArchiveHandle *AH, ParallelState *pstate);
 extern void WriteDataChunksForTocEntry(ArchiveHandle *AH, TocEntry *te);
 
 extern ArchiveHandle *CloneArchive(ArchiveHandle *AH);

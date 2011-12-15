@@ -87,8 +87,8 @@ static void _Clone(ArchiveHandle *AH);
 static void _DeClone(ArchiveHandle *AH);
 
 static ParallelState *_GetParallelState(ArchiveHandle *AH);
-static char *_StartMasterParallel(ArchiveHandle *AH, TocEntry *te, T_Action act);
-static int _EndMasterParallel(ArchiveHandle *AH, TocEntry *te, const char *str, T_Action act);
+static char *_MasterStartParallelItem(ArchiveHandle *AH, TocEntry *te, T_Action act);
+static int _MasterEndParallelItem(ArchiveHandle *AH, TocEntry *te, const char *str, T_Action act);
 static char *_WorkerJobRestoreDirectory(ArchiveHandle *AH, TocEntry *te);
 static char *_WorkerJobDumpDirectory(ArchiveHandle *AH, TocEntry *te);
 
@@ -97,8 +97,6 @@ static char *prependDirectory(ArchiveHandle *AH, char *buf, const char *relative
 static char *_WorkerJobDumpDirectory(ArchiveHandle *AH, TocEntry *te);
 static char *_WorkerJobRestoreDirectory(ArchiveHandle *AH, TocEntry *te);
 static ParallelState *_GetParallelState(ArchiveHandle *AH);
-static char *_StartMasterParallel(ArchiveHandle *AH, TocEntry *te, T_Action act);
-static int _EndMasterParallel(ArchiveHandle *AH, TocEntry *te, const char *str, T_Action act);
 
 /*
  *	Init routine required by ALL formats. This is a global routine
@@ -139,12 +137,11 @@ InitArchiveFmt_Directory(ArchiveHandle *AH)
 	AH->ClonePtr = _Clone;
 	AH->DeClonePtr = _DeClone;
 
-	AH->GetParallelStatePtr = _GetParallelState;
 	AH->WorkerJobRestorePtr = _WorkerJobRestoreDirectory;
 	AH->WorkerJobDumpPtr = _WorkerJobDumpDirectory;
 
-	AH->StartMasterParallelPtr = _StartMasterParallel;
-	AH->EndMasterParallelPtr = _EndMasterParallel;
+	AH->MasterStartParallelItemPtr = _MasterStartParallelItem;
+	AH->MasterEndParallelItemPtr = _MasterEndParallelItem;
 
 	/* Set up our private context */
 	ctx = (lclContext *) pg_calloc(1, sizeof(lclContext));
@@ -570,7 +567,7 @@ _CloseArchive(ArchiveHandle *AH)
 		if (cfclose(tocFH) != 0)
 			die_horribly(AH, modulename, "could not close TOC file: %s\n",
 						 strerror(errno));
-		WriteDataChunks(AH);
+		WriteDataChunks(AH, NULL);
 
 		ParallelBackupEnd(AH, ctx->pstate);
 	}
@@ -814,16 +811,6 @@ _DeClone(ArchiveHandle *AH)
 	free(ctx);
 }
 
-static ParallelState *
-_GetParallelState(ArchiveHandle *AH)
-{
-	lclContext *ctx = (lclContext *) AH->formatData;
-	if (ctx->pstate->numWorkers > 1)
-		return ctx->pstate;
-	else
-		return NULL;
-}
-
 /*
  * This function is executed in the parent process. Depending on the desired
  * action (dump or restore) it creates a string that is understood by the
@@ -831,7 +818,7 @@ _GetParallelState(ArchiveHandle *AH)
  * respective dump format.
  */
 static char *
-_StartMasterParallel(ArchiveHandle *AH, TocEntry *te, T_Action act)
+_MasterStartParallelItem(ArchiveHandle *AH, TocEntry *te, T_Action act)
 {
 	/*
 	 * A static char is okay here, even on Windows because we call this
@@ -853,7 +840,7 @@ _StartMasterParallel(ArchiveHandle *AH, TocEntry *te, T_Action act)
  * respective dump format.
  */
 static int
-_EndMasterParallel(ArchiveHandle *AH, TocEntry *te, const char *str, T_Action act)
+_MasterEndParallelItem(ArchiveHandle *AH, TocEntry *te, const char *str, T_Action act)
 {
 	DumpId		dumpId;
 	int			nBytes, n_errors;

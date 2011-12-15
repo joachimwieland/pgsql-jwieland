@@ -2335,13 +2335,9 @@ _allocAH(const char *FileSpec, const ArchiveFormat fmt,
 
 
 void
-WriteDataChunks(ArchiveHandle *AH)
+WriteDataChunks(ArchiveHandle *AH, ParallelState *pstate)
 {
 	TocEntry	   *te;
-	ParallelState  *pstate = NULL;
-
-	if (AH->GetParallelStatePtr)
-		pstate = (AH->GetParallelStatePtr)(AH);
 
 	for (te = AH->toc->next; te != AH->toc; te = te->next)
 	{
@@ -4639,10 +4635,9 @@ ParallelBackupStart(ArchiveHandle *AH, RestoreOptions *ropt)
 /*
  * Tell all of our workers to terminate.
  *
- * Pretty straightforward routine, first we tell everyone to
- * terminate, then we listen to the workers' replies and
- * finally close the sockets that we have used for
- * communication.
+ * Pretty straightforward routine, first we tell everyone to terminate, then we
+ * listen to the workers' replies and finally close the sockets that we have
+ * used for communication.
  */
 void
 ParallelBackupEnd(ArchiveHandle *AH, ParallelState *pstate)
@@ -4681,7 +4676,7 @@ ParallelBackupEnd(ArchiveHandle *AH, ParallelState *pstate)
  *
  * [ Worker is IDLE ]
  *
- * arg = (StartMasterParallelPtr)()
+ * arg = (MasterStartParallelItemPtr)()
  * send: DUMP arg
  *                                          receive: DUMP arg
  *                                          str = (WorkerJobDumpPtr)(arg)
@@ -4693,13 +4688,12 @@ ParallelBackupEnd(ArchiveHandle *AH, ParallelState *pstate)
  *
  * [ Worker is FINISHED ]
  * receive: OK DUMP info
- * status = (EndMasterParallelPtr)(info)
+ * status = (MasterEndParallelItemPtr)(info)
  *
  * In ReapWorkerStatus(&ptr):
  * *ptr = status;
  * [ Worker is IDLE ]
  */
-
 void
 DispatchJobForTocEntry(ArchiveHandle *AH, ParallelState *pstate, TocEntry *te,
 					   T_Action act)
@@ -4707,13 +4701,12 @@ DispatchJobForTocEntry(ArchiveHandle *AH, ParallelState *pstate, TocEntry *te,
 	int		worker;
 	char   *arg;
 
+	/* our caller makes sure that at least one worker is idle */
 	Assert(GetIdleWorker(pstate) != NO_SLOT);
-
-	/* our caller must make sure that at least one worker is idle */
 	worker = GetIdleWorker(pstate);
 	Assert(worker != NO_SLOT);
 
-	arg = (AH->StartMasterParallelPtr)(AH, te, act);
+	arg = (AH->MasterStartParallelItemPtr)(AH, te, act);
 
 	sendMessageToWorker(AH, pstate, worker, arg);
 
@@ -4725,7 +4718,7 @@ DispatchJobForTocEntry(ArchiveHandle *AH, ParallelState *pstate, TocEntry *te,
 static void
 PrintStatus(ParallelState *pstate)
 {
-	int i;
+	int			i;
 	printf("------Status------\n");
 	for (i = 0; i < pstate->numWorkers; i++)
 	{
@@ -4752,42 +4745,52 @@ PrintStatus(ParallelState *pstate)
 
 
 /*
- * find the first free parallel slot (if any).
+ * Find the first free parallel slot (if any).
  */
 static int
 GetIdleWorker(ParallelState *pstate)
 {
-	int i;
+	int			i;
 	for (i = 0; i < pstate->numWorkers; i++)
 		if (pstate->parallelSlot[i].workerStatus == WRKR_IDLE)
 			return i;
 	return NO_SLOT;
 }
 
+/*
+ * Return true iff every worker process is in the WRKR_TERMINATED state.
+ */
 static bool
 HasEveryWorkerTerminated(ParallelState *pstate)
 {
-	int i;
+	int			i;
 	for (i = 0; i < pstate->numWorkers; i++)
 		if (pstate->parallelSlot[i].workerStatus != WRKR_TERMINATED)
 			return false;
 	return true;
 }
 
+/*
+ * Return true iff every worker is in the WRKR_IDLE state.
+ */
 static bool
 IsEveryWorkerIdle(ParallelState *pstate)
 {
-	int i;
+	int			i;
 	for (i = 0; i < pstate->numWorkers; i++)
 		if (pstate->parallelSlot[i].workerStatus != WRKR_IDLE)
 			return false;
 	return true;
 }
 
+/*
+ * Performs a soft shutdown and optionally waits for every worker to terminate.
+ * A soft shutdown sends a "TERMINATE" message to every worker only.
+ */
 static void
 ShutdownWorkersSoft(ArchiveHandle *AH, ParallelState *pstate, bool do_wait)
 {
-	int i;
+	int			i;
 
 	/* soft shutdown */
 	for (i = 0; i < pstate->numWorkers; i++)
@@ -4809,6 +4812,21 @@ ShutdownWorkersSoft(ArchiveHandle *AH, ParallelState *pstate, bool do_wait)
 	printf("All children terminated\n");
 }
 
+/*
+ * This routine does some effort to gracefully shut down the database
+ * connection, but not too much, since the parent is waiting for the workers to
+ * terminate. The cancellation of the database connection is done in an
+ * asynchronous way, so we need to wait a bit after sending PQcancel().
+ * Calling PQcancel() first and then and PQfinish() immediately afterwards
+ * would still cancel an active connection because most likely the PQfinish()
+ * has not yet been processed.
+ *
+ * On Windows, when the master process terminates the childrens' database
+ * connections it forks off new threads that do nothing else than close the
+ * connection. These threads only live as long as they are in this function.
+ * And since a thread needs to return a value this function needs to as well.
+ * Hence this function returns an (unsigned) int.
+ */
 #ifdef WIN32
 static unsigned __stdcall
 #else
@@ -4825,13 +4843,6 @@ ShutdownConnection(PGconn **conn)
 
 	if (PQisBusy(*conn))
 	{
-		/*
-		 * Do some effort to gracefully shut down the connection, but not too much,
-		 * since the parent is waiting for us to terminate. The cancellation is
-		 * asynchronous, so we need to wait a bit after sending PQcancel().
-		 * Calling PQcancel() and PQfinish() immediately afterwards would still
-		 * cancel an active connection.
-		 */
 		if ((cancel = PQgetCancel(*conn)))
 		{
 			PQcancel(cancel, errbuf, sizeof(errbuf));
@@ -4854,6 +4865,21 @@ ShutdownConnection(PGconn **conn)
 	return 0;
 }
 
+/*
+ * One danger of the parallel backup is a possible deadlock:
+ *
+ * 1) Master dumps the schema and locks all tables in ACCESS SHARE mode.
+ * 2) Another process requests an ACCESS EXCLUSIVE lock (which is not granted
+ *    because the master holds a conflicting ACCESS SHARE lock).
+ * 3) The worker process also requests an ACCESS SHARE lock to read the table.
+ *    The worker's not granted that lock but is enqueued behind the ACCESS
+ *    EXCLUSIVE lock request.
+ *
+ * Now what we do here is to just request a lock in ACCESS SHARE but with
+ * NOWAIT in the worker prior to touching the table. If we don't get the lock,
+ * then we know that somebody else has requested an ACCESS EXCLUSIVE lock and
+ * are good to just fail the whole backup because we have detected a deadlock.
+ */
 static void
 lockTableNoWait(ArchiveHandle *AH, TocEntry *te)
 {
@@ -4899,28 +4925,25 @@ lockTableNoWait(ArchiveHandle *AH, TocEntry *te)
 		die_horribly(AH, modulename, "could not obtain lock on relation \"%s\". This "
 					 "usually means that someone requested an ACCESS EXCLUSIVE lock "
 					 "on the table after the pg_dump parent process has gotten the "
-					 "initial ACCESS SHARE lock on the table.",
-					 qualId, PQerrorMessage(AH->connection));
+					 "initial ACCESS SHARE lock on the table.", qualId);
 
 	PQclear(res);
 	destroyPQExpBuffer(query);
 }
 
 /*
- * At the moment we do not have format specific arguments so we can do the whole
- * argument parsing here and need not pass them to the format-specific routine.
- *
- * On the other hand we do have format specific return values (the directory format
- * returns the length of the file created) so we return a string in this case to be
- * open for future improvement. We could also return a checksum or the like in the
- * future.
+ * That's the main routine for the worker.
+ * When it starts up it enters this routine and waits for commands from the
+ * master process. After having processed a command it comes back to here to
+ * wait for the next command. Finally it will receive a TERMINATE command and
+ * exit.
  */
 #define messageStartsWith(msg, prefix) \
 	(strncmp(msg, prefix, strlen(prefix)) == 0)
 #define messageEquals(msg, pattern) \
 	(strcmp(msg, pattern) == 0)
 static void
-WaitForCommands(ArchiveHandle *AH, int pipefd[2], int worker)
+WaitForCommands(ArchiveHandle *AH, int pipefd[2], int worker /* XXX remove me */)
 {
 	char	   *command;
 	DumpId		dumpId;
@@ -4954,8 +4977,9 @@ WaitForCommands(ArchiveHandle *AH, int pipefd[2], int worker)
 			/*
 			 * Lock the table but with NOWAIT. Note that the parent is already
 			 * holding a lock. If we cannot acquire another ACCESS SHARE MODE
-			 * lock, then somebody else has requested an exclusive lock since
-			 * then. lockTableNoWait dies in this case to prevent deadlock.
+			 * lock, then somebody else has requested an exclusive lock in the
+			 * meantime.  lockTableNoWait dies in this case to prevent a
+			 * deadlock.
 			 */
 			if (strcmp(te->desc, "BLOBS") != 0)
 				lockTableNoWait(AH, te);
@@ -5052,37 +5076,39 @@ ListenToWorkers(ArchiveHandle *AH, ParallelState *pstate, bool do_wait)
 		{
 			statusString = msg + strlen("OK RESTORE ");
 			pstate->parallelSlot[worker].status =
-				(AH->EndMasterParallelPtr)
+				(AH->MasterEndParallelItemPtr)
 					(AH, te, statusString, ACT_RESTORE);
 		}
 		else if (messageStartsWith(msg, "OK DUMP "))
 		{
 			statusString = msg + strlen("OK DUMP ");
 			pstate->parallelSlot[worker].status =
-				(AH->EndMasterParallelPtr)
+				(AH->MasterEndParallelItemPtr)
 					(AH, te, statusString, ACT_DUMP);
 		}
 		else
-		{
-			write_msg(NULL, "Invalid message received from worker: %s", msg);
-			Assert(false);
 			die_horribly(AH, modulename, "Invalid message received from worker: %s", msg);
-		}
 	}
 	else
-	{
 		die_horribly(AH, modulename, "Invalid message received from worker: %s", msg);
-	}
+
 	PrintStatus(pstate);
 
-	/* both Unix and Win32 return pg_malloc()ed space */
+	/* both Unix and Win32 return pg_malloc()ed space, so we free it */
 	free(msg);
 }
 
+/*
+ * This function is executed in the master process.
+ *
+ * This function is used to get the return value of a terminated worker
+ * process. If a process has terminated, its status is stored in *status and
+ * the id of the worker is returned.
+ */
 static int
 ReapWorkerStatus(ParallelState *pstate, int *status)
 {
-	int i;
+	int			i;
 
 	for (i = 0; i < pstate->numWorkers; i++)
 	{
@@ -5098,16 +5124,27 @@ ReapWorkerStatus(ParallelState *pstate, int *status)
 	return NO_SLOT;
 }
 
+/*
+ * This function is executed in the worker process.
+ *
+ * It returns the next message on the communication channel, blocking until it
+ * becomes available.
+ */
 static char *
 getMessageFromMaster(ArchiveHandle *AH, int pipefd[2])
 {
 	return readMessageFromPipe(pipefd[PIPE_READ], true);
 }
 
+/*
+ * This function is executed in the worker process.
+ *
+ * It sends a message to the master on the communication channel.
+ */
 static void
 sendMessageToMaster(ArchiveHandle *AH, int pipefd[2], const char *str)
 {
-	int len = strlen(str) + 1;
+	int			len = strlen(str) + 1;
 
 	printf("Sending message %s to master on fd %d\n", str, pipefd[PIPE_WRITE]);
 
@@ -5117,6 +5154,14 @@ sendMessageToMaster(ArchiveHandle *AH, int pipefd[2], const char *str)
 					 strerror(errno));
 }
 
+/*
+ * This function is executed in the master process.
+ *
+ * It returns the next message from the worker on the communication channel,
+ * optionally blocking (do_wait) until it becomes available.
+ *
+ * The id of the worker is returned in *worker.
+ */
 static char *
 getMessageFromWorker(ArchiveHandle *AH, ParallelState *pstate, bool do_wait, int *worker)
 {
@@ -5185,10 +5230,15 @@ getMessageFromWorker(ArchiveHandle *AH, ParallelState *pstate, bool do_wait, int
 	return NULL;
 }
 
+/*
+ * This function is executed in the master process.
+ *
+ * It sends a message to a certain worker on the communication channel.
+ */
 static void
 sendMessageToWorker(ArchiveHandle *AH, ParallelState *pstate, int worker, const char *str)
 {
-	int len = strlen(str) + 1;
+	int			len = strlen(str) + 1;
 
 	printf("Sending message %s to worker %d on fd %d\n", str, worker, pstate->parallelSlot[worker].pipeWrite);
 
@@ -5198,12 +5248,16 @@ sendMessageToWorker(ArchiveHandle *AH, ParallelState *pstate, int worker, const 
 					 strerror(errno));
 }
 
+/*
+ * The underlying function to read a message from the communication channel (fd)
+ * with optional blocking (do_wait).
+ */
 static char *
 readMessageFromPipe(int fd, bool do_wait)
 {
-	char   *msg;
-	int		msgsize, bufsize;
-	int		ret;
+	char	   *msg;
+	int			msgsize, bufsize;
+	int			ret;
 
 	/*
 	 * The problem here is that we need to deal with several possibilites:
@@ -5212,10 +5266,10 @@ readMessageFromPipe(int fd, bool do_wait)
 	 *
 	 * We could either read in as much as we can and keep track of what we
 	 * delivered back to the caller or we just read byte by byte. Once we see
-	 * (char) 0, we know that it's the message's end. This is quite inefficient
-	 * but since we are reading only on the command channel, the performance
-	 * loss does not seem worth the trouble of keeping internal states for
-	 * different file descriptors.
+	 * (char) 0, we know that it's the message's end. This would be quite
+	 * inefficient for more data but since we are reading only on the command
+	 * channel, the performance loss does not seem worth the trouble of keeping
+	 * internal states for different file descriptors.
 	 */
 
 	/* XXX set this to some reasonable initial value for a release */
@@ -5228,9 +5282,10 @@ readMessageFromPipe(int fd, bool do_wait)
 		Assert(msgsize <= bufsize);
 		/*
 		 * If we do non-blocking read, only set the channel non-blocking for
-		 * the very first character. We trust in our messages to terminate, if
-		 * there is any character, we read the message and will find a \0 at
-		 * the end.
+		 * the very first character. We trust in our messages to be
+		 * \0-terminated, so if there is any character in the beginning, then
+		 * we read the message until we find a \0 somewhere, which indicates
+		 * the end of the message.
 		 */
 		if (msgsize == 0 && !do_wait) {
 			setnonblocking(fd);
@@ -5251,14 +5306,13 @@ readMessageFromPipe(int fd, bool do_wait)
 		{
 			/* worker has closed the connection */
 			return NULL;
-			write_msg(NULL, "the communication partner died\n");
-			exit(1);
 		}
 		if (ret < 0)
 		{
+			/* XXX test me */
 			write_msg(NULL, "error reading from communication partner: %s\n",
 					  strerror(errno));
-			exit(1);
+			myExit(1);
 		}
 
 		Assert(ret == 1);

@@ -102,10 +102,9 @@ InitArchiveFmt_Files(ArchiveHandle *AH)
 	AH->ClonePtr = NULL;
 	AH->DeClonePtr = NULL;
 
-	AH->StartMasterParallelPtr = NULL;
-	AH->EndMasterParallelPtr = NULL;
+	AH->MasterStartParallelItemPtr = NULL;
+	AH->MasterEndParallelItemPtr = NULL;
 
-	AH->GetParallelStatePtr = NULL;
 	AH->WorkerJobDumpPtr = NULL;
 	AH->WorkerJobRestorePtr = NULL;
 
@@ -462,7 +461,7 @@ _CloseArchive(ArchiveHandle *AH)
 		WriteToc(AH);
 		if (fclose(AH->FH) != 0)
 			die_horribly(AH, modulename, "could not close TOC file: %s\n", strerror(errno));
-		WriteDataChunks(AH);
+		WriteDataChunks(AH, NULL);
 	}
 
 	AH->FH = NULL;

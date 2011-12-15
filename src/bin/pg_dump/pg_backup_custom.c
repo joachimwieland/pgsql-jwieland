@@ -60,8 +60,8 @@ static void _LoadBlobs(ArchiveHandle *AH, bool drop);
 static void _Clone(ArchiveHandle *AH);
 static void _DeClone(ArchiveHandle *AH);
 
-static char *_StartMasterParallel(ArchiveHandle *AH, TocEntry *te, T_Action act);
-static int _EndMasterParallel(ArchiveHandle *AH, TocEntry *te, const char *str, T_Action act);
+static char *_MasterStartParallelItem(ArchiveHandle *AH, TocEntry *te, T_Action act);
+static int _MasterEndParallelItem(ArchiveHandle *AH, TocEntry *te, const char *str, T_Action act);
 char *_WorkerJobRestoreCustom(ArchiveHandle *AH, TocEntry *te);
 
 typedef struct
@@ -134,10 +134,9 @@ InitArchiveFmt_Custom(ArchiveHandle *AH)
 	AH->ClonePtr = _Clone;
 	AH->DeClonePtr = _DeClone;
 
-	AH->StartMasterParallelPtr = _StartMasterParallel;
-	AH->EndMasterParallelPtr = _EndMasterParallel;
+	AH->MasterStartParallelItemPtr = _MasterStartParallelItem;
+	AH->MasterEndParallelItemPtr = _MasterEndParallelItem;
 
-	AH->GetParallelStatePtr = NULL;
 	AH->WorkerJobDumpPtr = NULL; /* no parallel dump in the custom archive */
 	AH->WorkerJobRestorePtr = _WorkerJobRestoreCustom;
 
@@ -712,7 +711,7 @@ _CloseArchive(ArchiveHandle *AH)
 		tpos = ftello(AH->FH);
 		WriteToc(AH);
 		ctx->dataStart = _getFilePos(AH, ctx);
-		WriteDataChunks(AH);
+		WriteDataChunks(AH, NULL);
 
 		/*
 		 * If possible, re-write the TOC in order to update the data offset
@@ -835,7 +834,7 @@ _WorkerJobRestoreCustom(ArchiveHandle *AH, TocEntry *te)
 }
 
 static char *
-_StartMasterParallel(ArchiveHandle *AH, TocEntry *te, T_Action act)
+_MasterStartParallelItem(ArchiveHandle *AH, TocEntry *te, T_Action act)
 {
 	static char			buf[64]; /* short fixed-size string + number */
 
@@ -848,7 +847,7 @@ _StartMasterParallel(ArchiveHandle *AH, TocEntry *te, T_Action act)
 }
 
 static int
-_EndMasterParallel(ArchiveHandle *AH, TocEntry *te, const char *str, T_Action act)
+_MasterEndParallelItem(ArchiveHandle *AH, TocEntry *te, const char *str, T_Action act)
 {
 	DumpId				dumpId;
 	int					nBytes, status, n_errors;
