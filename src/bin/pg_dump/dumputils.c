@@ -16,6 +16,7 @@
 
 #include <ctype.h>
 
+#include "dumpmem.h"
 #include "dumputils.h"
 
 #include "parser/keywords.h"
@@ -54,15 +55,11 @@ init_parallel_dump_utils(void)
 }
 
 /*
- *	Quotes input string if it's not a legitimate SQL identifier as-is.
- *
- *	Note that the returned string must be used before calling fmtId again,
- *	since we re-use the same return buffer each time.  Non-reentrant but
- *	reduces memory leakage. (On Windows the memory leakage will be one buffer
- *	per thread, which is at least better than one per call).
+ * Non-reentrant but reduces memory leakage. (On Windows the memory leakage
+ * will be one buffer per thread, which is at least better than one per call).
  */
-const char *
-fmtId(const char *rawid)
+PQExpBuffer
+getThreadLocalPQExpBuffer(void)
 {
 	/*
 	 * The Tls code goes awry if we use a static var, so we provide for both
@@ -70,9 +67,6 @@ fmtId(const char *rawid)
 	 */
 	static PQExpBuffer s_id_return = NULL;
 	PQExpBuffer id_return;
-
-	const char *cp;
-	bool		need_quotes = false;
 
 #ifdef WIN32
 	if (parallel_init_done)
@@ -100,8 +94,24 @@ fmtId(const char *rawid)
 #else
 		s_id_return = id_return;
 #endif
-
 	}
+
+	return id_return;
+}
+
+/*
+ *	Quotes input string if it's not a legitimate SQL identifier as-is.
+ *
+ *	Note that the returned string must be used before calling fmtId again,
+ *	since we re-use the same return buffer each time.
+ */
+const char *
+fmtId(const char *rawid)
+{
+	PQExpBuffer id_return = getThreadLocalPQExpBuffer();
+
+	const char *cp;
+	bool		need_quotes = false;
 
 	/*
 	 * These checks need to match the identifier production in scan.l. Don't
@@ -179,21 +189,33 @@ fmtId(const char *rawid)
 const char *
 fmtQualifiedId(const char *schema, const char *id, int remoteVersion)
 {
-	static PQExpBuffer id_return = NULL;
-
-	if (id_return)				/* first time through? */
-		resetPQExpBuffer(id_return);
-	else
-		id_return = createPQExpBuffer();
+	PQExpBuffer id_return;
+	/*
+	 * We're using the same PQExpBuffer as fmtId(), that's why we first get all
+	 * the values from fmtId and then return them appended in the PQExpBuffer.
+	 * The reason we still use the PQExpBuffer to return the string is just for
+	 * ease of use in the caller, that doesn't have to free the string
+	 * explicitly.
+	 */
+	char	   *schemaBuf, *idBuf;
 
 	/* Suppress schema name if fetching from pre-7.3 DB */
 	if (remoteVersion >= 70300 && schema && *schema)
 	{
-		appendPQExpBuffer(id_return, "%s.",
-						  fmtId(schema));
-	}
-	appendPQExpBuffer(id_return, "%s",
-					  fmtId(id));
+		schemaBuf = pg_strdup(fmtId(schema));
+	} else
+		schemaBuf = pg_strdup("");
+
+	idBuf = pg_strdup(fmtId(id));
+
+	/* this will reset the PQExpBuffer */
+	id_return = getThreadLocalPQExpBuffer();
+	appendPQExpBuffer(id_return, "%s%s%s",
+								 schemaBuf,
+								 strlen(schemaBuf) > 0 ? "." : "",
+								 idBuf);
+	free(schemaBuf);
+	free(idBuf);
 
 	return id_return->data;
 }

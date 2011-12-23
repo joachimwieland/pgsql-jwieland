@@ -86,7 +86,6 @@ static void _LoadBlobs(ArchiveHandle *AH, RestoreOptions *ropt);
 static void _Clone(ArchiveHandle *AH);
 static void _DeClone(ArchiveHandle *AH);
 
-static ParallelState *_GetParallelState(ArchiveHandle *AH);
 static char *_MasterStartParallelItem(ArchiveHandle *AH, TocEntry *te, T_Action act);
 static int _MasterEndParallelItem(ArchiveHandle *AH, TocEntry *te, const char *str, T_Action act);
 static char *_WorkerJobRestoreDirectory(ArchiveHandle *AH, TocEntry *te);
@@ -96,7 +95,6 @@ static void createDirectory(const char *dir);
 static char *prependDirectory(ArchiveHandle *AH, char *buf, const char *relativeFilename);
 static char *_WorkerJobDumpDirectory(ArchiveHandle *AH, TocEntry *te);
 static char *_WorkerJobRestoreDirectory(ArchiveHandle *AH, TocEntry *te);
-static ParallelState *_GetParallelState(ArchiveHandle *AH);
 
 /*
  *	Init routine required by ALL formats. This is a global routine
@@ -326,7 +324,7 @@ _WriteData(ArchiveHandle *AH, const void *data, size_t dLen)
 	if (dLen == 0)
 		return 0;
 
-	checkTerm();
+	checkWorkerTerm();
 	return cfwrite(data, dLen, ctx->dataFH);
 }
 
@@ -372,7 +370,7 @@ _PrintFileData(ArchiveHandle *AH, char *filename, RestoreOptions *ropt)
 
 	while ((cnt = cfread(buf, buflen, cfp)))
 	{
-		checkTerm();
+		checkWorkerTerm();
 		ahwrite(buf, 1, cnt, AH);
 	}
 
@@ -494,7 +492,7 @@ _WriteBuf(ArchiveHandle *AH, const void *buf, size_t len)
 	lclContext *ctx = (lclContext *) AH->formatData;
 	size_t		res;
 
-	checkTerm();
+	checkWorkerTerm();
 	res = cfwrite(buf, len, ctx->dataFH);
 	if (res != len)
 		die_horribly(AH, modulename, "could not write to output file: %s\n",
@@ -514,7 +512,7 @@ _ReadBuf(ArchiveHandle *AH, void *buf, size_t len)
 	lclContext *ctx = (lclContext *) AH->formatData;
 	size_t		res;
 
-	checkTerm();
+	checkWorkerTerm();
 	res = cfread(buf, len, ctx->dataFH);
 
 	return res;
@@ -567,7 +565,7 @@ _CloseArchive(ArchiveHandle *AH)
 		if (cfclose(tocFH) != 0)
 			die_horribly(AH, modulename, "could not close TOC file: %s\n",
 						 strerror(errno));
-		WriteDataChunks(AH, NULL);
+		WriteDataChunks(AH, ctx->pstate);
 
 		ParallelBackupEnd(AH, ctx->pstate);
 	}
@@ -696,6 +694,11 @@ createDirectory(const char *dir)
 					 dir, strerror(errno));
 }
 
+/*
+ * Gets a relative file name and prepends the output directory, writing the
+ * result to buf. The caller needs to make sure that buf is MAXPGPATH bytes
+ * big.
+ */
 static char *
 prependDirectory(ArchiveHandle *AH, char* buf, const char *relativeFilename)
 {
@@ -710,6 +713,63 @@ prependDirectory(ArchiveHandle *AH, char* buf, const char *relativeFilename)
 	strcpy(buf, dname);
 	strcat(buf, "/");
 	strcat(buf, relativeFilename);
+
+	return buf;
+}
+
+/*
+ * Clone format-specific fields during parallel restoration.
+ */
+static void
+_Clone(ArchiveHandle *AH)
+{
+	lclContext *ctx = (lclContext *) AH->formatData;
+
+	AH->formatData = (lclContext *) pg_malloc(sizeof(lclContext));
+	if (AH->formatData == NULL)
+		die_horribly(AH, modulename, "out of memory\n");
+	memcpy(AH->formatData, ctx, sizeof(lclContext));
+	ctx = (lclContext *) AH->formatData;
+
+	/*
+	 * Note: we do not make a local lo_buf because we expect at most one BLOBS
+	 * entry per archive, so no parallelism is possible.  Likewise,
+	 * TOC-entry-local state isn't an issue because any one TOC entry is
+	 * touched by just one worker child.
+	 */
+
+	/*
+	 * We also don't copy the ParallelState pointer (pstate), only the master
+	 * process ever writes to it.
+	 */
+}
+
+static void
+_DeClone(ArchiveHandle *AH)
+{
+	lclContext *ctx = (lclContext *) AH->formatData;
+	free(ctx);
+}
+
+/*
+ * This function is executed in the parent process. Depending on the desired
+ * action (dump or restore) it creates a string that is understood by the
+ * _WorkerJobDumpDirectory/_WorkerJobRestoreDirectory functions of the
+ * respective dump format.
+ */
+static char *
+_MasterStartParallelItem(ArchiveHandle *AH, TocEntry *te, T_Action act)
+{
+	/*
+	 * A static char is okay here, even on Windows because we call this
+	 * function only from one process (the master).
+	 */
+	static char	buf[64];
+
+	if (act == ACT_DUMP)
+		snprintf(buf, sizeof(buf), "DUMP %d", te->dumpId);
+	else if (act == ACT_RESTORE)
+		snprintf(buf, sizeof(buf), "RESTORE %d", te->dumpId);
 
 	return buf;
 }
@@ -776,64 +836,6 @@ _WorkerJobRestoreDirectory(ArchiveHandle *AH, TocEntry *te)
 
 	return buf;
 }
-
-/*
- * Clone format-specific fields during parallel restoration.
- */
-static void
-_Clone(ArchiveHandle *AH)
-{
-	lclContext *ctx = (lclContext *) AH->formatData;
-
-	AH->formatData = (lclContext *) pg_malloc(sizeof(lclContext));
-	if (AH->formatData == NULL)
-		die_horribly(AH, modulename, "out of memory\n");
-	memcpy(AH->formatData, ctx, sizeof(lclContext));
-	ctx = (lclContext *) AH->formatData;
-
-	/*
-	 * Note: we do not make a local lo_buf because we expect at most one BLOBS
-	 * entry per archive, so no parallelism is possible.  Likewise,
-	 * TOC-entry-local state isn't an issue because any one TOC entry is
-	 * touched by just one worker child.
-	 */
-
-	/*
-	 * We also don't copy the ParallelState pointer (pstate), only the master
-	 * process would write to it.
-	 */
-}
-
-static void
-_DeClone(ArchiveHandle *AH)
-{
-	lclContext *ctx = (lclContext *) AH->formatData;
-	free(ctx);
-}
-
-/*
- * This function is executed in the parent process. Depending on the desired
- * action (dump or restore) it creates a string that is understood by the
- * _WorkerJobDumpDirectory/_WorkerJobRestoreDirectory functions of the
- * respective dump format.
- */
-static char *
-_MasterStartParallelItem(ArchiveHandle *AH, TocEntry *te, T_Action act)
-{
-	/*
-	 * A static char is okay here, even on Windows because we call this
-	 * function only from one process (the master).
-	 */
-	static char	buf[64];
-
-	if (act == ACT_DUMP)
-		snprintf(buf, sizeof(buf), "DUMP %d", te->dumpId);
-	else if (act == ACT_RESTORE)
-		snprintf(buf, sizeof(buf), "RESTORE %d", te->dumpId);
-
-	return buf;
-}
-
 /*
  * This function is executed in the parent process. It analyzes the response of
  * the _WorkerJobDumpDirectory/_WorkerJobRestoreDirectory functions of the

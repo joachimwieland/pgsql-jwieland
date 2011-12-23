@@ -375,7 +375,7 @@ extern void DispatchJobForTocEntry(ArchiveHandle *AH,
 								   ParallelState *pstate,
 								   TocEntry *te, T_Action act);
 extern void WaitForAllWorkers(ArchiveHandle *AH, ParallelState *pstate);
-extern void checkTerm(void);
+extern void checkWorkerTerm(void);
 
 extern PGconn *g_conn;
 
@@ -398,6 +398,7 @@ extern ArchiveHandle *CloneArchive(ArchiveHandle *AH);
 extern void DeCloneArchive(ArchiveHandle *AH);
 
 extern teReqs TocIDRequired(ArchiveHandle *AH, DumpId id, RestoreOptions *ropt);
+TocEntry *getTocEntryByDumpId(ArchiveHandle *AH, DumpId id);
 extern bool checkSeek(FILE *fp);
 
 #define appendStringLiteralAHX(buf,str,AH) \

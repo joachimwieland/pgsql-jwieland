@@ -809,6 +809,10 @@ _DeClone(ArchiveHandle *AH)
 	free(ctx);
 }
 
+/*
+ * This function is executed in the child of a parallel backup for the
+ * custom format archive and dumps the actual data.
+ */
 char *
 _WorkerJobRestoreCustom(ArchiveHandle *AH, TocEntry *te)
 {
@@ -833,9 +837,19 @@ _WorkerJobRestoreCustom(ArchiveHandle *AH, TocEntry *te)
 	return buf;
 }
 
+/*
+ * This function is executed in the parent process. Depending on the desired
+ * action (dump or restore) it creates a string that is understood by the
+ * _WorkerJobDumpDirectory/_WorkerJobRestoreDirectory functions of the
+ * respective dump format.
+ */
 static char *
 _MasterStartParallelItem(ArchiveHandle *AH, TocEntry *te, T_Action act)
 {
+	/*
+	 * A static char is okay here, even on Windows because we call this
+	 * function only from one process (the master).
+	 */
 	static char			buf[64]; /* short fixed-size string + number */
 
 	/* no parallel dump in the custom archive format */
@@ -846,6 +860,11 @@ _MasterStartParallelItem(ArchiveHandle *AH, TocEntry *te, T_Action act)
 	return buf;
 }
 
+/*
+ * This function is executed in the parent process. It analyzes the response of
+ * the _WorkerJobDumpDirectory/_WorkerJobRestoreDirectory functions of the
+ * respective dump format.
+ */
 static int
 _MasterEndParallelItem(ArchiveHandle *AH, TocEntry *te, const char *str, T_Action act)
 {

@@ -245,7 +245,7 @@ static void binary_upgrade_extension_member(PQExpBuffer upgrade_buffer,
 								DumpableObject *dobj,
 								const char *objlabel);
 static const char *getAttrName(int attrnum, TableInfo *tblInfo);
-static const char *fmtCopyColumnList(const TableInfo *ti);
+static const char *fmtCopyColumnList(const TableInfo *ti, PQExpBuffer buffer);
 static void do_sql_command(PGconn *conn, const char *query);
 static void check_sql_result(PGresult *res, PGconn *conn, const char *query,
 				 ExecStatusType expected);
@@ -640,7 +640,7 @@ main(int argc, char **argv)
 
 	if (numWorkers > 1)
 	{
-		printf("Versoin: %d\n", g_fout->remoteVersion);
+		printf("Version: %d\n", g_fout->remoteVersion);
 		/* check the version for the synchronized snapshots feature */
 		if (g_fout->remoteVersion < 90200 && !no_synchronized_snapshots)
 		{
@@ -826,6 +826,7 @@ help(const char *progname)
 	printf(_("  --disable-triggers          disable triggers during data-only restore\n"));
 	printf(_("  --inserts                   dump data as INSERT commands, rather than COPY\n"));
 	printf(_("  --no-security-labels        do not dump security label assignments\n"));
+	printf(_("  --no-synchronized-snapshots parallel processes should not use synchronized snapshots\n"));
 	printf(_("  --no-tablespaces            do not dump tablespace assignments\n"));
 	printf(_("  --no-unlogged-table-data    do not dump unlogged table data\n"));
 	printf(_("  --quote-all-identifiers     quote all identifiers, even if not key words\n"));
@@ -1358,6 +1359,11 @@ dumpTableData_copy(Archive *fout, void *dcontext)
 	const bool	hasoids = tbinfo->hasoids;
 	const bool	oids = tdinfo->oids;
 	PQExpBuffer q = createPQExpBuffer();
+	/*
+	 * Note: can't use getThreadLocalPQExpBuffer() here, we're calling fmtId that
+	 * uses it already.
+	 */
+	PQExpBuffer clistBuf = createPQExpBuffer();
 	PGresult   *res;
 	int			ret;
 	char	   *copybuf;
@@ -1381,7 +1387,7 @@ dumpTableData_copy(Archive *fout, void *dcontext)
 	 * cases involving ADD COLUMN and inheritance.)
 	 */
 	if (AH->public.remoteVersion >= 70300)
-		column_list = fmtCopyColumnList(tbinfo);
+		column_list = fmtCopyColumnList(tbinfo, clistBuf);
 	else
 		column_list = "";		/* can't select columns in COPY */
 
@@ -1422,6 +1428,7 @@ dumpTableData_copy(Archive *fout, void *dcontext)
 	res = PQexec(AH->connection, q->data);
 	check_sql_result(res, AH->connection, q->data, PGRES_COPY_OUT);
 	PQclear(res);
+	destroyPQExpBuffer(clistBuf);
 
 	for (;;)
 	{
@@ -1670,6 +1677,7 @@ dumpTableData(Archive *fout, TableDataInfo *tdinfo)
 {
 	TableInfo  *tbinfo = tdinfo->tdtable;
 	PQExpBuffer copyBuf = createPQExpBuffer();
+	PQExpBuffer clistBuf = createPQExpBuffer();
 	DataDumperPtr dumpFn;
 	char	   *copyStmt;
 
@@ -1681,7 +1689,7 @@ dumpTableData(Archive *fout, TableDataInfo *tdinfo)
 		appendPQExpBuffer(copyBuf, "COPY %s ",
 						  fmtId(tbinfo->dobj.name));
 		appendPQExpBuffer(copyBuf, "%s %sFROM stdin;\n",
-						  fmtCopyColumnList(tbinfo),
+						  fmtCopyColumnList(tbinfo, clistBuf),
 					  (tdinfo->oids && tbinfo->hasoids) ? "WITH OIDS " : "");
 		copyStmt = copyBuf->data;
 	}
@@ -1701,6 +1709,7 @@ dumpTableData(Archive *fout, TableDataInfo *tdinfo)
 				 dumpFn, tdinfo);
 
 	destroyPQExpBuffer(copyBuf);
+	destroyPQExpBuffer(clistBuf);
 }
 
 /*
@@ -14349,10 +14358,27 @@ getDependencies(void)
 	destroyPQExpBuffer(query);
 }
 
+/*
+ * Select the source schema and use a static var to remember what we have set
+ * as the default schema right now.  This function is never called in parallel
+ * context, so the static var is okay. The parallel context will call
+ * selectSourceSchemaOnAH, and this remembers the current schema via
+ * AH->currSchema.
+ */
 static void
 selectSourceSchema(const char *schemaName)
 {
+	static char *currSchemaName = NULL;
+
+	if (!schemaName || *schemaName == '\0' ||
+		(currSchemaName && strcmp(currSchemaName, schemaName) == 0))
+		return;					/* no need to do anything */
+
 	selectSourceSchemaOnConnection(g_conn, schemaName);
+
+	if (currSchemaName)
+		free(currSchemaName);
+	currSchemaName = pg_strdup(schemaName);
 }
 
 /*
@@ -14372,8 +14398,7 @@ selectSourceSchemaOnAH(ArchiveHandle *AH, const char *schemaName)
 
 	if (AH->currSchema)
 		free(AH->currSchema);
-	if (!(AH->currSchema = strdup(schemaName)))
-		die_horribly(AH, NULL, "out of memory\n");
+	AH->currSchema = pg_strdup(schemaName);
 }
 
 /*
@@ -14387,21 +14412,20 @@ selectSourceSchemaOnAH(ArchiveHandle *AH, const char *schemaName)
  *
  * Whenever the selected schema is not pg_catalog, be careful to qualify
  * references to system catalogs and types in our emitted commands!
+ *
+ * This function is called only from selectSourceSchemaOnAH and
+ * selectSourceSchema.
  */
 static void
 selectSourceSchemaOnConnection(PGconn *conn, const char *schemaName)
 {
-	static char *curSchemaName = NULL;
 	PQExpBuffer query;
+
+	/* This is checked by the callers already */
+	Assert(schemaName != NULL && *schemaName != '\0');
 
 	/* Not relevant if fetching from pre-7.3 DB */
 	if (g_fout->remoteVersion < 70300)
-		return;
-	/* Ignore null schema names */
-	if (schemaName == NULL || *schemaName == '\0')
-		return;
-	/* Optimize away repeated selection of same schema */
-	if (curSchemaName && strcmp(curSchemaName, schemaName) == 0)
 		return;
 
 	query = createPQExpBuffer();
@@ -14413,9 +14437,6 @@ selectSourceSchemaOnConnection(PGconn *conn, const char *schemaName)
 	do_sql_command(conn, query->data);
 
 	destroyPQExpBuffer(query);
-	if (curSchemaName)
-		free(curSchemaName);
-	curSchemaName = pg_strdup(schemaName);
 }
 
 /*
@@ -14572,37 +14593,31 @@ myFormatType(const char *typname, int32 typmod)
  * "", not an invalid "()" column list.
  */
 static const char *
-fmtCopyColumnList(const TableInfo *ti)
+fmtCopyColumnList(const TableInfo *ti, PQExpBuffer buffer)
 {
-	static PQExpBuffer q = NULL;
 	int			numatts = ti->numatts;
 	char	  **attnames = ti->attnames;
 	bool	   *attisdropped = ti->attisdropped;
 	bool		needComma;
 	int			i;
 
-	if (q)						/* first time through? */
-		resetPQExpBuffer(q);
-	else
-		q = createPQExpBuffer();
-
-	appendPQExpBuffer(q, "(");
+	appendPQExpBuffer(buffer, "(");
 	needComma = false;
 	for (i = 0; i < numatts; i++)
 	{
 		if (attisdropped[i])
 			continue;
 		if (needComma)
-			appendPQExpBuffer(q, ", ");
-		appendPQExpBuffer(q, "%s", fmtId(attnames[i]));
+			appendPQExpBuffer(buffer, ", ");
+		appendPQExpBuffer(buffer, "%s", fmtId(attnames[i]));
 		needComma = true;
 	}
 
 	if (!needComma)
 		return "";				/* no undropped columns */
 
-	appendPQExpBuffer(q, ")");
-	return q->data;
+	appendPQExpBuffer(buffer, ")");
+	return buffer->data;
 }
 
 /*
