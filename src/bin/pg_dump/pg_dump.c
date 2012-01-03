@@ -4,7 +4,7 @@
  *	  pg_dump is a utility for dumping out a postgres database
  *	  into a script file.
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *	pg_dump will read the system catalogs in a database and dump out a
@@ -830,7 +830,8 @@ help(const char *progname)
 
 	printf(_("\nGeneral options:\n"));
 	printf(_("  -f, --file=FILENAME         output file or directory name\n"));
-	printf(_("  -F, --format=c|d|t|p        output file format (custom, directory, tar, plain text)\n"));
+	printf(_("  -F, --format=c|d|t|p        output file format (custom, directory, tar,\n"
+			 "                              plain text (default))\n"));
 	printf(_("  -j, --jobs=NUM              use this many parallel jobs to dump\n"));
 	printf(_("  -v, --verbose               verbose mode\n"));
 	printf(_("  -Z, --compress=0-9          compression level for compressed formats\n"));
@@ -11959,7 +11960,8 @@ dumpUserMappings(Archive *fout,
 					  "FROM pg_options_to_table(umoptions)"
 					  "), ', ') AS umoptions "
 					  "FROM pg_user_mappings "
-					  "WHERE srvid = '%u'",
+					  "WHERE srvid = '%u' "
+					  "ORDER BY usename",
 					  catalogId.oid);
 
 	res = PQexec(g_conn, query->data);
@@ -14621,7 +14623,7 @@ myFormatType(const char *typname, int32 typmod)
 	}
 
 	/* Show lengths on bpchar and varchar */
-	if (!strcmp(typname, "bpchar"))
+	if (strcmp(typname, "bpchar") == 0)
 	{
 		int			len = (typmod - VARHDRSZ);
 
@@ -14630,14 +14632,14 @@ myFormatType(const char *typname, int32 typmod)
 			appendPQExpBuffer(buf, "(%d)",
 							  typmod - VARHDRSZ);
 	}
-	else if (!strcmp(typname, "varchar"))
+	else if (strcmp(typname, "varchar") == 0)
 	{
 		appendPQExpBuffer(buf, "character varying");
 		if (typmod != -1)
 			appendPQExpBuffer(buf, "(%d)",
 							  typmod - VARHDRSZ);
 	}
-	else if (!strcmp(typname, "numeric"))
+	else if (strcmp(typname, "numeric") == 0)
 	{
 		appendPQExpBuffer(buf, "numeric");
 		if (typmod != -1)

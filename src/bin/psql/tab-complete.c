@@ -1,7 +1,7 @@
 /*
  * psql - the PostgreSQL interactive terminal
  *
- * Copyright (c) 2000-2011, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2012, PostgreSQL Global Development Group
  *
  * src/bin/psql/tab-complete.c
  */
@@ -2368,7 +2368,7 @@ psql_completion(char *text, int start, int end)
 
 	/* Complete LOCK [TABLE] <table> with "IN" */
 	else if ((pg_strcasecmp(prev2_wd, "LOCK") == 0 &&
-			  pg_strcasecmp(prev_wd, "TABLE")) ||
+			  pg_strcasecmp(prev_wd, "TABLE") != 0) ||
 			 (pg_strcasecmp(prev2_wd, "TABLE") == 0 &&
 			  pg_strcasecmp(prev3_wd, "LOCK") == 0))
 		COMPLETE_WITH_CONST("IN");
