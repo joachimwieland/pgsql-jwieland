@@ -91,6 +91,7 @@ PGconn     *g_conn;             /* the database connection */
 /* various user-settable parameters */
 bool		schemaOnly;
 bool		dataOnly;
+int         dumpSections; /* bitmask of chosen sections */
 bool		aclsSkip;
 const char *lockWaitTimeout;
 
@@ -115,6 +116,8 @@ static SimpleStringList table_include_patterns = {NULL, NULL};
 static SimpleOidList table_include_oids = {NULL, NULL};
 static SimpleStringList table_exclude_patterns = {NULL, NULL};
 static SimpleOidList table_exclude_oids = {NULL, NULL};
+static SimpleStringList tabledata_exclude_patterns = {NULL, NULL};
+static SimpleOidList tabledata_exclude_oids = {NULL, NULL};
 
 /* default, if no "inclusion" switches appear, is to dump everything */
 static bool include_everything = true;
@@ -328,11 +331,13 @@ main(int argc, char **argv)
 		{"column-inserts", no_argument, &column_inserts, 1},
 		{"disable-dollar-quoting", no_argument, &disable_dollar_quoting, 1},
 		{"disable-triggers", no_argument, &disable_triggers, 1},
+		{"exclude-table-data", required_argument, NULL, 4},
 		{"inserts", no_argument, &dump_inserts, 1},
 		{"lock-wait-timeout", required_argument, NULL, 2},
 		{"no-tablespaces", no_argument, &outputNoTablespaces, 1},
 		{"quote-all-identifiers", no_argument, &quote_all_identifiers, 1},
 		{"role", required_argument, NULL, 3},
+		{"section", required_argument, NULL, 5},
 		{"serializable-deferrable", no_argument, &serializable_deferrable, 1},
 		{"use-set-session-authorization", no_argument, &use_setsessauth, 1},
 		{"no-security-labels", no_argument, &no_security_labels, 1},
@@ -351,6 +356,7 @@ main(int argc, char **argv)
 	strcpy(g_opaque_type, "opaque");
 
 	dataOnly = schemaOnly = false;
+	dumpSections = DUMP_UNSECTIONED;
 	lockWaitTimeout = NULL;
 
 	progname = get_progname(argv[0]);
@@ -496,6 +502,14 @@ main(int argc, char **argv)
 				use_role = optarg;
 				break;
 
+			case 4:			/* exclude table(s) data */
+				simple_string_list_append(&tabledata_exclude_patterns, optarg);
+				break;
+
+			case 5:				/* section */
+				set_section(optarg, &dumpSections);
+				break;
+
 			default:
 				fprintf(stderr, _("Try \"%s --help\" for more information.\n"), progname);
 				exit(1);
@@ -524,6 +538,22 @@ main(int argc, char **argv)
 	{
 		write_msg(NULL, "options -s/--schema-only and -a/--data-only cannot be used together\n");
 		exit(1);
+	}
+
+	if ((dataOnly || schemaOnly) && dumpSections != DUMP_UNSECTIONED)
+	{
+		write_msg(NULL, "options -s/--schema-only and -a/--data-only cannot be used with --section\n");
+		exit(1);
+	}
+
+	if (dataOnly)
+		dumpSections = DUMP_DATA;
+	else if (schemaOnly)
+		dumpSections = DUMP_PRE_DATA | DUMP_POST_DATA;
+	else if ( dumpSections != DUMP_UNSECTIONED)
+	{
+		dataOnly = dumpSections == DUMP_DATA;
+		schemaOnly = !(dumpSections & DUMP_DATA);
 	}
 
 	if (dataOnly && outputClean)
@@ -681,6 +711,10 @@ main(int argc, char **argv)
 	}
 	expand_table_name_patterns(&table_exclude_patterns,
 							   &table_exclude_oids);
+
+	expand_table_name_patterns(&tabledata_exclude_patterns,
+							   &tabledata_exclude_oids);
+
 	/* non-matching exclusion patterns aren't an error */
 
 	/*
@@ -824,12 +858,14 @@ help(const char *progname)
 	printf(_("  --column-inserts            dump data as INSERT commands with column names\n"));
 	printf(_("  --disable-dollar-quoting    disable dollar quoting, use SQL standard quoting\n"));
 	printf(_("  --disable-triggers          disable triggers during data-only restore\n"));
+	printf(_("  --exclude-table-data=TABLE  do NOT dump data for the named table(s)\n"));
 	printf(_("  --inserts                   dump data as INSERT commands, rather than COPY\n"));
 	printf(_("  --no-security-labels        do not dump security label assignments\n"));
 	printf(_("  --no-synchronized-snapshots parallel processes should not use synchronized snapshots\n"));
 	printf(_("  --no-tablespaces            do not dump tablespace assignments\n"));
 	printf(_("  --no-unlogged-table-data    do not dump unlogged table data\n"));
 	printf(_("  --quote-all-identifiers     quote all identifiers, even if not key words\n"));
+	printf(_("  --section=SECTION           dump named section (pre-data, data or post-data)\n"));
 	printf(_("  --serializable-deferrable   wait until the dump can run without anomalies\n"));
 	printf(_("  --use-set-session-authorization\n"
 			 "                              use SET SESSION AUTHORIZATION commands instead of\n"
@@ -1229,6 +1265,15 @@ selectDumpableTable(TableInfo *tbinfo)
 		simple_oid_list_member(&table_exclude_oids,
 							   tbinfo->dobj.catId.oid))
 		tbinfo->dobj.dump = false;
+
+	/* If table is to be dumped, check that the data is not excluded */
+	if (tbinfo->dobj.dump && !
+		simple_oid_list_member(&tabledata_exclude_oids,
+							   tbinfo->dobj.catId.oid))
+		tbinfo->dobj.dumpdata = true;
+	else
+		tbinfo->dobj.dumpdata = false;
+
 }
 
 /*
@@ -1680,6 +1725,10 @@ dumpTableData(Archive *fout, TableDataInfo *tdinfo)
 	PQExpBuffer clistBuf = createPQExpBuffer();
 	DataDumperPtr dumpFn;
 	char	   *copyStmt;
+
+	/* don't do anything if the data isn't wanted */
+	if (!tbinfo->dobj.dumpdata)
+		return;
 
 	if (!dump_inserts)
 	{
@@ -6158,11 +6207,16 @@ getTableAttrs(TableInfo *tblinfo, int numTables)
 						  tbinfo->dobj.name);
 
 			resetPQExpBuffer(q);
-			if (g_fout->remoteVersion >= 90100)
+			if (g_fout->remoteVersion >= 90200)
 			{
+				/*
+				 * conisonly and convalidated are new in 9.2 (actually, the latter
+				 * is there in 9.1, but it wasn't ever false for check constraints
+				 * until 9.2).
+				 */
 				appendPQExpBuffer(q, "SELECT tableoid, oid, conname, "
 						   "pg_catalog.pg_get_constraintdef(oid) AS consrc, "
-								  "conislocal, convalidated "
+								  "conislocal, convalidated, conisonly "
 								  "FROM pg_catalog.pg_constraint "
 								  "WHERE conrelid = '%u'::pg_catalog.oid "
 								  "   AND contype = 'c' "
@@ -6173,7 +6227,8 @@ getTableAttrs(TableInfo *tblinfo, int numTables)
 			{
 				appendPQExpBuffer(q, "SELECT tableoid, oid, conname, "
 						   "pg_catalog.pg_get_constraintdef(oid) AS consrc, "
-								  "conislocal, true AS convalidated "
+								  "conislocal, true AS convalidated, "
+								  "false as conisonly "
 								  "FROM pg_catalog.pg_constraint "
 								  "WHERE conrelid = '%u'::pg_catalog.oid "
 								  "   AND contype = 'c' "
@@ -6184,7 +6239,8 @@ getTableAttrs(TableInfo *tblinfo, int numTables)
 			{
 				appendPQExpBuffer(q, "SELECT tableoid, oid, conname, "
 						   "pg_catalog.pg_get_constraintdef(oid) AS consrc, "
-								  "true AS conislocal, true AS convalidated "
+								  "true AS conislocal, true AS convalidated, "
+								  "false as conisonly "
 								  "FROM pg_catalog.pg_constraint "
 								  "WHERE conrelid = '%u'::pg_catalog.oid "
 								  "   AND contype = 'c' "
@@ -6196,7 +6252,8 @@ getTableAttrs(TableInfo *tblinfo, int numTables)
 				/* no pg_get_constraintdef, must use consrc */
 				appendPQExpBuffer(q, "SELECT tableoid, oid, conname, "
 								  "'CHECK (' || consrc || ')' AS consrc, "
-								  "true AS conislocal, true AS convalidated "
+								  "true AS conislocal, true AS convalidated, "
+								  "false as conisonly "
 								  "FROM pg_catalog.pg_constraint "
 								  "WHERE conrelid = '%u'::pg_catalog.oid "
 								  "   AND contype = 'c' "
@@ -6209,7 +6266,8 @@ getTableAttrs(TableInfo *tblinfo, int numTables)
 				appendPQExpBuffer(q, "SELECT tableoid, 0 AS oid, "
 								  "rcname AS conname, "
 								  "'CHECK (' || rcsrc || ')' AS consrc, "
-								  "true AS conislocal, true AS convalidated "
+								  "true AS conislocal, true AS convalidated, "
+								  "false as conisonly "
 								  "FROM pg_relcheck "
 								  "WHERE rcrelid = '%u'::oid "
 								  "ORDER BY rcname",
@@ -6220,7 +6278,8 @@ getTableAttrs(TableInfo *tblinfo, int numTables)
 				appendPQExpBuffer(q, "SELECT tableoid, oid, "
 								  "rcname AS conname, "
 								  "'CHECK (' || rcsrc || ')' AS consrc, "
-								  "true AS conislocal, true AS convalidated "
+								  "true AS conislocal, true AS convalidated, "
+								  "false as conisonly "
 								  "FROM pg_relcheck "
 								  "WHERE rcrelid = '%u'::oid "
 								  "ORDER BY rcname",
@@ -6233,7 +6292,8 @@ getTableAttrs(TableInfo *tblinfo, int numTables)
 								  "(SELECT oid FROM pg_class WHERE relname = 'pg_relcheck') AS tableoid, "
 								  "oid, rcname AS conname, "
 								  "'CHECK (' || rcsrc || ')' AS consrc, "
-								  "true AS conislocal, true AS convalidated "
+								  "true AS conislocal, true AS convalidated, "
+								  "false as conisonly "
 								  "FROM pg_relcheck "
 								  "WHERE rcrelid = '%u'::oid "
 								  "ORDER BY rcname",
@@ -6259,6 +6319,7 @@ getTableAttrs(TableInfo *tblinfo, int numTables)
 			for (j = 0; j < numConstrs; j++)
 			{
 				bool	validated = PQgetvalue(res, j, 5)[0] == 't';
+				bool	isonly = PQgetvalue(res, j, 6)[0] == 't';
 
 				constrs[j].dobj.objType = DO_CONSTRAINT;
 				constrs[j].dobj.catId.tableoid = atooid(PQgetvalue(res, j, 0));
@@ -6275,12 +6336,14 @@ getTableAttrs(TableInfo *tblinfo, int numTables)
 				constrs[j].condeferrable = false;
 				constrs[j].condeferred = false;
 				constrs[j].conislocal = (PQgetvalue(res, j, 4)[0] == 't');
+				constrs[j].conisonly = isonly;
 				/*
 				 * An unvalidated constraint needs to be dumped separately, so
 				 * that potentially-violating existing data is loaded before
-				 * the constraint.
+				 * the constraint.  An ONLY constraint needs to be dumped
+				 * separately too.
 				 */
-				constrs[j].separate = !validated;
+				constrs[j].separate = !validated || isonly;
 
 				constrs[j].dobj.dump = tbinfo->dobj.dump;
 
@@ -6288,12 +6351,12 @@ getTableAttrs(TableInfo *tblinfo, int numTables)
 				 * Mark the constraint as needing to appear before the table
 				 * --- this is so that any other dependencies of the
 				 * constraint will be emitted before we try to create the
-				 * table.  If the constraint is not validated, it will be
+				 * table.  If the constraint is to be dumped separately, it will be
 				 * dumped after data is loaded anyway, so don't do it.  (There's
 				 * an automatic dependency in the opposite direction anyway, so
 				 * don't need to add one manually here.)
 				 */
-				if (validated)
+				if (!constrs[j].separate)
 					addObjectDependency(&tbinfo->dobj,
 										constrs[j].dobj.dumpId);
 
@@ -7255,6 +7318,28 @@ collectComments(Archive *fout, CommentItem **items)
 static void
 dumpDumpableObject(Archive *fout, DumpableObject *dobj)
 {
+
+	bool skip = false;
+
+	switch (dobj->objType)
+	{
+		case DO_INDEX:
+		case DO_TRIGGER:
+		case DO_CONSTRAINT:
+		case DO_FK_CONSTRAINT:
+		case DO_RULE:
+			skip = !(dumpSections & DUMP_POST_DATA);
+			break;
+		case DO_TABLE_DATA:
+			skip = !(dumpSections & DUMP_DATA);
+			break;
+		default:
+			skip = !(dumpSections & DUMP_PRE_DATA);
+	}
+
+	if (skip)
+		return;
+
 	switch (dobj->objType)
 	{
 		case DO_NAMESPACE:
@@ -12508,8 +12593,10 @@ dumpTableSchema(Archive *fout, TableInfo *tbinfo)
 		if (binary_upgrade)
 			binary_upgrade_set_pg_class_oids(q, tbinfo->dobj.catId.oid, false);
 
-		appendPQExpBuffer(q, "CREATE VIEW %s AS\n    %s\n",
-						  fmtId(tbinfo->dobj.name), viewdef);
+		appendPQExpBuffer(q, "CREATE VIEW %s", fmtId(tbinfo->dobj.name));
+		if (tbinfo->reloptions && strlen(tbinfo->reloptions) > 0)
+			appendPQExpBuffer(q, " WITH (%s)", tbinfo->reloptions);
+		appendPQExpBuffer(q, " AS\n    %s\n", viewdef);
 
 		appendPQExpBuffer(labelq, "VIEW %s",
 						  fmtId(tbinfo->dobj.name));
@@ -13320,9 +13407,9 @@ dumpConstraint(Archive *fout, ConstraintInfo *coninfo)
 		/* Ignore if not to be dumped separately */
 		if (coninfo->separate)
 		{
-			/* not ONLY since we want it to propagate to children */
-			appendPQExpBuffer(q, "ALTER TABLE %s\n",
-							  fmtId(tbinfo->dobj.name));
+			/* add ONLY if we do not want it to propagate to children */
+			appendPQExpBuffer(q, "ALTER TABLE %s %s\n",
+							 coninfo->conisonly ? "ONLY" : "", fmtId(tbinfo->dobj.name));
 			appendPQExpBuffer(q, "    ADD CONSTRAINT %s %s;\n",
 							  fmtId(coninfo->dobj.name),
 							  coninfo->condef);

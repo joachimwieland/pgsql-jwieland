@@ -361,8 +361,7 @@ smgrDoPendingDeletes(bool isCommit)
 				srel = smgropen(pending->relnode, pending->backend);
 				for (i = 0; i <= MAX_FORKNUM; i++)
 				{
-					if (smgrexists(srel, i))
-						smgrdounlink(srel, i, false);
+					smgrdounlink(srel, i, false);
 				}
 				smgrclose(srel);
 			}
@@ -505,7 +504,7 @@ smgr_redo(XLogRecPtr lsn, XLogRecord *record)
 		/*
 		 * Forcibly create relation if it doesn't exist (which suggests that
 		 * it was dropped somewhere later in the WAL sequence).  As in
-		 * XLogOpenRelation, we prefer to recreate the rel and replay the log
+		 * XLogReadBuffer, we prefer to recreate the rel and replay the log
 		 * as best we can until the drop is seen.
 		 */
 		smgrcreate(reln, MAIN_FORKNUM, true);
