@@ -437,7 +437,7 @@ MasterExit(int signum)
  */
 static void
 SetupWorker(ArchiveHandle *AH, int pipefd[2], int worker,
-		   RestoreOptions *ropt)
+			RestoreOptions *ropt)
 {
 	/*
 	 * In dump mode (pg_dump) this calls _SetupWorker() as defined in
@@ -573,6 +573,9 @@ ParallelBackupStart(ArchiveHandle *AH, RestoreOptions *ropt)
 			signal(SIGINT, WorkerExit);
 			signal(SIGQUIT, WorkerExit);
 
+			/* we don't run CloneArchive() on Unix. XXX should we? */
+			AH->is_clone = true;
+
 #ifdef HAVE_SETSID
 			/*
 			 * If we can, we try to make each process the leader of its own
@@ -607,10 +610,8 @@ ParallelBackupStart(ArchiveHandle *AH, RestoreOptions *ropt)
 			free(pstate->parallelSlot);
 			free(pstate);
 
-			/* Forget the parent's connection */
-			AH->connection = NULL;
-			worker_conn = &AH->connection;
 			SetupWorker(AH, pipefd, i, ropt);
+			worker_conn = &AH->connection;
 			Assert(*worker_conn == AH->connection);
 
 			exit(0);

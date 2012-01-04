@@ -137,7 +137,8 @@ InitArchiveFmt_Custom(ArchiveHandle *AH)
 	AH->MasterStartParallelItemPtr = _MasterStartParallelItem;
 	AH->MasterEndParallelItemPtr = _MasterEndParallelItem;
 
-	AH->WorkerJobDumpPtr = NULL; /* no parallel dump in the custom archive */
+	/* no parallel dump in the custom archive, only parallel restore */
+	AH->WorkerJobDumpPtr = NULL;
 	AH->WorkerJobRestorePtr = _WorkerJobRestoreCustom;
 
 	/* Set up a private area. */
@@ -727,7 +728,7 @@ _CloseArchive(ArchiveHandle *AH)
 	if (fclose(AH->FH) != 0)
 		die_horribly(AH, modulename, "could not close archive file: %s\n", strerror(errno));
 
-	//AH->FH = NULL;
+	AH->FH = NULL;
 }
 
 /*

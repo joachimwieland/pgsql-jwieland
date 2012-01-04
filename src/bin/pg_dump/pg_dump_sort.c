@@ -121,8 +121,8 @@ static void repairDependencyLoop(DumpableObject **loop,
 static void describeDumpableObject(DumpableObject *obj,
 					   char *buf, int bufsize);
 
-static int
-DOSizeCompare(const void *p1, const void *p2);
+static int DOSizeCompare(const void *p1, const void *p2);
+
 static int
 findFirstEqualType(DumpableObjectType type, DumpableObject **objs, int numObjs)
 {
@@ -143,7 +143,17 @@ findFirstDifferentType(DumpableObjectType type, DumpableObject **objs, int numOb
 	return numObjs - 1;
 }
 
-
+/*
+ * When we do a parallel dump, we want to start with the largest items first.
+ *
+ * Say we have the objects in this order:
+ * ....DDDDD....III....
+ *
+ * with D = Table data, I = Index, . = other object
+ *
+ * This sorting function now takes each of the D or I blocks and sorts them
+ * according to their size.
+ */
 void
 sortDataAndIndexObjectsBySize(DumpableObject **objs, int numObjs)
 {

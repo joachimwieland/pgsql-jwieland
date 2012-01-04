@@ -184,6 +184,8 @@ typedef struct _archiveHandle
 								 * Added V1.7 */
 	ArchiveFormat format;		/* Archive format */
 
+	bool		is_clone;		/* have we been cloned ? */
+
 	time_t		createDate;		/* Date archive created */
 
 	/*
@@ -235,11 +237,14 @@ typedef struct _archiveHandle
 
 	/* Stuff for direct DB connection */
 	char	   *archdbname;		/* DB name *read* from archive */
-	ConnParams	connParams;
+	enum trivalue promptPassword;
+	char	   *savedPassword;	/* password for ropt->username, if known */
+	char	   *use_role;
+	char	   *sync_snapshot_id;	/* sync snapshot id for parallel
+									   operation */
 	PGconn	   *connection;
 	int			connectToDB;	/* Flag to indicate if direct DB connection is
 								 * required */
-	enum trivalue promptPassword;
 	bool		writingCopyData;	/* True when we are sending COPY data */
 	bool		pgCopyIn;		/* Currently in libpq 'COPY IN' mode. */
 
@@ -264,7 +269,6 @@ typedef struct _archiveHandle
 	ArchiveMode mode;			/* File mode - r or w */
 	void	   *formatData;		/* Header data specific to file format */
 
-	/* XXX this also contains a connParams now */
 	RestoreOptions *ropt;		/* Used to check restore options in ahwrite
 								 * etc */
 
@@ -432,8 +436,6 @@ extern void InitArchiveFmt_Files(ArchiveHandle *AH);
 extern void InitArchiveFmt_Null(ArchiveHandle *AH);
 extern void InitArchiveFmt_Directory(ArchiveHandle *AH);
 extern void InitArchiveFmt_Tar(ArchiveHandle *AH);
-
-extern void setupArchDirectory(ArchiveHandle *AH, int numWorkers);
 
 extern bool isValidTarHeader(char *header);
 

@@ -89,7 +89,7 @@ static OutputContext SaveOutput(ArchiveHandle *AH);
 static void RestoreOutput(ArchiveHandle *AH, OutputContext savedContext);
 
 static int restore_toc_entry(ArchiveHandle *AH, TocEntry *te,
-							 RestoreOptions *ropt, bool is_parallel);
+				  RestoreOptions *ropt, bool is_parallel);
 static void restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate);
 static void par_list_header_init(TocEntry *l);
 static void par_list_append(TocEntry *l, TocEntry *te);
@@ -241,11 +241,9 @@ RestoreArchive(Archive *AHX, RestoreOptions *ropt)
 		AHX->minRemoteVersion = 070100;
 		AHX->maxRemoteVersion = 999999;
 
-		ConnectDatabase(AHX, ropt->connParams.dbname,
-							 ropt->connParams.pghost,
-							 ropt->connParams.pgport,
-							 ropt->connParams.username,
-							 ropt->promptPassword);
+		ConnectDatabase(AHX, ropt->dbname,
+						ropt->pghost, ropt->pgport, ropt->username,
+						ropt->promptPassword);
 
 		/*
 		 * If we're talking to the DB directly, don't send comments since they
@@ -502,7 +500,7 @@ restore_toc_entry(ArchiveHandle *AH, TocEntry *te,
 		{
 			ahlog(AH, 1, "connecting to new database \"%s\"\n", te->tag);
 			_reconnectToDB(AH, te->tag);
-			ropt->connParams.dbname = pg_strdup(te->tag);
+			ropt->dbname = pg_strdup(te->tag);
 		}
 	}
 
@@ -1399,6 +1397,10 @@ vdie_horribly(ArchiveHandle *AH, const char *modulename,
 			write_msg(NULL, "*** aborted because of error\n");
 		if (AH->connection) {
 			PQfinish(AH->connection);
+			/*
+			 * Set AH->connection == NULL, so that the cleanup routines know
+			 * that cleanup has already been done.
+			 */
 			AH->connection = NULL;
 		}
 	}
@@ -1900,6 +1902,8 @@ _allocAH(const char *FileSpec, const ArchiveFormat fmt,
 
 	AH->archiveDumpVersion = PG_VERSION;
 
+	AH->is_clone = false;
+
 	AH->createDate = time(NULL);
 
 	AH->intSize = sizeof(int);
@@ -1991,7 +1995,7 @@ _allocAH(const char *FileSpec, const ArchiveFormat fmt,
 void
 WriteDataChunks(ArchiveHandle *AH, ParallelState *pstate)
 {
-	TocEntry	   *te;
+	TocEntry   *te;
 
 	for (te = AH->toc->next; te != AH->toc; te = te->next)
 	{
@@ -2467,8 +2471,8 @@ _doSetFixedOutputState(ArchiveHandle *AH)
 			 AH->public.std_strings ? "on" : "off");
 
 	/* Select the role to be used during restore */
-	if (AH->connParams.use_role)
-		ahprintf(AH, "SET ROLE %s;\n", fmtId(AH->connParams.use_role));
+	if (AH->ropt && AH->ropt->use_role)
+		ahprintf(AH, "SET ROLE %s;\n", fmtId(AH->ropt->use_role));
 
 	/* Make sure function checking is disabled */
 	ahprintf(AH, "SET check_function_bodies = false;\n");
@@ -3034,12 +3038,10 @@ WriteHead(ArchiveHandle *AH)
 
 #ifndef HAVE_LIBZ
 	if (AH->compression != 0)
-	{
 		write_msg(modulename, "WARNING: requested compression not available in this "
 				  "installation -- archive will be uncompressed\n");
 
-		AH->compression = 0;
-	}
+	AH->compression = 0;
 #endif
 
 	WriteInt(AH, AH->compression);
@@ -3456,7 +3458,9 @@ restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate)
 	/*
 	 * Now reconnect the single parent connection.
 	 */
-	CloneDatabaseConnection((Archive *) AH);
+	ConnectDatabase((Archive *) AH, ropt->dbname,
+					ropt->pghost, ropt->pgport, ropt->username,
+					ropt->promptPassword);
 
 	_doSetFixedOutputState(AH);
 
@@ -4037,8 +4041,14 @@ CloneArchive(ArchiveHandle *AH)
 	clone->currTablespace = NULL;
 	clone->currWithOids = -1;
 
+	/* savedPassword must be local in case we change it while connecting */
+	if (clone->savedPassword)
+		clone->savedPassword = pg_strdup(clone->savedPassword);
+
 	/* clone has its own error count, too */
 	clone->public.n_errors = 0;
+
+	clone->is_clone = true;
 
 	/* Let the format-specific code have a chance too */
 	(clone->ClonePtr) (clone);
@@ -4066,9 +4076,8 @@ DeCloneArchive(ArchiveHandle *AH)
 		free(AH->currSchema);
 	if (AH->currTablespace)
 		free(AH->currTablespace);
-
-	if (AH->connParams.savedPassword)
-		free(AH->connParams.savedPassword);
+	if (AH->savedPassword)
+		free(AH->savedPassword);
 
 	free(AH);
 }

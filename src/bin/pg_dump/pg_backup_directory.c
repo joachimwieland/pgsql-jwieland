@@ -48,10 +48,9 @@ typedef struct
 	char	   *directory;
 
 	cfp		   *dataFH;			/* currently open data file */
-	cfp		   *blobsTocFH;		/* file handle for blobs.toc */
 
-	/* this is for a parallel backup or restore */
-	ParallelState	   *pstate;
+	cfp		   *blobsTocFH;		/* file handle for blobs.toc */
+	ParallelState	   *pstate; /* for parallel backup / restore */
 } lclContext;
 
 typedef struct
@@ -561,7 +560,6 @@ _CloseArchive(ArchiveHandle *AH)
 		WriteHead(AH);
 		AH->format = archDirectory;
 		WriteToc(AH);
-
 		if (cfclose(tocFH) != 0)
 			die_horribly(AH, modulename, "could not close TOC file: %s\n",
 						 strerror(errno));
@@ -697,7 +695,8 @@ createDirectory(const char *dir)
 /*
  * Gets a relative file name and prepends the output directory, writing the
  * result to buf. The caller needs to make sure that buf is MAXPGPATH bytes
- * big.
+ * big. Can't use a static char[MAXPGPATH] inside the function because we run
+ * multithreaded on Windows.
  */
 static char *
 prependDirectory(ArchiveHandle *AH, char* buf, const char *relativeFilename)

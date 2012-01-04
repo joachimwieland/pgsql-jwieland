@@ -37,6 +37,7 @@ static bool parseAclItem(const char *item, const char *type,
 static char *copyAclUserName(PQExpBuffer output, char *input);
 static void AddAcl(PQExpBuffer aclbuf, const char *keyword,
 	   const char *subname);
+static PQExpBuffer getThreadLocalPQExpBuffer(void);
 
 #ifdef WIN32
 static bool parallel_init_done = false;
@@ -59,7 +60,7 @@ init_parallel_dump_utils(void)
  * Non-reentrant but reduces memory leakage. (On Windows the memory leakage
  * will be one buffer per thread, which is at least better than one per call).
  */
-PQExpBuffer
+static PQExpBuffer
 getThreadLocalPQExpBuffer(void)
 {
 	/*

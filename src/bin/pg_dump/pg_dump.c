@@ -86,7 +86,7 @@ typedef struct
 bool		g_verbose;			/* User wants verbose narration of our
 								 * activities. */
 Archive    *g_fout;				/* the script file */
-PGconn     *g_conn;             /* the database connection */
+PGconn	   *g_conn;				/* the database connection */
 
 /* various user-settable parameters */
 bool		schemaOnly;
@@ -252,8 +252,9 @@ static const char *fmtCopyColumnList(const TableInfo *ti, PQExpBuffer buffer);
 static void do_sql_command(PGconn *conn, const char *query);
 static void check_sql_result(PGresult *res, PGconn *conn, const char *query,
 				 ExecStatusType expected);
-static void SetupConnection(Archive *AHX, const char *dumpencoding, const char *use_role);
-static char* get_synchronized_snapshot(ArchiveHandle *AH);
+static void SetupConnection(Archive *AHX, const char *dumpencoding,
+							const char *use_role);
+static char *get_synchronized_snapshot(ArchiveHandle *AH);
 
 int
 main(int argc, char **argv)
@@ -261,11 +262,11 @@ main(int argc, char **argv)
 	int			c;
 	const char *filename = NULL;
 	const char *format = "p";
+	const char *dbname = NULL;
+	const char *pghost = NULL;
+	const char *pgport = NULL;
+	const char *username = NULL;
 	const char *dumpencoding = NULL;
-	char	   *dbname = NULL;
-	char	   *pghost = NULL;
-	char	   *pgport = NULL;
-	char	   *username = NULL;
 	bool		oids = false;
 	TableInfo  *tblinfo;
 	int			numTables;
@@ -576,13 +577,6 @@ main(int argc, char **argv)
 	if (archiveFormat == archNull)
 		plainText = 1;
 
-	/*
-	 * Ignore compression level for plain format. XXX: This is a bit
-	 * inconsistent, tar-format throws an error instead.
-	 */
-	if (archiveFormat == archNull)
-		compressLevel = 0;
-
 	/* Custom and directory formats are compressed by default, others not */
 	if (compressLevel == -1)
 	{
@@ -598,14 +592,10 @@ main(int argc, char **argv)
 		exit(1);
 	}
 
-	if (archiveFormat != archDirectory)
-	{
-		if (numWorkers > 1)
-		{
-			write_msg(NULL, "parallel backup only supported by the directory format\n");
-			exit(1);
-		}
-		numWorkers = 0;
+	/* Parallel backup only in the directory archive format so far */
+	if (archiveFormat != archDirectory && numWorkers > 1) {
+		write_msg(NULL, "parallel backup only supported by the directory format\n");
+		exit(1);
 	}
 
 	/* Open the output file */
@@ -640,7 +630,8 @@ main(int argc, char **argv)
 	 * Open the database using the Archiver, so it knows about it. Errors mean
 	 * death.
 	 */
-	g_conn = ConnectDatabase(g_fout, dbname, pghost, pgport, username, prompt_password);
+	g_conn = ConnectDatabase(g_fout, dbname, pghost, pgport,
+							 username, prompt_password);
 
 	/* Find the last built-in OID, if needed */
 	if (g_fout->remoteVersion < 70300)
@@ -670,7 +661,6 @@ main(int argc, char **argv)
 
 	if (numWorkers > 1)
 	{
-		printf("Version: %d\n", g_fout->remoteVersion);
 		/* check the version for the synchronized snapshots feature */
 		if (g_fout->remoteVersion < 90200 && !no_synchronized_snapshots)
 		{
@@ -764,6 +754,7 @@ main(int argc, char **argv)
 	else
 		sortDumpableObjectsByTypeOid(dobjs, numObjs);
 
+	/* If we do a parallel dump, we want the largest tables to go first */
 	if (archiveFormat == archDirectory && numWorkers > 1)
 		sortDataAndIndexObjectsBySize(dobjs, numObjs);
 
@@ -910,10 +901,12 @@ SetupConnection(Archive *AHX, const char *dumpencoding, const char *use_role)
 	const char *std_strings;
 	PGconn *conn = AH->connection;
 
-	/* Set the client encoding if requested */
-	if (!dumpencoding && AH->connParams.encoding)
-		dumpencoding = AH->connParams.encoding;
-
+	/*
+	 * Set the client encoding if requested. If dumpencoding == NULL then
+	 * either it hasn't been requested or we're a cloned connection and then this
+	 * has already been set in CloneDatabaseConnection according to the original
+	 * connection encoding.
+	 */
 	if (dumpencoding)
 	{
 		if (PQsetClientEncoding(AH->connection, dumpencoding) < 0)
@@ -922,10 +915,6 @@ SetupConnection(Archive *AHX, const char *dumpencoding, const char *use_role)
 					  dumpencoding);
 			exit(1);
 		}
-
-		/* save this for later use on parallel connections */
-		if (!AH->connParams.encoding)
-			AH->connParams.encoding = strdup(dumpencoding);
 	}
 
 	/*
@@ -938,8 +927,8 @@ SetupConnection(Archive *AHX, const char *dumpencoding, const char *use_role)
 	AHX->std_strings = (std_strings && strcmp(std_strings, "on") == 0);
 
 	/* Set the role if requested */
-	if (!use_role && AH->connParams.use_role)
-		use_role = AH->connParams.use_role;
+	if (!use_role && AH->use_role)
+		use_role = AH->use_role;
 
 	if (use_role && AHX->remoteVersion >= 80100)
 	{
@@ -950,8 +939,8 @@ SetupConnection(Archive *AHX, const char *dumpencoding, const char *use_role)
 		destroyPQExpBuffer(query);
 
 		/* save this for later use on parallel connections */
-		if (!AH->connParams.use_role)
-			AH->connParams.use_role = strdup(use_role);
+		if (!AH->use_role)
+			AH->use_role = strdup(use_role);
 	}
 
 	/* Set the datestyle to ISO to ensure the dump's portability */
@@ -1014,11 +1003,11 @@ SetupConnection(Archive *AHX, const char *dumpencoding, const char *use_role)
 
 	if (AHX->numWorkers > 1 && AHX->remoteVersion >= 90200)
 	{
-		if (AH->connParams.is_clone)
+		if (AH->is_clone)
 		{
 			PQExpBuffer query = createPQExpBuffer();
 			appendPQExpBuffer(query, "SET TRANSACTION SNAPSHOT ");
-			appendStringLiteralConn(query, AH->connParams.sync_snapshot_id, conn);
+			appendStringLiteralConn(query, AH->sync_snapshot_id, conn);
 			destroyPQExpBuffer(query);
 		}
 		else {
@@ -1030,8 +1019,8 @@ SetupConnection(Archive *AHX, const char *dumpencoding, const char *use_role)
 			 * then.
 			 */
 			if (AHX->remoteVersion >= 90200) {
-				AH->connParams.sync_snapshot_id = get_synchronized_snapshot(AH);
-				printf("snapshotid: %s\n", AH->connParams.sync_snapshot_id);
+				AH->sync_snapshot_id = get_synchronized_snapshot(AH);
+				printf("snapshotid: %s\n", AH->sync_snapshot_id);
 			}
 		}
 	}
@@ -1391,13 +1380,13 @@ selectDumpableObject(DumpableObject *dobj)
  *	- this routine is called by the Archiver when it wants the table
  *	  to be dumped.
  */
-/*
- * This is a data dumper routine, executed in a child for parallel backup, so
- * it must not access the global g_conn but AH->connection instead.
- */
 static int
 dumpTableData_copy(Archive *fout, void *dcontext)
 {
+	/*
+	 * This is a data dumper routine, executed in a child for parallel backup, so
+	 * it must not access the global g_conn but AH->connection instead.
+	 */
 	ArchiveHandle *AH = (ArchiveHandle *) fout;
 	TableDataInfo *tdinfo = (TableDataInfo *) dcontext;
 	TableInfo  *tbinfo = tdinfo->tdtable;
@@ -1406,7 +1395,7 @@ dumpTableData_copy(Archive *fout, void *dcontext)
 	const bool	oids = tdinfo->oids;
 	PQExpBuffer q = createPQExpBuffer();
 	/*
-	 * Note: can't use getThreadLocalPQExpBuffer() here, we're calling fmtId that
+	 * Note: can't use getThreadLocalPQExpBuffer() here, we're calling fmtId which
 	 * uses it already.
 	 */
 	PQExpBuffer clistBuf = createPQExpBuffer();
@@ -1555,13 +1544,13 @@ dumpTableData_copy(Archive *fout, void *dcontext)
 	return 1;
 }
 
-/*
- * This is a data dumper routine, executed in a child for parallel backup, so
- * it must not access the global g_conn but AH->connection instead.
- */
 static int
 dumpTableData_insert(Archive *fout, void *dcontext)
 {
+	/*
+	 * This is a data dumper routine, executed in a child for parallel backup, so
+	 * it must not access the global g_conn but AH->connection instead.
+	 */
 	ArchiveHandle *AH = (ArchiveHandle *) fout;
 	TableDataInfo *tdinfo = (TableDataInfo *) dcontext;
 	TableInfo  *tbinfo = tdinfo->tdtable;
@@ -2488,21 +2477,21 @@ dumpBlob(Archive *AH, BlobInfo *binfo)
  * dumpBlobs:
  *	dump the data contents of all large objects
  */
-/*
- * This is a data dumper routine, executed in a child for parallel backup, so
- * it must not access the global g_conn but AH->connection instead.
- */
 static int
 dumpBlobs(Archive *AHX, void *arg)
 {
-	ArchiveHandle  *AH = (ArchiveHandle *) AHX;
-	const char	   *blobQry;
-	const char	   *blobFetchQry;
-	PGresult	   *res;
-	char			buf[LOBBUFSIZE];
-	int				ntups;
-	int				i;
-	int				cnt;
+	/*
+	 * This is a data dumper routine, executed in a child for parallel backup,
+	 * so it must not access the global g_conn but AH->connection instead.
+	 */
+	ArchiveHandle *AH = (ArchiveHandle *) AHX;
+	const char *blobQry;
+	const char *blobFetchQry;
+	PGresult   *res;
+	char		buf[LOBBUFSIZE];
+	int			ntups;
+	int			i;
+	int			cnt;
 
 	if (g_verbose)
 		write_msg(NULL, "saving large objects\n");
@@ -2552,7 +2541,7 @@ dumpBlobs(Archive *AHX, void *arg)
 				exit_nicely();
 			}
 
-			StartBlob((Archive *) AH, blobOid);
+			StartBlob(AHX, blobOid);
 
 			/* Now read it in chunks, sending data to archive */
 			do
@@ -2565,14 +2554,14 @@ dumpBlobs(Archive *AHX, void *arg)
 					exit_nicely();
 				}
 
- 				/* we try to avoid writing empty chunks */
+				/* we try to avoid writing empty chunks */
 				if (cnt > 0)
-					WriteData((Archive *) AH, buf, cnt);
+					WriteData(AHX, buf, cnt);
 			} while (cnt > 0);
 
 			lo_close(AH->connection, loFd);
 
-			EndBlob((Archive *) AH, blobOid);
+			EndBlob(AHX, blobOid);
 		}
 	} while (ntups > 0);
 
@@ -4543,13 +4532,11 @@ getTables(int *numTables)
 		if (tblinfo[i].dobj.dump && tblinfo[i].relkind == RELKIND_RELATION)
 		{
 			resetPQExpBuffer(query);
-			printf("Locking table %s\n", tblinfo[i].dobj.name);
 			appendPQExpBuffer(query,
 							  "LOCK TABLE %s IN ACCESS SHARE MODE",
 						 fmtQualifiedId(tblinfo[i].dobj.namespace->dobj.name,
 										tblinfo[i].dobj.name,
 										g_fout->remoteVersion));
-			printf("Query: %s\n", query->data);
 			do_sql_command(g_conn, query->data);
 		}
 
@@ -14745,4 +14732,3 @@ check_sql_result(PGresult *res, PGconn *conn, const char *query,
 	write_msg(NULL, "The command was: %s\n", query);
 	exit_nicely();
 }
-

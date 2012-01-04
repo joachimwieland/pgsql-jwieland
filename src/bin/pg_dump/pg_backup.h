@@ -105,19 +105,6 @@ typedef struct _Archive
 
 typedef int (*DataDumperPtr) (Archive *AH, void *userArg);
 
-typedef struct _connParams
-{
-	char	   *dbname;
-	char	   *pgport;
-	char	   *pghost;
-	char	   *username;
-	char       *savedPassword;
-	char	   *use_role;		/* Issue SET ROLE to this */
-	char	   *encoding;
-	char	   *sync_snapshot_id;
-	bool		is_clone;
-} ConnParams;
-
 typedef struct _restoreOptions
 {
 	int			createDB;		/* Issue commands to create the database */
@@ -129,6 +116,7 @@ typedef struct _restoreOptions
 								 * instead of OWNER TO */
 	int			no_security_labels;		/* Skip security label entries */
 	char	   *superuser;		/* Username to use as superuser */
+	char	   *use_role;		/* Issue SET ROLE to this */
 	int			dataOnly;
 	int			dropSchema;
 	char	   *filename;
@@ -152,11 +140,13 @@ typedef struct _restoreOptions
 	char	   *schemaNames;
 	char	   *triggerNames;
 
-	ConnParams	connParams;
-	enum trivalue promptPassword;
-
 	int			useDB;
+	char	   *dbname;
+	char	   *pgport;
+	char	   *pghost;
+	char	   *username;
 	int			noDataForFailedTables;
+	enum trivalue promptPassword;
 	int			exit_on_error;
 	int			compression;
 	int			suppressDumpWarnings;	/* Suppress output of WARNING entries
@@ -173,9 +163,12 @@ typedef struct _restoreOptions
 
 /* Lets the archive know we have a DB connection to shutdown if it dies */
 
-PGconn *ConnectDatabase(Archive *AHX, const char *dbname, const char *pghost,
-						const char *pgport, const char *username,
-						enum trivalue prompt_password);
+PGconn *ConnectDatabase(Archive *AHX,
+				const char *dbname,
+				const char *pghost,
+				const char *pgport,
+				const char *username,
+				enum trivalue prompt_password);
 PGconn *CloneDatabaseConnection(Archive *AHX);
 
 /* Called to add a TOC entry */

@@ -28,7 +28,6 @@ static const char *modulename = gettext_noop("archiver (db)");
 static void _check_database_version(ArchiveHandle *AH);
 static PGconn *_connectDB(ArchiveHandle *AH, const char *newdbname, const char *newUser);
 static void notice_processor(void *arg, const char *message);
-static void ExecuteSqlCommand(ArchiveHandle *AH, const char *qry, const char *desc);
 
 static int
 _parse_version(ArchiveHandle *AH, const char *versionString)
@@ -126,7 +125,7 @@ _connectDB(ArchiveHandle *AH, const char *reqdb, const char *requser)
 	PGconn	   *newConn;
 	const char *newdb;
 	const char *newuser;
-	char	   *password = AH->connParams.savedPassword;
+	char	   *password = AH->savedPassword;
 	bool		new_pass;
 
 	if (!reqdb)
@@ -206,7 +205,7 @@ _connectDB(ArchiveHandle *AH, const char *reqdb, const char *requser)
 		}
 	} while (new_pass);
 
-	AH->connParams.savedPassword = password;
+	AH->savedPassword = password;
 
 	/* check for version mismatch */
 	_check_database_version(AH);
@@ -235,7 +234,7 @@ ConnectDatabase(Archive *AHX,
 				enum trivalue prompt_password)
 {
 	ArchiveHandle *AH = (ArchiveHandle *) AHX;
-	char	   *password = AH->connParams.savedPassword;
+	char	   *password = AH->savedPassword;
 	bool		new_pass;
 
 	if (AH->connection)
@@ -296,16 +295,7 @@ ConnectDatabase(Archive *AHX,
 		}
 	} while (new_pass);
 
-	if (dbname)
-		AH->connParams.dbname = strdup(dbname);
-	if (pgport)
-		AH->connParams.pgport = strdup(pgport);
-	if (pghost)
-		AH->connParams.pghost = strdup(pghost);
-	if (username)
-		AH->connParams.username = strdup(username);
-	if (password)
-		AH->connParams.savedPassword = strdup(password);
+	AH->savedPassword = password;
 
 	/* check to see that the backend connection was successfully made */
 	if (PQstatus(AH->connection) == CONNECTION_BAD)
@@ -324,26 +314,53 @@ PGconn *
 CloneDatabaseConnection(Archive *AHX)
 {
 	ArchiveHandle *AH = (ArchiveHandle *) AHX;
+	PGconn	   *conn;
+
+	char	   *dbname;
+	char	   *pghost;
+	char	   *pgport;
+	char	   *username;
+	const char *encname;
+
+	Assert(AH != NULL);
+	Assert(AH->connection != NULL);
+	Assert(AH->is_clone == true);
+
+	/*
+	 * Even though we are technically accessing the parent's database object
+	 * here, these functions are fine to be called like that because all just
+	 * return a pointer and do not actually send/receive any data to/from the
+	 * database.
+	 */
+	dbname = PQdb(AH->connection);
+	pghost = PQhost(AH->connection);
+	pgport = PQport(AH->connection);
+	username = PQuser(AH->connection);
+	encname = pg_encoding_to_char(AH->public.encoding);
 
 	AH->connection = NULL;
-	AH->connParams.is_clone = 1;
 
 	printf("Connecting: Db: %s host %s port %s user %s\n",
-					AH->connParams.dbname,
-					AH->connParams.pghost ? AH->connParams.pghost : "(null)",
-					AH->connParams.pgport ? AH->connParams.pgport : "(null)",
-					AH->connParams.username ? AH->connParams.username : "(null)");
+					dbname,
+					pghost ? pghost : "(null)",
+					pgport ? pgport : "(null)",
+					username ? username : "(null)");
 
+	/* XXX should this go to CloneArchive? Not referenced here */
 	/* savedPassword must be local in case we change it while connecting */
-	if (AH->connParams.savedPassword)
-		AH->connParams.savedPassword = pg_strdup(AH->connParams.savedPassword);
+	if (AH->savedPassword)
+		AH->savedPassword = pg_strdup(AH->savedPassword);
 
-	return ConnectDatabase(AHX,
-						   AH->connParams.dbname,
-						   AH->connParams.pghost,
-						   AH->connParams.pgport,
-						   AH->connParams.username,
-						   TRI_NO);
+	conn = ConnectDatabase(AHX, dbname, pghost, pgport, username, TRI_NO);
+
+	/*
+	 * Set the same encoding, whatever we set here is what we got from
+	 * pg_encoding_to_char(), so we really shouldn't run into an error setting that
+	 * very same value.
+	 */
+	PQsetClientEncoding(conn, encname);
+
+	return conn;
 }
 
 static void
@@ -351,6 +368,7 @@ notice_processor(void *arg, const char *message)
 {
 	write_msg(NULL, "%s", message);
 }
+
 
 /*
  * Convenience function to send a query.
@@ -501,4 +519,3 @@ DropBlobIfExists(ArchiveHandle *AH, Oid oid)
 				 oid, oid);
 	}
 }
-

@@ -165,7 +165,7 @@ main(int argc, char **argv)
 				opts->createDB = 1;
 				break;
 			case 'd':
-				opts->connParams.dbname = pg_strdup(optarg);
+				opts->dbname = pg_strdup(optarg);
 				break;
 			case 'e':
 				opts->exit_on_error = true;
@@ -179,7 +179,7 @@ main(int argc, char **argv)
 				break;
 			case 'h':
 				if (strlen(optarg) != 0)
-					opts->connParams.pghost = pg_strdup(optarg);
+					opts->pghost = pg_strdup(optarg);
 				break;
 			case 'i':
 				/* ignored, deprecated option */
@@ -207,7 +207,7 @@ main(int argc, char **argv)
 
 			case 'p':
 				if (strlen(optarg) != 0)
-					opts->connParams.pgport = pg_strdup(optarg);
+					opts->pgport = pg_strdup(optarg);
 				break;
 			case 'R':
 				/* no-op, still accepted for backwards compatibility */
@@ -241,7 +241,7 @@ main(int argc, char **argv)
 				break;
 
 			case 'U':
-				opts->connParams.username = optarg;
+				opts->username = optarg;
 				break;
 
 			case 'v':			/* verbose */
@@ -273,7 +273,7 @@ main(int argc, char **argv)
 				break;
 
 			case 2:				/* SET ROLE */
-				opts->connParams.use_role = optarg;
+				opts->use_role = optarg;
 				break;
 
 			case 3:				/* section */
@@ -327,7 +327,7 @@ main(int argc, char **argv)
 	}
 
 	/* Should get at most one of -d and -f, else user is confused */
-	if (opts->connParams.dbname)
+	if (opts->dbname)
 	{
 		if (opts->filename)
 		{
@@ -430,7 +430,10 @@ void
 _SetupWorker(Archive *AHX, RestoreOptions *ropt)
 {
 	ArchiveHandle *AH = (ArchiveHandle *) AHX;
-	CloneDatabaseConnection(AHX);
+	AH->connection = NULL;
+	ConnectDatabase(AHX, ropt->dbname,
+					ropt->pghost, ropt->pgport, ropt->username,
+					ropt->promptPassword);
 	(AH->ReopenPtr) (AH);
 }
 
@@ -492,4 +495,3 @@ usage(const char *progname)
 	printf(_("\nIf no input file name is supplied, then standard input is used.\n\n"));
 	printf(_("Report bugs to <pgsql-bugs@postgresql.org>.\n"));
 }
-
