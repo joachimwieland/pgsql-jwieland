@@ -406,6 +406,15 @@ main(int argc, char **argv)
 		InitDummyWantedList(AH, opts);
 	}
 
+	/* See comments in pg_dump.c */
+#ifdef WIN32
+	if (numWorkers > MAXIMUM_WAIT_OBJECTS)
+	{
+		fprintf(stderr, _("%s: invalid number of parallel jobs\n"),	progname);
+		exit(1);
+	}
+#endif
+
 	AH->numWorkers = numWorkers;
 
 	if (opts->tocSummary)

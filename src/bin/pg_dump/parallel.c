@@ -30,7 +30,6 @@
 #include <fcntl.h>
 #endif
 
-
 #define PIPE_READ							0
 #define PIPE_WRITE							1
 #define SHUTDOWN_GRACE_PERIOD				(500)
@@ -94,6 +93,24 @@ static void SetupWorker(ArchiveHandle *AH, int pipefd[2], int worker,
 		} while(0);
 #endif
 
+#ifdef WIN32
+/*
+ * On Windows, source in the pgpipe implementation from the backend and provide
+ * an own error reporting routine, the backend usually uses ereport() for that.
+ */
+static void pgdump_pgpipe_ereport(const char* fmt, ...);
+#define PGPIPE_EREPORT pgdump_pgpipe_ereport
+#include "../../backend/port/pipe.c"
+static void
+pgdump_pgpipe_ereport(const char* fmt, ...)
+{
+	va_list args;
+	va_start(args, fmt);
+	vwrite_msg("pgpipe", fmt, args);
+	va_end(args);
+}
+#endif
+
 /*
  * Call exit() when running on
  *    UNIX: always
@@ -125,11 +142,11 @@ static int
 select_loop(int maxFd, fd_set *workerset)
 {
 	int			i;
+	fd_set		saveSet = *workerset;
 
 	/* should always be the master */
 	Assert(tMasterThreadId == GetCurrentThreadId());
 
-	fd_set saveSet = *workerset;
 	for (;;)
 	{
 		/*
@@ -192,6 +209,12 @@ checkWorkerTerm(void)
 		/* terminate */
 		ExitThread(1);
 }
+
+void
+checkMasterTerm(ArchiveHandle *AH, ParallelState *pstate)
+{
+	/* nothing to do in Windows */
+}
 #else /* UNIX */
 void
 checkWorkerTerm(void)
@@ -237,8 +260,11 @@ CheckForWorkerTermination(ParallelState *pstate, bool do_wait)
 		return NO_SLOT;
 
 	ret = WaitForMultipleObjects(j, lpHandles, false, do_wait ? INFINITE : 0);
-
-	printf("Ret to WaitForMultipleObjects: %d\n", ret);
+	if (ret == WAIT_FAILED)
+	{
+		/* Something went wrong */
+		/* XXX */
+	}
 
 	if (ret == WAIT_TIMEOUT)
 	{
@@ -325,7 +351,7 @@ ShutdownWorkersHard(ArchiveHandle *AH, ParallelState *pstate)
 	 * The fastest way we can make them terminate is when they are listening
 	 * for new commands and we just tell them to terminate.
 	 */
-	ShutdownWorkersSoft(AH, pstate, false)
+	ShutdownWorkersSoft(AH, pstate, false);
 
 	while ((i = CheckForWorkerTermination(pstate, true)) != NO_SLOT)
 	{
@@ -482,11 +508,12 @@ init_spawned_worker_win32(WorkerInfo *wi)
 	RestoreOptions *ropt = wi->ropt;
 	PGconn **conn = wi->conn;
 
-	free(wi);
-
 	printf("My thread handle: %d, master: %d\n", GetCurrentThreadId(), tMasterThreadId);
 
-	SetupWorker(AH, pipefd, worker, ropt, &conn);
+	/* evil hack to copy parents connection for now */
+	AH->connection = *(wi->conn);
+	free(wi);
+	SetupWorker(AH, pipefd, worker, ropt);
 
 	DeCloneArchive(AH);
 	_endthreadex(0);
@@ -552,6 +579,7 @@ ParallelBackupStart(ArchiveHandle *AH, RestoreOptions *ropt)
 
 		wi->ropt = ropt;
 		wi->worker = i;
+		wi->conn = &(AH->connection);
 		wi->AH = CloneArchive(AH);
 		wi->pipeRead = pipeMW[PIPE_READ];
 		wi->pipeWrite = pipeWM[PIPE_WRITE];
@@ -1069,7 +1097,10 @@ ListenToWorkers(ArchiveHandle *AH, ParallelState *pstate, bool do_wait)
 	printf("In ListenToWorkers()\n");
 	msg = getMessageFromWorker(AH, pstate, do_wait, &worker);
 
-	/* Checks if we need to terminate and would exit right from that routine */
+	/*
+	 * Checks if we need to terminate and would exit right from that
+	 * routine.
+	 */
 	checkMasterTerm(AH, pstate);
 
 	if (!msg)
@@ -1157,7 +1188,7 @@ EnsureIdleWorker(ArchiveHandle *AH, ParallelState *pstate)
 		while ((ret_worker = ReapWorkerStatus(pstate, &work_status)) != NO_SLOT)
 		{
 			if (work_status != 0)
-				die_horribly(AH, modulename, "Error processing a parallel work item\n");
+				die_horribly(AH, modulename, "Error processing a parallel work item.\n" /* XXX \n or not ? */);
 
 			nTerm++;
 		}
@@ -1197,9 +1228,8 @@ EnsureWorkersFinished(ArchiveHandle *AH, ParallelState *pstate)
 	{
 		if (ReapWorkerStatus(pstate, &work_status) == NO_SLOT)
 			ListenToWorkers(AH, pstate, true);
-
-		if (work_status != 0)
-			die_horribly(AH, modulename, "Error processing a parallel work item\n");
+		else if (work_status != 0)
+			die_horribly(AH, modulename, "Error processing a parallel work item");
 	}
 }
 

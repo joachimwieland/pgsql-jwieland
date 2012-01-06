@@ -15,9 +15,28 @@
  *-------------------------------------------------------------------------
  */
 
-#include "postgres.h"
-
 #ifdef WIN32
+
+/*
+ * This pipe implementation is used in both the server and non-server programs.
+ * In the default case we run within the server and use the standard ereport
+ * error reporting.
+ * If the code runs in a non-server program (like pg_dump), then that program
+ * #defines an error routine and includes this .c file.
+ */
+#ifndef PGPIPE_EREPORT
+#include "postgres.h"
+#define PGPIPE_EREPORT pgpipe_ereport
+static void
+pgpipe_ereport(const char *fmt, ...)
+{
+	va_list args;
+	va_start(args, fmt);
+	ereport(LOG, (errmsg_internal(fmt, args)));
+	va_end(args);
+}
+#endif
+
 int
 pgpipe(int handles[2])
 {
@@ -29,7 +48,7 @@ pgpipe(int handles[2])
 
 	if ((s = socket(AF_INET, SOCK_STREAM, 0)) == INVALID_SOCKET)
 	{
-		ereport(LOG, (errmsg_internal("pgpipe could not create socket: %ui", WSAGetLastError())));
+		PGPIPE_EREPORT("pgpipe could not create socket: %ui", WSAGetLastError());
 		return -1;
 	}
 
@@ -39,38 +58,38 @@ pgpipe(int handles[2])
 	serv_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 	if (bind(s, (SOCKADDR *) &serv_addr, len) == SOCKET_ERROR)
 	{
-		ereport(LOG, (errmsg_internal("pgpipe could not bind: %ui", WSAGetLastError())));
+		PGPIPE_EREPORT("pgpipe could not bind: %ui", WSAGetLastError());
 		closesocket(s);
 		return -1;
 	}
 	if (listen(s, 1) == SOCKET_ERROR)
 	{
-		ereport(LOG, (errmsg_internal("pgpipe could not listen: %ui", WSAGetLastError())));
+		PGPIPE_EREPORT("pgpipe could not listen: %ui", WSAGetLastError());
 		closesocket(s);
 		return -1;
 	}
 	if (getsockname(s, (SOCKADDR *) &serv_addr, &len) == SOCKET_ERROR)
 	{
-		ereport(LOG, (errmsg_internal("pgpipe could not getsockname: %ui", WSAGetLastError())));
+		PGPIPE_EREPORT("pgpipe could not getsockname: %ui", WSAGetLastError());
 		closesocket(s);
 		return -1;
 	}
 	if ((handles[1] = socket(PF_INET, SOCK_STREAM, 0)) == INVALID_SOCKET)
 	{
-		ereport(LOG, (errmsg_internal("pgpipe could not create socket 2: %ui", WSAGetLastError())));
+		PGPIPE_EREPORT("pgpipe could not create socket 2: %ui", WSAGetLastError());
 		closesocket(s);
 		return -1;
 	}
 
 	if (connect(handles[1], (SOCKADDR *) &serv_addr, len) == SOCKET_ERROR)
 	{
-		ereport(LOG, (errmsg_internal("pgpipe could not connect socket: %ui", WSAGetLastError())));
+		PGPIPE_EREPORT("pgpipe could not connect socket: %ui", WSAGetLastError());
 		closesocket(s);
 		return -1;
 	}
 	if ((handles[0] = accept(s, (SOCKADDR *) &serv_addr, &len)) == INVALID_SOCKET)
 	{
-		ereport(LOG, (errmsg_internal("pgpipe could not accept socket: %ui", WSAGetLastError())));
+		PGPIPE_EREPORT("pgpipe could not accept socket: %ui", WSAGetLastError());
 		closesocket(handles[1]);
 		handles[1] = INVALID_SOCKET;
 		closesocket(s);

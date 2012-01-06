@@ -586,9 +586,18 @@ main(int argc, char **argv)
 			compressLevel = 0;
 	}
 
-	if (numWorkers <= 0)
+	/*
+	 * On Windows we can only have at most MAXIMUM_WAIT_OBJECTS (= 64 usually)
+	 * parallel jobs because that's the maximum limit for the
+	 * WaitForMultipleObjects() call.
+	 */
+	if (numWorkers <= 0
+#ifdef WIN32
+			|| numWorkers > MAXIMUM_WAIT_OBJECTS
+#endif
+		)
 	{
-		write_msg(NULL, "invalid number of parallel jobs\n");
+		write_msg(NULL, _("%s: invalid number of parallel jobs\n"), progname);
 		exit(1);
 	}
 

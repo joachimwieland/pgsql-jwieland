@@ -91,11 +91,6 @@ static size_t _CustomReadFunc(ArchiveHandle *AH, char **buf, size_t *buflen);
 
 static const char *modulename = gettext_noop("custom archiver");
 
-/* shortcut to avoid the function call on non-Win32 platforms */
-#ifndef WIN32
-#define checkTerm()
-#endif
-
 /*
  *	Init routine required by ALL formats. This is a global routine
  *	and should be declared in pg_backup_archiver.h
@@ -981,7 +976,7 @@ _CustomReadFunc(ArchiveHandle *AH, char **buf, size_t *buflen)
 	 * Should we terminate? (only applicable on Windows and when in parallel
 	 * mode)
 	 */
-	checkTerm();
+	checkMasterTerm();
 
 	/* Read length */
 	blkLen = ReadInt(AH);
