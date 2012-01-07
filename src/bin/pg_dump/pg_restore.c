@@ -439,10 +439,6 @@ void
 _SetupWorker(Archive *AHX, RestoreOptions *ropt)
 {
 	ArchiveHandle *AH = (ArchiveHandle *) AHX;
-	AH->connection = NULL;
-	ConnectDatabase(AHX, ropt->dbname,
-					ropt->pghost, ropt->pgport, ropt->username,
-					ropt->promptPassword);
 	(AH->ReopenPtr) (AH);
 }
 

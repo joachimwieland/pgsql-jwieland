@@ -972,11 +972,13 @@ _CustomReadFunc(ArchiveHandle *AH, char **buf, size_t *buflen)
 	size_t		blkLen;
 	size_t		cnt;
 
+#ifdef WIN32
 	/*
 	 * Should we terminate? (only applicable on Windows and when in parallel
 	 * mode)
 	 */
 	checkMasterTerm();
+#endif
 
 	/* Read length */
 	blkLen = ReadInt(AH);

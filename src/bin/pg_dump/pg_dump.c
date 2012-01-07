@@ -894,13 +894,13 @@ exit_nicely(void)
 	exit(1);
 }
 
+/*
+ * Initialize the connection for a new worker process.
+ */
 void
 _SetupWorker(Archive *AHX, RestoreOptions *ropt)
 {
-	CloneDatabaseConnection(AHX);
 	SetupConnection(AHX, NULL, NULL);
-
-	/* Note that we cannot disconnect the master, it is holding the locks. */
 }
 
 static void
@@ -913,7 +913,7 @@ SetupConnection(Archive *AHX, const char *dumpencoding, const char *use_role)
 	/*
 	 * Set the client encoding if requested. If dumpencoding == NULL then
 	 * either it hasn't been requested or we're a cloned connection and then this
-	 * has already been set in CloneDatabaseConnection according to the original
+	 * has already been set in CloneArchive according to the original
 	 * connection encoding.
 	 */
 	if (dumpencoding)

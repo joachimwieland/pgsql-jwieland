@@ -383,7 +383,7 @@ ShutdownWorkersHard(ArchiveHandle *AH, ParallelState *pstate)
 	 * The fastest way we can make them terminate is when they are listening
 	 * for new commands and we just tell them to terminate.
 	 */
-	//ShutdownWorkersSoft(AH, pstate, false);
+	ShutdownWorkersSoft(AH, pstate, false);
 
 	for (i = 0; i < pstate->numWorkers; i++)
 		kill(pstate->parallelSlot[i].pid, SIGTERM);
@@ -568,7 +568,7 @@ ParallelBackupStart(ArchiveHandle *AH, RestoreOptions *ropt)
 #else
 		pid_t		pid;
 #endif
-		int	pipeMW[2], pipeWM[2];
+		int			pipeMW[2], pipeWM[2];
 
 		if (pgpipe(pipeMW) < 0 || pgpipe(pipeWM) < 0)
 			die_horribly(AH, modulename, "Cannot create communication channels: %s",
@@ -579,8 +579,8 @@ ParallelBackupStart(ArchiveHandle *AH, RestoreOptions *ropt)
 
 		wi->ropt = ropt;
 		wi->worker = i;
-		wi->conn = &(AH->connection);
 		wi->AH = CloneArchive(AH);
+		wi->conn = &(AH->connection);
 		wi->pipeRead = pipeMW[PIPE_READ];
 		wi->pipeWrite = pipeWM[PIPE_WRITE];
 
@@ -601,8 +601,14 @@ ParallelBackupStart(ArchiveHandle *AH, RestoreOptions *ropt)
 			signal(SIGINT, WorkerExit);
 			signal(SIGQUIT, WorkerExit);
 
-			/* we don't run CloneArchive() on Unix. XXX should we? */
-			AH->is_clone = true;
+			/*
+			 * Call CloneArchive on Unix as well even though technically we
+			 * don't need to because fork() gives us a copy in our own address space
+			 * already. But CloneArchive resets the state information, sets is_clone
+			 * and also clones the database connection (for parallel dump)
+			 * which all seems kinda helpful.
+			 */
+			AH = CloneArchive(AH);
 
 #ifdef HAVE_SETSID
 			/*

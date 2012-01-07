@@ -310,59 +310,6 @@ ConnectDatabase(Archive *AHX,
 	return AH->connection;
 }
 
-PGconn *
-CloneDatabaseConnection(Archive *AHX)
-{
-	ArchiveHandle *AH = (ArchiveHandle *) AHX;
-	PGconn	   *conn;
-
-	char	   *dbname;
-	char	   *pghost;
-	char	   *pgport;
-	char	   *username;
-	const char *encname;
-
-	Assert(AH != NULL);
-	Assert(AH->connection != NULL);
-	Assert(AH->is_clone == true);
-
-	/*
-	 * Even though we are technically accessing the parent's database object
-	 * here, these functions are fine to be called like that because all just
-	 * return a pointer and do not actually send/receive any data to/from the
-	 * database.
-	 */
-	dbname = PQdb(AH->connection);
-	pghost = PQhost(AH->connection);
-	pgport = PQport(AH->connection);
-	username = PQuser(AH->connection);
-	encname = pg_encoding_to_char(AH->public.encoding);
-
-	AH->connection = NULL;
-
-	printf("Connecting: Db: %s host %s port %s user %s\n",
-					dbname,
-					pghost ? pghost : "(null)",
-					pgport ? pgport : "(null)",
-					username ? username : "(null)");
-
-	/* XXX should this go to CloneArchive? Not referenced here */
-	/* savedPassword must be local in case we change it while connecting */
-	if (AH->savedPassword)
-		AH->savedPassword = pg_strdup(AH->savedPassword);
-
-	conn = ConnectDatabase(AHX, dbname, pghost, pgport, username, TRI_NO);
-
-	/*
-	 * Set the same encoding, whatever we set here is what we got from
-	 * pg_encoding_to_char(), so we really shouldn't run into an error setting that
-	 * very same value.
-	 */
-	PQsetClientEncoding(conn, encname);
-
-	return conn;
-}
-
 static void
 notice_processor(void *arg, const char *message)
 {

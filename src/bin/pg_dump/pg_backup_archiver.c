@@ -90,7 +90,10 @@ static void RestoreOutput(ArchiveHandle *AH, OutputContext savedContext);
 
 static int restore_toc_entry(ArchiveHandle *AH, TocEntry *te,
 				  RestoreOptions *ropt, bool is_parallel);
-static void restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate);
+static void restore_toc_entries_prefork(ArchiveHandle *AH);
+static void restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate,
+										 TocEntry *pending_list);
+static void restore_toc_entries_postfork(ArchiveHandle *AH, TocEntry *pending_list);
 static void par_list_header_init(TocEntry *l);
 static void par_list_append(TocEntry *l, TocEntry *te);
 static void par_list_remove(TocEntry *te);
@@ -362,11 +365,23 @@ RestoreArchive(Archive *AHX, RestoreOptions *ropt)
 	 */
 	if (parallel_mode)
 	{
-		ParallelState *pstate;
+		ParallelState  *pstate;
+		TocEntry		pending_list;
+
+		par_list_header_init(&pending_list);
+
+		/* This runs PRE_DATA items and then disconnects from the database */
+		restore_toc_entries_prefork(AH);
+		Assert(AH->connection == NULL);
+
 		/* ParallelBackupStart() will actually fork the processes */
 		pstate = ParallelBackupStart(AH, ropt);
-		restore_toc_entries_parallel(AH, pstate);
+		restore_toc_entries_parallel(AH, pstate, &pending_list);
 		ParallelBackupEnd(AH, pstate);
+
+		/* reconnect the master and see if we missed something */
+		restore_toc_entries_postfork(AH, &pending_list);
+		Assert(AH->connection != NULL);
 	}
 	else
 	{
@@ -3215,34 +3230,15 @@ dumpTimestamp(ArchiveHandle *AH, const char *msg, time_t tim)
 		ahprintf(AH, "-- %s %s\n\n", msg, buf);
 }
 
-
-/*
- * Main engine for parallel restore.
- *
- * Work is done in three phases.
- * First we process all SECTION_PRE_DATA tocEntries, in a single connection,
- * just as for a standard restore.	Second we process the remaining non-ACL
- * steps in parallel worker children (threads on Windows, processes on Unix),
- * each of which connects separately to the database.  Finally we process all
- * the ACL entries in a single connection (that happens back in
- * RestoreArchive).
- */
 static void
-restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate)
+restore_toc_entries_prefork(ArchiveHandle *AH)
 {
 	RestoreOptions *ropt = AH->ropt;
-	ParallelSlot   *slots;
-	int			work_status;
 	bool		skipped_some;
-	TocEntry	pending_list;
-	TocEntry	ready_list;
 	TocEntry   *next_work_item;
-	int			ret_child;
-	TocEntry   *te;
 
-	ahlog(AH, 2, "entering restore_toc_entries_parallel\n");
+	ahlog(AH, 2, "entering restore_toc_entries_prefork\n");
 
-	/* XXX merged */
 	/* we haven't got round to making this work for all archive formats */
 	if (AH->ClonePtr == NULL || AH->ReopenPtr == NULL)
 		die_horribly(AH, modulename, "parallel restore is not supported with this archive file format\n");
@@ -3250,8 +3246,6 @@ restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate)
 	/* doesn't work if the archive represents dependencies as OIDs, either */
 	if (AH->version < K_VERS_1_8)
 		die_horribly(AH, modulename, "parallel restore is not supported with archives made by pre-8.0 pg_dump\n");
-
-	slots = (ParallelSlot *) pg_calloc(sizeof(ParallelSlot), AH->public.numWorkers);
 
 	/* Adjust dependency information */
 	fix_dependencies(AH);
@@ -3319,18 +3313,44 @@ restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate)
 		free(AH->currTablespace);
 	AH->currTablespace = NULL;
 	AH->currWithOids = -1;
+}
+
+/*
+ * Main engine for parallel restore.
+ *
+ * Work is done in three phases.
+ * First we process all SECTION_PRE_DATA tocEntries, in a single connection,
+ * just as for a standard restore. This is done in restore_toc_entries_prefork().
+ * Second we process the remaining non-ACL
+ * steps in parallel worker children (threads on Windows, processes on Unix),
+ * these fork off and set up their connections before we call
+ * restore_toc_entries_parallel_forked. Finally we process all the ACL entries
+ * in a single connection (that happens back in RestoreArchive).
+ */
+static void
+restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate,
+							 TocEntry *pending_list)
+{
+	int			work_status;
+	bool		skipped_some;
+	TocEntry	ready_list;
+	TocEntry   *next_work_item;
+	int			ret_child;
+
+	ahlog(AH, 2, "entering restore_toc_entries_parallel\n");
 
 	/*
-	 * Initialize the lists of pending and ready items.  After this setup, the
-	 * pending list is everything that needs to be done but is blocked by one
-	 * or more dependencies, while the ready list contains items that have no
-	 * remaining dependencies.	Note: we don't yet filter out entries that
-	 * aren't going to be restored.  They might participate in dependency
-	 * chains connecting entries that should be restored, so we treat them as
-	 * live until we actually process them.
+	 * Initialize the lists of ready items, the list for pending items has
+	 * already been initialized in the parent.  After this setup, the pending
+	 * list is everything that needs to be done but is blocked by one or more
+	 * dependencies, while the ready list contains items that have no remaining
+	 * dependencies.	Note: we don't yet filter out entries that aren't going
+	 * to be restored.  They might participate in dependency chains connecting
+	 * entries that should be restored, so we treat them as live until we
+	 * actually process them.
 	 */
-	par_list_header_init(&pending_list);
 	par_list_header_init(&ready_list);
+
 	skipped_some = false;
 	for (next_work_item = AH->toc->next; next_work_item != AH->toc; next_work_item = next_work_item->next)
 	{
@@ -3354,7 +3374,7 @@ restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate)
 		}
 
 		if (next_work_item->depCount > 0)
-			par_list_append(&pending_list, next_work_item);
+			par_list_append(pending_list, next_work_item);
 		else
 			par_list_append(&ready_list, next_work_item);
 	}
@@ -3368,8 +3388,7 @@ restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate)
 
 	ahlog(AH, 1, "entering main parallel loop\n");
 
-	while ((next_work_item = get_next_work_item(AH, &ready_list,
-												pstate)) != NULL ||
+	while ((next_work_item = get_next_work_item(AH, &ready_list, pstate)) != NULL ||
 		   !IsEveryWorkerIdle(pstate))
 	{
 		if (next_work_item != NULL)
@@ -3405,27 +3424,20 @@ restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate)
 			Assert(!IsEveryWorkerIdle(pstate));
 		}
 
-		/*
-				/+ this memory is dealloced in mark_work_done() +/
-				args = pg_malloc(sizeof(RestoreArgs));
-				args->AH = CloneArchive(AH);
-				args->te = next_work_item;
-		*/
-
 		for (;;)
 		{
 			int nTerm = 0;
 
 			/*
 			 * In order to reduce dependencies as soon as possible and
-			 * especially to reap the status of children who are working on
+			 * especially to reap the status of workers who are working on
 			 * items that pending items depend on, we do a non-blocking check
-			 * for ended children first.
+			 * for ended workers first.
 			 *
 			 * However, if we do not have any other work items currently that
-			 * children can work on, we do not busy-loop here but instead
-			 * really wait for at least one child to terminate. Hence we call
-			 * ListenToWorkers(..., ..., true) in this case.
+			 * workers can work on, we do not busy-loop here but instead
+			 * really wait for at least one worker to terminate. Hence we call
+			 * ListenToWorkers(..., ..., do_wait = true) in this case.
 			 */
 			ListenToWorkers(AH, pstate, !next_work_item);
 
@@ -3436,24 +3448,35 @@ restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate)
 				mark_work_done(AH, &ready_list, ret_child, work_status, pstate);
 			}
 
-			/* We need to make sure that we have an idle child before re-running the
-			 * loop. If nTerm > 0 we already have that (quick check). */
+			/*
+			 * We need to make sure that we have an idle worker before re-running the
+			 * loop. If nTerm > 0 we already have that (quick check).
+			 */
 			if (nTerm > 0)
 				break;
 
-			/* explicit check for an idle child */
+			/* if nobody terminated, explicitly check for an idle worker */
 			if (GetIdleWorker(pstate) != NO_SLOT)
 				break;
 
 			/*
-			 * If we have no idle child, read the result of one or more
-			 * children and loop the loop to call ReapWorkerStatus() on them
+			 * If we have no idle worker, read the result of one or more
+			 * workers and loop the loop to call ReapWorkerStatus() on them.
 			 */
 			ListenToWorkers(AH, pstate, true);
 		}
 	}
 
 	ahlog(AH, 1, "finished main parallel loop\n");
+}
+
+static void
+restore_toc_entries_postfork(ArchiveHandle *AH, TocEntry *pending_list)
+{
+	RestoreOptions *ropt = AH->ropt;
+	TocEntry   *te;
+
+	ahlog(AH, 2, "entering restore_toc_entries_postfork\n");
 
 	/*
 	 * Now reconnect the single parent connection.
@@ -3469,7 +3492,7 @@ restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate)
 	 * dependencies, or some other pathological condition. If so, do it in the
 	 * single parent connection.
 	 */
-	for (te = pending_list.par_next; te != &pending_list; te = te->par_next)
+	for (te = pending_list->par_next; te != pending_list; te = te->par_next)
 	{
 		ahlog(AH, 1, "processing missed item %d %s %s\n",
 			  te->dumpId, te->desc, te->tag);
@@ -4048,10 +4071,69 @@ CloneArchive(ArchiveHandle *AH)
 	/* clone has its own error count, too */
 	clone->public.n_errors = 0;
 
+	/*
+	 * Remember that we're a clone, this is used for deciding if we should
+	 * install a snapshot.
+	 */
 	clone->is_clone = true;
+
+	/*
+	 * Connect our new clone object to the database:
+	 * In parallel restore the parent is already disconnected.
+	 * In parallel backup we clone the parent's existing connection.
+	 */
+	if (AH->ropt)
+	{
+		RestoreOptions *ropt = AH->ropt;
+		Assert(AH->connection == NULL);
+		/* this also sets clone->connection */
+		ConnectDatabase((Archive *) clone, ropt->dbname,
+					ropt->pghost, ropt->pgport, ropt->username,
+					ropt->promptPassword);
+	}
+	else
+	{
+		char	   *dbname;
+		char	   *pghost;
+		char	   *pgport;
+		char	   *username;
+		const char *encname;
+
+		Assert(AH->connection != NULL);
+
+		/*
+		 * Even though we are technically accessing the parent's database object
+		 * here, these functions are fine to be called like that because all just
+		 * return a pointer and do not actually send/receive any data to/from the
+		 * database.
+		 */
+		dbname = PQdb(AH->connection);
+		pghost = PQhost(AH->connection);
+		pgport = PQport(AH->connection);
+		username = PQuser(AH->connection);
+		encname = pg_encoding_to_char(AH->public.encoding);
+
+		printf("Connecting: Db: %s host %s port %s user %s\n",
+						dbname,
+						pghost ? pghost : "(null)",
+						pgport ? pgport : "(null)",
+						username ? username : "(null)");
+
+		/* this also sets clone->connection */
+		ConnectDatabase((Archive *) clone, dbname, pghost, pgport, username, TRI_NO);
+
+		/*
+		 * Set the same encoding, whatever we set here is what we got from
+		 * pg_encoding_to_char(), so we really shouldn't run into an error setting that
+		 * very same value. Also see the comment in SetupConnection().
+		 */
+		PQsetClientEncoding(clone->connection, encname);
+	}
 
 	/* Let the format-specific code have a chance too */
 	(clone->ClonePtr) (clone);
+
+	Assert(clone->connection != NULL);
 
 	return clone;
 }
