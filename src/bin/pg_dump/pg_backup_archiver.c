@@ -1404,6 +1404,15 @@ static void
 vdie_horribly(ArchiveHandle *AH, const char *modulename,
 			  const char *fmt, va_list ap)
 {
+	/*
+	 * If we have an error handler for the parallel operation, then
+	 * control will not come back from there.
+	 */
+	if (vparallel_error_handler)
+		vparallel_error_handler(AH, modulename, fmt, ap);
+
+	Assert(!vparallel_error_handler);
+
 	vwrite_msg(modulename, fmt, ap);
 
 	if (AH)
@@ -1420,7 +1429,7 @@ vdie_horribly(ArchiveHandle *AH, const char *modulename,
 		}
 	}
 
-	myExit(1);
+	exit(1);
 }
 
 /* As above, but with variable arg list */

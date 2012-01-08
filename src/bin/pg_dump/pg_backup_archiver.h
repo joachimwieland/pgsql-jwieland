@@ -112,6 +112,8 @@ typedef z_stream *z_streamp;
 struct _archiveHandle;
 struct _tocEntry;
 struct _restoreList;
+struct _parallel_args;
+struct _parallel_state;
 enum _action;
 
 typedef void (*ClosePtr) (struct _archiveHandle * AH);
@@ -329,60 +331,7 @@ typedef struct _tocEntry
 	int			nLockDeps;		/* number of such dependencies */
 } TocEntry;
 
-typedef enum
-{
-	WRKR_IDLE,
-	WRKR_WORKING,
-	WRKR_FINISHED,
-	WRKR_TERMINATED
-} T_WorkerStatus;
-
-typedef enum _action
-{
-	ACT_DUMP,
-	ACT_RESTORE,
-} T_Action;
-
-/* Arguments needed for a worker process */
-typedef struct _parallel_args
-{
-	ArchiveHandle	   *AH;
-	TocEntry		   *te;
-} ParallelArgs;
-
-/* State for each parallel activity slot */
-typedef struct _parallel_slot
-{
-	ParallelArgs	   *args;
-	T_WorkerStatus		workerStatus;
-	int					status;
-	int					pipeRead;
-	int					pipeWrite;
-#ifdef WIN32
-	uintptr_t			hThread;
-	PGconn			  **conn;
-#else
-	pid_t				pid;
-#endif
-} ParallelSlot;
-
-#define NO_SLOT (-1)
-
-typedef struct _parallel_state
-{
-	int		numWorkers;
-	ParallelSlot *parallelSlot;
-} ParallelState;
-
-extern int parallel_restore(ParallelArgs *args);
-extern ParallelState *ParallelBackupStart(ArchiveHandle *AH,
-										  RestoreOptions *ropt);
-extern void ParallelBackupEnd(ArchiveHandle *AH, ParallelState *pstate);
-extern void DispatchJobForTocEntry(ArchiveHandle *AH,
-								   ParallelState *pstate,
-								   TocEntry *te, T_Action act);
-extern void WaitForAllWorkers(ArchiveHandle *AH, ParallelState *pstate);
-extern void checkWorkerTerm(void);
+extern int parallel_restore(struct _parallel_args *args);
 
 extern PGconn *g_conn;
 
@@ -398,7 +347,7 @@ extern void WriteHead(ArchiveHandle *AH);
 extern void ReadHead(ArchiveHandle *AH);
 extern void WriteToc(ArchiveHandle *AH);
 extern void ReadToc(ArchiveHandle *AH);
-extern void WriteDataChunks(ArchiveHandle *AH, ParallelState *pstate);
+extern void WriteDataChunks(ArchiveHandle *AH, struct _parallel_state *pstate);
 extern void WriteDataChunksForTocEntry(ArchiveHandle *AH, TocEntry *te);
 
 extern ArchiveHandle *CloneArchive(ArchiveHandle *AH);

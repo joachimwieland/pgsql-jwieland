@@ -35,6 +35,7 @@
 
 #include "compress_io.h"
 #include "dumpmem.h"
+#include "parallel.h"
 
 #include <dirent.h>
 #include <sys/stat.h>

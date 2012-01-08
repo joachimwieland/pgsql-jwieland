@@ -27,6 +27,7 @@
 #include "compress_io.h"
 #include "dumputils.h"
 #include "dumpmem.h"
+#include "parallel.h"
 
 /*--------
  * Routines in the format interface
