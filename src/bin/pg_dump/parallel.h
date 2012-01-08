@@ -23,10 +23,10 @@ struct _tocEntry;
 
 typedef enum
 {
+	WRKR_TERMINATED = 0,
 	WRKR_IDLE,
 	WRKR_WORKING,
-	WRKR_FINISHED,
-	WRKR_TERMINATED
+	WRKR_FINISHED
 } T_WorkerStatus;
 
 typedef enum _action
@@ -55,10 +55,10 @@ typedef struct _parallel_slot
 #ifdef WIN32
 	uintptr_t			hThread;
 	unsigned int		threadId;
-	PGconn			  **conn;
 #else
 	pid_t				pid;
 #endif
+	bool				inErrorHandling;
 } ParallelSlot;
 
 #define NO_SLOT (-1)
@@ -83,6 +83,9 @@ extern void DispatchJobForTocEntry(struct _archiveHandle *AH,
 								   struct _tocEntry *te, T_Action act);
 extern void ParallelBackupEnd(struct _archiveHandle *AH, ParallelState *pstate);
 
-extern void (*vparallel_error_handler)(struct _archiveHandle *AH, const char *modulename,
-									   const char *fmt, va_list ap);
+extern volatile void (*vparallel_error_handler)(struct _archiveHandle *AH,
+									const char *modulename,
+									const char *fmt, va_list ap);
+
+extern void checkAborting(struct _archiveHandle *AH);
 

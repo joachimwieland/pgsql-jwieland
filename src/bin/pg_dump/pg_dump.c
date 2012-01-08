@@ -9586,8 +9586,8 @@ dumpFunc(Archive *fout, FuncInfo *finfo)
 	destroyPQExpBuffer(delqry);
 	destroyPQExpBuffer(labelq);
 	destroyPQExpBuffer(asPart);
-	free(funcsig);
-	free(funcsig_tag);
+	PQfreemem(funcsig);
+	PQfreemem(funcsig_tag);
 	if (allargtypes)
 		free(allargtypes);
 	if (argmodes)
@@ -11314,8 +11314,8 @@ dumpAgg(Archive *fout, AggInfo *agginfo)
 	 * command look like a function's GRANT; in particular this affects the
 	 * syntax for zero-argument aggregates.
 	 */
-	free(aggsig);
-	free(aggsig_tag);
+	//PQfreemem(aggsig);
+	//PQfreemem(aggsig_tag);
 
 	aggsig = format_function_signature(&agginfo->aggfn, true);
 	aggsig_tag = format_function_signature(&agginfo->aggfn, false);
@@ -11326,8 +11326,8 @@ dumpAgg(Archive *fout, AggInfo *agginfo)
 			agginfo->aggfn.dobj.namespace->dobj.name,
 			agginfo->aggfn.rolname, agginfo->aggfn.proacl);
 
-	free(aggsig);
-	free(aggsig_tag);
+	PQfreemem(aggsig);
+	PQfreemem(aggsig_tag);
 
 	PQclear(res);
 

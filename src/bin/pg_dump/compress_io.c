@@ -54,6 +54,7 @@
 
 #include "compress_io.h"
 #include "dumpmem.h"
+#include "parallel.h"
 
 /*----------------------
  * Compressor API
@@ -162,6 +163,11 @@ ReadDataFromArchive(ArchiveHandle *AH, int compression, ReadFunc readF)
 
 	ParseCompressionOption(compression, &alg, NULL);
 
+	/*
+	 * Are we aborting?
+	 */
+	checkAborting(AH);
+
 	if (alg == COMPR_ALG_NONE)
 		ReadDataFromArchiveNone(AH, readF);
 	if (alg == COMPR_ALG_LIBZ)
@@ -181,6 +187,11 @@ size_t
 WriteDataToArchive(ArchiveHandle *AH, CompressorState *cs,
 				   const void *data, size_t dLen)
 {
+	/*
+	 * Are we aborting?
+	 */
+	checkAborting(AH);
+
 	switch (cs->comprAlg)
 	{
 		case COMPR_ALG_LIBZ:

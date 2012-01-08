@@ -36,31 +36,25 @@
 
 /* file-scope variables */
 #ifdef WIN32
-static DWORD		tMasterThreadId = 0;
+static unsigned int	tMasterThreadId = 0;
 static HANDLE		termEvent = INVALID_HANDLE_VALUE;
-#else /* UNIX */
-static PGconn     **worker_conn = NULL;
 #endif
+static volatile sig_atomic_t wantExit = 0;
 
 /*
  * The parallel error handler is called for any die_horribly() in a child or master process.
  * It then takes control over shutting down the rest of the gang.
  */
-void (*vparallel_error_handler)(ArchiveHandle *AH, const char *modulename,
+volatile void (*vparallel_error_handler)(ArchiveHandle *AH, const char *modulename,
 								const char *fmt, va_list ap) = NULL;
 
 /* The actual implementation of the error handler function */
 static void vparallel_error_handler_imp(ArchiveHandle *AH, const char *modulename,
 										const char *fmt, va_list ap);
 
-static volatile sig_atomic_t wantExit = 0;
 static const char *modulename = gettext_noop("parallel archiver");
 
-#ifdef WIN32
-static unsigned int __stdcall ShutdownConnection(PGconn **conn);
-#else
 static int ShutdownConnection(PGconn **conn);
-#endif
 
 static void ShutdownWorkersHard(ArchiveHandle *AH, ParallelState *pstate);
 static void ShutdownWorkersSoft(ArchiveHandle *AH, ParallelState *pstate, bool do_wait);
@@ -80,6 +74,10 @@ static char *readMessageFromPipe(int fd, bool do_wait);
 static void SetupWorker(ArchiveHandle *AH, int pipefd[2], int worker,
 						RestoreOptions *ropt);
 
+#define messageStartsWith(msg, prefix) \
+	(strncmp(msg, prefix, strlen(prefix)) == 0)
+#define messageEquals(msg, pattern) \
+	(strcmp(msg, pattern) == 0)
 
 /* architecture dependent #defines */
 #ifdef WIN32
@@ -160,12 +158,8 @@ vparallel_error_handler_imp(ArchiveHandle *AH,
 							const char *modulename,
 							const char *fmt, va_list ap)
 {
-	/*
-	 * Given that we could error out for memory problems, it seems safest to
-	 * have buf allocated on the stack already.
-	 */
-	static char buf[512];
 	ParallelState pstate;
+	char		buf[512];
 	int			pipefd[2];
 	static int	handling = 0;
 	int			i;
@@ -173,16 +167,23 @@ vparallel_error_handler_imp(ArchiveHandle *AH,
 	if (AH->is_clone)
 	{
 		/* we are the child, get the message out to the parent */
-		strcpy(buf, "ERROR ");
-		vsnprintf(buf + strlen("ERROR "), sizeof(buf) - strlen("ERROR "), fmt, ap);
 		parallel_error_handler_escrow_data(GET, &pstate);
 #ifdef WIN32
 		i = GetSlotOfThread(&pstate, GetCurrentThreadId());
 #else
 		i = GetSlotOfProcess(&pstate, getpid());
 #endif
+		if (pstate.parallelSlot[i].inErrorHandling)
+			return;
+
+		pstate.parallelSlot[i].inErrorHandling = true;
+
 		pipefd[PIPE_READ] = pstate.parallelSlot[i].pipeRevRead;
 		pipefd[PIPE_WRITE] = pstate.parallelSlot[i].pipeRevWrite;
+
+		strcpy(buf, "ERROR ");
+		vsnprintf(buf + strlen("ERROR "), sizeof(buf) - strlen("ERROR "), fmt, ap);
+
 		sendMessageToMaster(AH, pipefd, buf);
 		if (AH->connection)
 			ShutdownConnection(&(AH->connection));
@@ -195,174 +196,56 @@ vparallel_error_handler_imp(ArchiveHandle *AH,
 	else
 	{
 		/*
-		 * We are the parent. We need the handling variable to see if we're
-		 * already handling an error.
+		 * We are the parent. We need the handling variable to see if we're already handling an error.
 		 */
-		if (!handling)
-		{
-			handling = 1;
+		if (handling)
+			return;
+
+		handling = 1;
+
 #ifndef WIN32
-			signal(SIGPIPE, SIG_IGN);
+		signal(SIGPIPE, SIG_IGN);
 #endif
-			/*
-			 * Note that technically we're using a new pstate here, the old one
-			 * is copied over and then the old one isn't updated anymore. Only
-			 * the new one is, which is okay because control will never return
-			 * from this function.
-			 */
-			parallel_error_handler_escrow_data(GET, &pstate);
-			ShutdownWorkersHard(AH, &pstate);
-			/* Terminate own connection */
-			if (AH->connection)
-				ShutdownConnection(&(AH->connection));
-			vwrite_msg(NULL, fmt, ap);
-			exit(1);
-		}
+		/*
+		 * Note that technically we're using a new pstate here, the old one
+		 * is copied over and then the old one isn't updated anymore. Only
+		 * the new one is, which is okay because control will never return
+		 * from this function.
+		 */
+		parallel_error_handler_escrow_data(GET, &pstate);
+		ShutdownWorkersHard(AH, &pstate);
+		/* Terminate own connection */
+		if (AH->connection)
+			ShutdownConnection(&(AH->connection));
+		write_msg(NULL, "The one and only error is sth like %s", fmt);
+		vwrite_msg(NULL, fmt, ap);
+		exit(1);
 	}
 	Assert(false);
 }
 
-
-
-
-
-
-
-#ifdef WIN32
 /*
  * If we have one worker that terminates for some reason, we'd like the other
  * threads to terminate as well (and not finish with their 70 GB table dump
- * first...). Now in UNIX we can just kill these processes, whereas in Windows,
- * the only way to safely terminate a thread is from within the thread itself.
- * So we need to do active polling here to detect that from within the thread.
+ * first...). Now in UNIX we can just kill these processes, and let the signal
+ * handler set wantExit to 1 or more. In Windows we set a termEvent and this
+ * serves as the signal for everyone to terminate.
  */
 void
-checkWorkerTerm(void)
+checkAborting(ArchiveHandle *AH)
 {
+#ifdef WIN32
 	if (WaitForSingleObject(termEvent, 0) == WAIT_OBJECT_0)
-		/* terminate */
-		ExitThread(1);
-}
-
-#else /* UNIX */
-void
-checkWorkerTerm(void)
-{
-	/* nothing to do in UNIX */
-}
+#else
+	if (wantExit)
 #endif
-
-#ifdef WIN32
-/*
- * Returns the index of the worker process that terminated or NO_SLOT if no
- * worker process has terminated at all. If do_wait == true, we will wait until
- * at least one worker process terminates.
- */
-static int
-CheckForWorkerTermination(ParallelState *pstate, bool do_wait)
-{
-	static HANDLE *lpHandles = NULL;
-	int i, ret, j = 0;
-
-	if (!lpHandles)
-		lpHandles = (HANDLE *) pg_malloc(sizeof(HANDLE) * pstate->numWorkers);
-
-	for(i = 0; i < pstate->numWorkers; i++)
-		if (pstate->parallelSlot[i].workerStatus != WRKR_TERMINATED)
-			lpHandles[j++] = (HANDLE) pstate->parallelSlot[i].hThread;
-
-	printf("Have %d not-terminated threads\n", j);
-
-	if (j == 0)
-		return NO_SLOT;
-
-	ret = WaitForMultipleObjects(j, lpHandles, false, do_wait ? INFINITE : 0);
-	if (ret == WAIT_FAILED)
-	{
-		/* Something went wrong */
-		/* XXX */
-	}
-
-	if (ret == WAIT_TIMEOUT)
-	{
-		Assert(!do_wait);
-		return NO_SLOT;
-	}
-
-	for (i = 0; i < pstate->numWorkers; i++)
-	{
-		if ((HANDLE) pstate->parallelSlot[i].hThread == lpHandles[WAIT_OBJECT_0 + ret])
-		{
-			Assert(pstate->parallelSlot[i].workerStatus != WRKR_TERMINATED);
-			pstate->parallelSlot[i].workerStatus = WRKR_TERMINATED;
-			/* XXX */
-			pstate->parallelSlot[i].status = 0;
-			CloseHandle((HANDLE) pstate->parallelSlot[i].hThread);
-			pstate->parallelSlot[i].hThread = (uintptr_t) 0;
-			printf("Found that process %d terminated\n", i);
-			return i;
-		}
-	}
-
-	Assert(false);
-
-	/* leaks lpHandles, but it's static, so it's leaked only once */
-	return NO_SLOT;
-}
-#else /* UNIX */
-static int
-CheckForWorkerTermination(ParallelState *pstate, bool do_wait)
-{
-	int		status, i;
-	pid_t	pid;
-
-	for (;;) {
-		pid = waitpid(-1, &status, do_wait ? 0 : WNOHANG);
-		/* Got a terminating child */
-		if (pid > 0)
-			break;
-		/* Interrupted, should only happen for do_wait == true */
-		if (pid < 0 && errno == EINTR)
-			continue;
-		/* No child has terminated */
-		if (pid == 0 || (pid < 0 && errno == ECHILD)) {
-			Assert(!do_wait);
-			return NO_SLOT;
-		}
-		Assert(false);
-	}
-
-	if ((i = GetSlotOfProcess(pstate, pid)) != NO_SLOT)
-	{
-		pstate->parallelSlot[i].workerStatus = WRKR_TERMINATED;
-		return i;
-	}
-
-	Assert(false);
-	return NO_SLOT;
-}
-#endif
-
-
-/*
- * Call exit() when running on
- *    UNIX: always
- *    Windows: if we are the master.
- *
- * Call ExitThread() if we are on Windows and a worker.
- *
- * This is a reasonably simple function but it cannot be a macro because it's
- * called from a different object file and we'd like to keep the OS-dependent
- * code all in one place.
- */
-void
-myExit(int status)
-{
-#ifdef WIN32
-	if (tMasterThreadId != GetCurrentThreadId())
-		ExitThread(status);
-#endif
-	exit(status);
+		/*
+		 * Terminate, this error will actually never show up somewhere
+		 * because if termEvent/wantExit is set, then we are already in the
+		 * process of going down and already have a reason why we're
+		 * terminating.
+		 */
+		die_horribly(AH, modulename, "Master initiated shutdown");
 }
 
 /*
@@ -391,9 +274,6 @@ select_loop(int maxFd, fd_set *workerset)
 		i = select(maxFd + 1, workerset, NULL, NULL, &tv);
 		printf("select returned %d\n", i);
 
-		/* XXX see if this can ever run in a non-master at all - see above */
-		if (tMasterThreadId != GetCurrentThreadId())
-			checkWorkerTerm();
 		if (i == SOCKET_ERROR && WSAGetLastError() == WSAEINTR)
 			continue;
 		if (i)
@@ -434,9 +314,9 @@ select_loop(int maxFd, fd_set *workerset)
 static void
 ShutdownWorkersHard(ArchiveHandle *AH, ParallelState *pstate)
 {
-	int i;
+	printf("All workers going down!!!\n");
 
-	/* The workers monitor this event via checkWorkerTerm(). */
+	/* The workers monitor this event via checkAborting(). */
 	SetEvent(termEvent);
 
 	/*
@@ -445,25 +325,21 @@ ShutdownWorkersHard(ArchiveHandle *AH, ParallelState *pstate)
 	 */
 	ShutdownWorkersSoft(AH, pstate, false);
 
-	while ((i = CheckForWorkerTermination(pstate, true)) != NO_SLOT)
+	while (!HasEveryWorkerTerminated(pstate))
 	{
-		/* This will be set to NULL upon PQfinish() of the connection. */
-		if (*(pstate->parallelSlot[i].conn))
-		{
-			uintptr_t handle;
-			/*
-			 * Call the cleanup thread on this object: Here's the trick, in
-			 * order to shut the database connections down in parallel, we
-			 * just launch new threads that do nothing but that.
-			 */
-			handle = _beginthreadex(NULL, 0, &ShutdownConnection,
-									pstate->parallelSlot[i].conn,
-									0, NULL);
-			pstate->parallelSlot[i].hThread = handle;
-			pstate->parallelSlot[i].workerStatus = WRKR_WORKING;
-		}
+		int			worker;
+		char	   *msg;
+
+		PrintStatus(pstate);
+
+		msg = getMessageFromWorker(AH, pstate, true, &worker);
+		if (!msg || messageStartsWith(msg, "ERROR "))
+			pstate->parallelSlot[worker].workerStatus = WRKR_TERMINATED;
+		if (msg)
+			free(msg);
 	}
 	Assert(HasEveryWorkerTerminated(pstate));
+	printf("All workers shut down successfully\n");
 }
 #else /* UNIX */
 static void
@@ -489,63 +365,20 @@ ShutdownWorkersHard(ArchiveHandle *AH, ParallelState *pstate)
 	while (!HasEveryWorkerTerminated(pstate))
 	{
 		PrintStatus(pstate);
-		CheckForWorkerTermination(pstate, true);
+		//CheckForWorkerTermination(pstate, true);
+		ListenToWorkers(AH, pstate, true);
 	}
 
 	printf("All workers terminated\n");
 }
 #endif
 
-/* Signal handling (UNIX only) */
 #ifndef WIN32
+/* Signal handling (UNIX only) */
 static void
-WorkerExit(int signum)
+sigTermHandler(int signum)
 {
-	/*
-	 * Signal Handler. We could get multiple signals delivered and then we
-	 * might get interrupted in the Signal handler only to enter a
-	 * different incarnation of this function.
-	 *
-	 * The following holds for this function:
-	 * - At least one function sees wantExit == 0 and increases it to 1.
-	 * - there could be several of them, even though wantExit++ is most
-	 *   probably atomic.
-	 * - The first signal handler that succeeds setting wantExit to 1 will not be
-	 *   interrupted further by new signal handler invocations
-	 * - This process sees worker_conn != NULL and calls ShutdownConnection().
-	 * - That function sets the worker_conn to NULL
-	 * - The function that did the actual work terminates
-	 * - Any other signal handler that is now continued sees worker_conn == NULL already.
-	 */
-
-	if (wantExit++ > 0)
-		return;
-
-	/* worker_conn == NULL is only true in the parent */
-	if (worker_conn == NULL) {
-		printf("worker_conn == NULL in %d\n", getpid());
-		return;
-	}
-
-	if (*worker_conn == NULL) {
-		printf("*worker_conn == NULL in %d\n", getpid());
-		return;
-	}
-
-	/* we were here first */
-	if (*worker_conn)
-		ShutdownConnection(worker_conn);
-
-	exit(1);
-}
-
-static void
-MasterExit(int signum)
-{
-	/* catch SIGINT, SIGTERM */
-	/* set a flag to indicate that we want to terminate */
-	printf("In master's signal handler\n");
-	wantExit = 1;
+	wantExit++;
 }
 #endif
 
@@ -588,22 +421,20 @@ typedef struct {
 	int				worker;
 	int				pipeRead;
 	int				pipeWrite;
-	PGconn		  **conn;
 } WorkerInfo;
 
 static unsigned __stdcall
 init_spawned_worker_win32(WorkerInfo *wi)
 {
-	ArchiveHandle *AH = wi->AH;
+	ArchiveHandle *AH;
 	int pipefd[2] = { wi->pipeRead, wi->pipeWrite };
 	int worker = wi->worker;
 	RestoreOptions *ropt = wi->ropt;
-	PGconn **conn = wi->conn;
+	
+	AH = CloneArchive(wi->AH);
 
 	printf("My thread handle: %d, master: %d\n", GetCurrentThreadId(), tMasterThreadId);
 
-	/* evil hack to copy parents connection for now */
-	AH->connection = *(wi->conn);
 	free(wi);
 	SetupWorker(AH, pipefd, worker, ropt);
 
@@ -648,11 +479,9 @@ ParallelBackupStart(ArchiveHandle *AH, RestoreOptions *ropt)
 	tMasterThreadId = GetCurrentThreadId();
 	termEvent = CreateEvent(NULL, true, false, "Terminate");
 #else
-	worker_conn = NULL;
-
-	signal(SIGTERM, MasterExit);
-	signal(SIGINT, MasterExit);
-	signal(SIGQUIT, MasterExit);
+	signal(SIGTERM, sigTermHandler);
+	signal(SIGINT, sigTermHandler);
+	signal(SIGQUIT, sigTermHandler);
 #endif
 
 	for (i = 0; i < pstate->numWorkers; i++)
@@ -668,18 +497,17 @@ ParallelBackupStart(ArchiveHandle *AH, RestoreOptions *ropt)
 		if (pgpipe(pipeMW) < 0 || pgpipe(pipeWM) < 0)
 			die_horribly(AH, modulename, "Cannot create communication channels: %s",
 						 strerror(errno));
+
+		pstate->parallelSlot[i].workerStatus = WRKR_IDLE;
 #ifdef WIN32
 		/* Allocate a new structure for every worker */
 		wi = (WorkerInfo *) pg_malloc(sizeof(WorkerInfo));
 
 		wi->ropt = ropt;
 		wi->worker = i;
-		wi->AH = CloneArchive(AH);
-		wi->conn = &(AH->connection);
-		wi->pipeRead = pipeMW[PIPE_READ];
-		wi->pipeWrite = pipeWM[PIPE_WRITE];
-
-		pstate->parallelSlot[i].conn = &wi->AH->connection;
+		wi->AH = AH;
+		wi->pipeRead = pstate->parallelSlot[i].pipeRevRead = pipeMW[PIPE_READ];
+		wi->pipeWrite = pstate->parallelSlot[i].pipeRevWrite = pipeWM[PIPE_WRITE];
 
 		handle = _beginthreadex(NULL, 0, &init_spawned_worker_win32,
 								wi, 0, &(pstate->parallelSlot[i].threadId));
@@ -695,17 +523,13 @@ ParallelBackupStart(ArchiveHandle *AH, RestoreOptions *ropt)
 			/*
 			 * Store the fds for the reverse communication in pstate. Actually
 			 * we only use this in case of an error and don't use pstate
-			 * otherwise in the worker process. On Windows this writes to the
+			 * otherwise in the worker process. On Windows we write to the
 			 * global pstate, in Unix we write to our process-local copy but
 			 * that's also where we'd retrieve this information back from.
 			 */
 			pstate->parallelSlot[i].pipeRevRead = pipefd[PIPE_READ];
 			pstate->parallelSlot[i].pipeRevWrite = pipefd[PIPE_WRITE];
 			pstate->parallelSlot[i].pid = getpid();
-
-			signal(SIGTERM, WorkerExit);
-			signal(SIGINT, WorkerExit);
-			signal(SIGQUIT, WorkerExit);
 
 			/*
 			 * Call CloneArchive on Unix as well even though technically we
@@ -747,8 +571,6 @@ ParallelBackupStart(ArchiveHandle *AH, RestoreOptions *ropt)
 			}
 
 			SetupWorker(AH, pipefd, i, ropt);
-			worker_conn = &AH->connection;
-			Assert(*worker_conn == AH->connection);
 
 			exit(0);
 		}
@@ -956,8 +778,15 @@ ShutdownWorkersSoft(ArchiveHandle *AH, ParallelState *pstate, bool do_wait)
 	printf("Waiting for workers to terminate\n");
 	while (!HasEveryWorkerTerminated(pstate))
 	{
+		char   *msg;
+		int		worker;
+
 		PrintStatus(pstate);
-		CheckForWorkerTermination(pstate, true);
+		msg = getMessageFromWorker(AH, pstate, true, &worker);
+		if (!msg || messageStartsWith(msg, "ERROR "))
+			pstate->parallelSlot[worker].workerStatus = WRKR_TERMINATED;
+		if (msg)
+			free(msg);
 	}
 
 	printf("All workers terminated\n");
@@ -978,11 +807,7 @@ ShutdownWorkersSoft(ArchiveHandle *AH, ParallelState *pstate, bool do_wait)
  * And since a thread needs to return a value this function needs to as well.
  * Hence this function returns an (unsigned) int.
  */
-#ifdef WIN32
-static unsigned __stdcall
-#else
 static int
-#endif
 ShutdownConnection(PGconn **conn)
 {
 	PGcancel   *cancel;
@@ -1089,10 +914,6 @@ lockTableNoWait(ArchiveHandle *AH, TocEntry *te)
  * wait for the next command. Finally it will receive a TERMINATE command and
  * exit.
  */
-#define messageStartsWith(msg, prefix) \
-	(strncmp(msg, prefix, strlen(prefix)) == 0)
-#define messageEquals(msg, pattern) \
-	(strcmp(msg, pattern) == 0)
 static void
 WaitForCommands(ArchiveHandle *AH, int pipefd[2], int worker /* XXX remove me */)
 {
@@ -1109,7 +930,6 @@ WaitForCommands(ArchiveHandle *AH, int pipefd[2], int worker /* XXX remove me */
 
 /* XXX
 		if (worker == 5) {
-			PQfinish(*worker_conn);
 			die_horribly(AH, modulename, "Null bock mehr\n");
 		}
   XXX
@@ -1198,18 +1018,6 @@ ListenToWorkers(ArchiveHandle *AH, ParallelState *pstate, bool do_wait)
 	int			worker;
 	char	   *msg;
 
-	/*
-	 * terminated workers should send a message. Even if they don't, we should
-	 * get info about them from select...
-	if ((i = CheckForWorkerTermination(pstate, false)) != NO_SLOT)
-	{
-		die_horribly(AH, modulename,
-					 "A worker died unexpectedly while working on %s %s\n",
-					 pstate->parallelSlot[i].args->te->desc,
-					 pstate->parallelSlot[i].args->te->tag);
-	}
-	*/
-
 	printf("In ListenToWorkers()\n");
 	msg = getMessageFromWorker(AH, pstate, do_wait, &worker);
 
@@ -1296,8 +1104,8 @@ EnsureIdleWorker(ArchiveHandle *AH, ParallelState *pstate)
 	int		work_status;
 
 	/* Checks if we need to terminate and if so then exit right from here */
-	if (wantExit)
-		die_horribly(AH, modulename, "terminated by user\n");
+//	if (wantExit)
+//		die_horribly(AH, modulename, "terminated by user\n");
 
 	for (;;)
 	{
@@ -1419,8 +1227,10 @@ getMessageFromWorker(ArchiveHandle *AH, ParallelState *pstate, bool do_wait, int
 			return NULL;
 	}
 
+#ifndef WIN32
 	if (wantExit)
 		die_horribly(AH, modulename, "terminated by user\n");
+#endif
 
 	if (i < 0)
 	{
@@ -1435,24 +1245,9 @@ getMessageFromWorker(ArchiveHandle *AH, ParallelState *pstate, bool do_wait, int
 		if (!FD_ISSET(pstate->parallelSlot[i].pipeRead, &workerset))
 			continue;
 
-		if ((msg = readMessageFromPipe(pstate->parallelSlot[i].pipeRead, false)))
-		{
-			*worker = i;
-			return msg;
-		}
-		else
-		{
-			/*
-			 * Something bad has happened... We were promised that the FD is
-			 * ready but we got NULL, so this worker has terminated the
-			 * connection.
-			 */
-			printf("Need to shut down the workers - got a NULL msg from a worker\n");
-			die_horribly(AH, modulename,
-						 "A worker died unexpectedly while working on %s %s\n",
-						 pstate->parallelSlot[i].args->te->desc,
-						 pstate->parallelSlot[i].args->te->tag);
-		}
+		msg = readMessageFromPipe(pstate->parallelSlot[i].pipeRead, false);
+		*worker = i;
+		return msg;
 	}
 	printf("Nobody was ready...\n");
 	Assert(false);
@@ -1531,18 +1326,9 @@ readMessageFromPipe(int fd, bool do_wait)
 				return NULL;
 		}
 
-		if (ret == 0)
-		{
-			/* worker has closed the connection */
+		/* worker has closed the connection or another error happened */
+		if (ret <= 0)
 			return NULL;
-		}
-		if (ret < 0)
-		{
-			/* XXX test me */
-			write_msg(NULL, "error reading from communication partner: %s\n",
-					  strerror(errno));
-			myExit(1);
-		}
 
 		Assert(ret == 1);
 
