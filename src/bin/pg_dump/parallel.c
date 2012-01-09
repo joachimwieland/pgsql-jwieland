@@ -38,14 +38,16 @@
 #ifdef WIN32
 static unsigned int	tMasterThreadId = 0;
 static HANDLE		termEvent = INVALID_HANDLE_VALUE;
+#else
+static volatile sig_atomic_t wantAbort = 0;
+static bool aborting = false;
 #endif
-static volatile sig_atomic_t wantExit = 0;
 
 /*
  * The parallel error handler is called for any die_horribly() in a child or master process.
  * It then takes control over shutting down the rest of the gang.
  */
-volatile void (*vparallel_error_handler)(ArchiveHandle *AH, const char *modulename,
+void (*volatile vparallel_error_handler)(ArchiveHandle *AH, const char *modulename,
 								const char *fmt, va_list ap) = NULL;
 
 /* The actual implementation of the error handler function */
@@ -56,6 +58,7 @@ static const char *modulename = gettext_noop("parallel archiver");
 
 static int ShutdownConnection(PGconn **conn);
 
+static void WaitForTerminatingWorkers(ArchiveHandle *AH, ParallelState *pstate);
 static void ShutdownWorkersHard(ArchiveHandle *AH, ParallelState *pstate);
 static void ShutdownWorkersSoft(ArchiveHandle *AH, ParallelState *pstate, bool do_wait);
 static void PrintStatus(ParallelState *pstate);
@@ -161,7 +164,6 @@ vparallel_error_handler_imp(ArchiveHandle *AH,
 	ParallelState pstate;
 	char		buf[512];
 	int			pipefd[2];
-	static int	handling = 0;
 	int			i;
 
 	if (AH->is_clone)
@@ -196,12 +198,13 @@ vparallel_error_handler_imp(ArchiveHandle *AH,
 	else
 	{
 		/*
-		 * We are the parent. We need the handling variable to see if we're already handling an error.
+		 * We are the parent. We need the handling variable to see if we're
+		 * already handling an error.
 		 */
-		if (handling)
+		if (aborting)
 			return;
 
-		handling = 1;
+		aborting = 1;
 
 #ifndef WIN32
 		signal(SIGPIPE, SIG_IGN);
@@ -217,7 +220,6 @@ vparallel_error_handler_imp(ArchiveHandle *AH,
 		/* Terminate own connection */
 		if (AH->connection)
 			ShutdownConnection(&(AH->connection));
-		write_msg(NULL, "The one and only error is sth like %s", fmt);
 		vwrite_msg(NULL, fmt, ap);
 		exit(1);
 	}
@@ -228,7 +230,7 @@ vparallel_error_handler_imp(ArchiveHandle *AH,
  * If we have one worker that terminates for some reason, we'd like the other
  * threads to terminate as well (and not finish with their 70 GB table dump
  * first...). Now in UNIX we can just kill these processes, and let the signal
- * handler set wantExit to 1 or more. In Windows we set a termEvent and this
+ * handler set wantAbort to 1 or more. In Windows we set a termEvent and this
  * serves as the signal for everyone to terminate.
  */
 void
@@ -237,15 +239,15 @@ checkAborting(ArchiveHandle *AH)
 #ifdef WIN32
 	if (WaitForSingleObject(termEvent, 0) == WAIT_OBJECT_0)
 #else
-	if (wantExit)
+	if (wantAbort)
 #endif
 		/*
 		 * Terminate, this error will actually never show up somewhere
-		 * because if termEvent/wantExit is set, then we are already in the
+		 * because if termEvent/wantAbort is set, then we are already in the
 		 * process of going down and already have a reason why we're
 		 * terminating.
 		 */
-		die_horribly(AH, modulename, "Master initiated shutdown");
+		die_horribly(AH, modulename, "worker is terminating");
 }
 
 /*
@@ -294,8 +296,8 @@ select_loop(int maxFd, fd_set *workerset)
 		*workerset = saveSet;
 		i = select(maxFd + 1, workerset, NULL, NULL, NULL);
 		Assert(i != 0);
-		if (wantExit) {
-			printf("leaving select_loop, wantExit == 1\n");
+		if (wantAbort && !aborting) {
+			printf("leaving select_loop, wantAbort == 1\n");
 			return NO_SLOT;
 		}
 		if (i < 0 && errno == EINTR)
@@ -307,7 +309,6 @@ select_loop(int maxFd, fd_set *workerset)
 }
 #endif
 
-#ifdef WIN32
 /*
  * Shut down any remaining workers, this has an implicit do_wait == true
  */
@@ -316,15 +317,36 @@ ShutdownWorkersHard(ArchiveHandle *AH, ParallelState *pstate)
 {
 	printf("All workers going down!!!\n");
 
+#ifdef WIN32
 	/* The workers monitor this event via checkAborting(). */
 	SetEvent(termEvent);
-
+#endif
 	/*
 	 * The fastest way we can make them terminate is when they are listening
 	 * for new commands and we just tell them to terminate.
 	 */
 	ShutdownWorkersSoft(AH, pstate, false);
 
+#ifndef WIN32
+	{
+		int i;
+		for (i = 0; i < pstate->numWorkers; i++)
+			kill(pstate->parallelSlot[i].pid, SIGTERM);
+
+		/* Reset our signal handler, if we get signaled again, terminate normally */
+		signal(SIGINT, SIG_DFL);
+		signal(SIGTERM, SIG_DFL);
+		signal(SIGQUIT, SIG_DFL);
+	}
+#endif
+
+	WaitForTerminatingWorkers(AH, pstate);
+	printf("All workers shut down successfully\n");
+}
+
+static void
+WaitForTerminatingWorkers(ArchiveHandle *AH, ParallelState *pstate)
+{
 	while (!HasEveryWorkerTerminated(pstate))
 	{
 		int			worker;
@@ -339,46 +361,14 @@ ShutdownWorkersHard(ArchiveHandle *AH, ParallelState *pstate)
 			free(msg);
 	}
 	Assert(HasEveryWorkerTerminated(pstate));
-	printf("All workers shut down successfully\n");
 }
-#else /* UNIX */
-static void
-ShutdownWorkersHard(ArchiveHandle *AH, ParallelState *pstate)
-{
-	int			i;
-
-	/*
-	 * The fastest way we can make them terminate is when they are listening
-	 * for new commands and we just tell them to terminate.
-	 */
-	ShutdownWorkersSoft(AH, pstate, false);
-
-	for (i = 0; i < pstate->numWorkers; i++)
-		kill(pstate->parallelSlot[i].pid, SIGTERM);
-
-	/* Reset our signal handler, if we get signaled again, terminate normally */
-	signal(SIGINT, SIG_DFL);
-	signal(SIGTERM, SIG_DFL);
-	signal(SIGQUIT, SIG_DFL);
-
-	printf("Waiting for workers to terminate\n");
-	while (!HasEveryWorkerTerminated(pstate))
-	{
-		PrintStatus(pstate);
-		//CheckForWorkerTermination(pstate, true);
-		ListenToWorkers(AH, pstate, true);
-	}
-
-	printf("All workers terminated\n");
-}
-#endif
 
 #ifndef WIN32
 /* Signal handling (UNIX only) */
 static void
 sigTermHandler(int signum)
 {
-	wantExit++;
+	wantAbort++;
 }
 #endif
 
@@ -430,7 +420,7 @@ init_spawned_worker_win32(WorkerInfo *wi)
 	int pipefd[2] = { wi->pipeRead, wi->pipeWrite };
 	int worker = wi->worker;
 	RestoreOptions *ropt = wi->ropt;
-	
+
 	AH = CloneArchive(wi->AH);
 
 	printf("My thread handle: %d, master: %d\n", GetCurrentThreadId(), tMasterThreadId);
@@ -775,20 +765,7 @@ ShutdownWorkersSoft(ArchiveHandle *AH, ParallelState *pstate, bool do_wait)
 	if (!do_wait)
 		return;
 
-	printf("Waiting for workers to terminate\n");
-	while (!HasEveryWorkerTerminated(pstate))
-	{
-		char   *msg;
-		int		worker;
-
-		PrintStatus(pstate);
-		msg = getMessageFromWorker(AH, pstate, true, &worker);
-		if (!msg || messageStartsWith(msg, "ERROR "))
-			pstate->parallelSlot[worker].workerStatus = WRKR_TERMINATED;
-		if (msg)
-			free(msg);
-	}
-
+	WaitForTerminatingWorkers(AH, pstate);
 	printf("All workers terminated\n");
 }
 
@@ -1055,7 +1032,7 @@ ListenToWorkers(ArchiveHandle *AH, ParallelState *pstate, bool do_wait)
 	{
 		Assert(AH->format == archDirectory || AH->format == archCustom);
 		pstate->parallelSlot[worker].workerStatus = WRKR_TERMINATED;
-		die_horribly(AH, modulename, msg + strlen("ERROR "));
+		die_horribly(AH, modulename, "%s", msg + strlen("ERROR "));
 	}
 	else
 		die_horribly(AH, modulename, "Invalid message received from worker: %s", msg);
@@ -1102,10 +1079,6 @@ EnsureIdleWorker(ArchiveHandle *AH, ParallelState *pstate)
 {
 	int		ret_worker;
 	int		work_status;
-
-	/* Checks if we need to terminate and if so then exit right from here */
-//	if (wantExit)
-//		die_horribly(AH, modulename, "terminated by user\n");
 
 	for (;;)
 	{
@@ -1228,7 +1201,7 @@ getMessageFromWorker(ArchiveHandle *AH, ParallelState *pstate, bool do_wait, int
 	}
 
 #ifndef WIN32
-	if (wantExit)
+	if (wantAbort && !aborting)
 		die_horribly(AH, modulename, "terminated by user\n");
 #endif
 

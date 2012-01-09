@@ -65,7 +65,7 @@ typedef struct _parallel_slot
 
 typedef struct _parallel_state
 {
-	int		numWorkers;
+	int			numWorkers;
 	ParallelSlot *parallelSlot;
 } ParallelState;
 
@@ -83,7 +83,7 @@ extern void DispatchJobForTocEntry(struct _archiveHandle *AH,
 								   struct _tocEntry *te, T_Action act);
 extern void ParallelBackupEnd(struct _archiveHandle *AH, ParallelState *pstate);
 
-extern volatile void (*vparallel_error_handler)(struct _archiveHandle *AH,
+extern void (* volatile vparallel_error_handler)(struct _archiveHandle *AH,
 									const char *modulename,
 									const char *fmt, va_list ap);
 
