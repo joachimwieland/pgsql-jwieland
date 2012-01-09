@@ -865,8 +865,8 @@ _MasterStartParallelItem(ArchiveHandle *AH, TocEntry *te, T_Action act)
 static int
 _MasterEndParallelItem(ArchiveHandle *AH, TocEntry *te, const char *str, T_Action act)
 {
-	DumpId				dumpId;
-	int					nBytes, status, n_errors;
+	DumpId		dumpId;
+	int			nBytes, status, n_errors;
 
 	/* no parallel dump in the custom archive */
 	Assert(act == ACT_RESTORE);

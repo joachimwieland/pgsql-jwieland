@@ -310,6 +310,7 @@ ConnectDatabase(Archive *AHX,
 	return AH->connection;
 }
 
+
 static void
 notice_processor(void *arg, const char *message)
 {

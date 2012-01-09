@@ -51,7 +51,7 @@ typedef struct
 	cfp		   *dataFH;			/* currently open data file */
 
 	cfp		   *blobsTocFH;		/* file handle for blobs.toc */
-	ParallelState	   *pstate; /* for parallel backup / restore */
+	ParallelState *pstate;		/* for parallel backup / restore */
 } lclContext;
 
 typedef struct
@@ -368,9 +368,7 @@ _PrintFileData(ArchiveHandle *AH, char *filename, RestoreOptions *ropt)
 	buflen = ZLIB_OUT_SIZE;
 
 	while ((cnt = cfread(buf, buflen, cfp)))
-	{
 		ahwrite(buf, 1, cnt, AH);
-	}
 
 	free(buf);
 }

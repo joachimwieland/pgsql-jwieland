@@ -1419,14 +1419,8 @@ vdie_horribly(ArchiveHandle *AH, const char *modulename,
 	{
 		if (AH->public.verbose)
 			write_msg(NULL, "*** aborted because of error\n");
-		if (AH->connection) {
+		if (AH->connection)
 			PQfinish(AH->connection);
-			/*
-			 * Set AH->connection == NULL, so that the cleanup routines know
-			 * that cleanup has already been done.
-			 */
-			AH->connection = NULL;
-		}
 	}
 
 	exit(1);
@@ -3330,11 +3324,11 @@ restore_toc_entries_prefork(ArchiveHandle *AH)
  * Work is done in three phases.
  * First we process all SECTION_PRE_DATA tocEntries, in a single connection,
  * just as for a standard restore. This is done in restore_toc_entries_prefork().
- * Second we process the remaining non-ACL
- * steps in parallel worker children (threads on Windows, processes on Unix),
- * these fork off and set up their connections before we call
- * restore_toc_entries_parallel_forked. Finally we process all the ACL entries
- * in a single connection (that happens back in RestoreArchive).
+ * Second we process the remaining non-ACL steps in parallel worker children
+ * (threads on Windows, processes on Unix), these fork off and set up their
+ * connections before we call restore_toc_entries_parallel_forked.
+ * Finally we process all the ACL entries in a single connection (that happens
+ * back in RestoreArchive).
  */
 static void
 restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate,
@@ -3353,13 +3347,12 @@ restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate,
 	 * already been initialized in the parent.  After this setup, the pending
 	 * list is everything that needs to be done but is blocked by one or more
 	 * dependencies, while the ready list contains items that have no remaining
-	 * dependencies.	Note: we don't yet filter out entries that aren't going
-	 * to be restored.  They might participate in dependency chains connecting
+	 * dependencies. Note: we don't yet filter out entries that aren't going
+	 * to be restored. They might participate in dependency chains connecting
 	 * entries that should be restored, so we treat them as live until we
 	 * actually process them.
 	 */
 	par_list_header_init(&ready_list);
-
 	skipped_some = false;
 	for (next_work_item = AH->toc->next; next_work_item != AH->toc; next_work_item = next_work_item->next)
 	{
@@ -4143,7 +4136,6 @@ CloneArchive(ArchiveHandle *AH)
 	(clone->ClonePtr) (clone);
 
 	Assert(clone->connection != NULL);
-
 	return clone;
 }
 

@@ -1389,6 +1389,7 @@ selectDumpableObject(DumpableObject *dobj)
  *	- this routine is called by the Archiver when it wants the table
  *	  to be dumped.
  */
+
 static int
 dumpTableData_copy(Archive *fout, void *dcontext)
 {
@@ -9586,8 +9587,8 @@ dumpFunc(Archive *fout, FuncInfo *finfo)
 	destroyPQExpBuffer(delqry);
 	destroyPQExpBuffer(labelq);
 	destroyPQExpBuffer(asPart);
-	PQfreemem(funcsig);
-	PQfreemem(funcsig_tag);
+	free(funcsig);
+	free(funcsig_tag);
 	if (allargtypes)
 		free(allargtypes);
 	if (argmodes)
@@ -11314,8 +11315,8 @@ dumpAgg(Archive *fout, AggInfo *agginfo)
 	 * command look like a function's GRANT; in particular this affects the
 	 * syntax for zero-argument aggregates.
 	 */
-	//PQfreemem(aggsig);
-	//PQfreemem(aggsig_tag);
+	free(aggsig);
+	free(aggsig_tag);
 
 	aggsig = format_function_signature(&agginfo->aggfn, true);
 	aggsig_tag = format_function_signature(&agginfo->aggfn, false);
@@ -11326,8 +11327,8 @@ dumpAgg(Archive *fout, AggInfo *agginfo)
 			agginfo->aggfn.dobj.namespace->dobj.name,
 			agginfo->aggfn.rolname, agginfo->aggfn.proacl);
 
-	PQfreemem(aggsig);
-	PQfreemem(aggsig_tag);
+	free(aggsig);
+	free(aggsig_tag);
 
 	PQclear(res);
 
