@@ -48,11 +48,13 @@ static bool aborting = false;
  * It then takes control over shutting down the rest of the gang.
  */
 void (*volatile vparallel_error_handler)(ArchiveHandle *AH, const char *modulename,
-								const char *fmt, va_list ap) = NULL;
+								const char *fmt, va_list ap)
+						__attribute__((format(PG_PRINTF_ATTRIBUTE, 3, 0))) = NULL;
 
 /* The actual implementation of the error handler function */
 static void vparallel_error_handler_imp(ArchiveHandle *AH, const char *modulename,
-										const char *fmt, va_list ap);
+										const char *fmt, va_list ap)
+								__attribute__((format(PG_PRINTF_ATTRIBUTE, 3, 0)));
 
 static const char *modulename = gettext_noop("parallel archiver");
 
