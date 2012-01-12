@@ -199,16 +199,15 @@ vparallel_error_handler_imp(ArchiveHandle *AH,
 	}
 	else
 	{
+#ifndef WIN32
 		/*
 		 * We are the parent. We need the handling variable to see if we're
 		 * already handling an error.
 		 */
 		if (aborting)
 			return;
-
 		aborting = 1;
 
-#ifndef WIN32
 		signal(SIGPIPE, SIG_IGN);
 #endif
 		/*
