@@ -275,12 +275,32 @@ tas(volatile slock_t *lock)
 #endif	 /* __ia64__ || __ia64 */
 
 
+/*
+ * On ARM, we use __sync_lock_test_and_set(int *, int) if available, and if
+ * not fall back on the SWPB instruction.  SWPB does not work on ARMv6 or
+ * later, so the compiler builtin is preferred if available.  Note also that
+ * the int-width variant of the builtin works on more chips than other widths.
+ */
 #if defined(__arm__) || defined(__arm)
 #define HAS_TEST_AND_SET
 
-typedef unsigned char slock_t;
-
 #define TAS(lock) tas(lock)
+
+#ifdef HAVE_GCC_INT_ATOMICS
+
+typedef int slock_t;
+
+static __inline__ int
+tas(volatile slock_t *lock)
+{
+	return __sync_lock_test_and_set(lock, 1);
+}
+
+#define S_UNLOCK(lock) __sync_lock_release(lock)
+
+#else /* !HAVE_GCC_INT_ATOMICS */
+
+typedef unsigned char slock_t;
 
 static __inline__ int
 tas(volatile slock_t *lock)
@@ -295,6 +315,7 @@ tas(volatile slock_t *lock)
 	return (int) _res;
 }
 
+#endif	 /* HAVE_GCC_INT_ATOMICS */
 #endif	 /* __arm__ */
 
 
@@ -357,6 +378,9 @@ tas(volatile slock_t *lock)
 typedef unsigned int slock_t;
 
 #define TAS(lock) tas(lock)
+
+/* On PPC, it's a win to use a non-locking test before the lwarx */
+#define TAS_SPIN(lock)	(*(lock) ? 1 : TAS(lock))
 
 /*
  * NOTE: per the Enhanced PowerPC Architecture manual, v1.0 dated 7-May-2002,

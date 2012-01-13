@@ -41,6 +41,9 @@ static const char *modulename = gettext_noop("archiver");
 
 #include "libpq/libpq-fs.h"
 
+#define TEXT_DUMP_HEADER "--\n-- PostgreSQL database dump\n--\n\n"
+#define TEXT_DUMPALL_HEADER "--\n-- PostgreSQL database cluster dump\n--\n\n"
+
 /* state needed to save/restore an archive's output target */
 typedef struct _outputContext
 {
@@ -591,20 +594,20 @@ restore_toc_entry(ArchiveHandle *AH, TocEntry *te,
 					if (te->copyStmt && strlen(te->copyStmt) > 0)
 					{
 						ahprintf(AH, "%s", te->copyStmt);
-						AH->writingCopyData = true;
+						AH->outputKind = OUTPUT_COPYDATA;
 					}
+					else
+						AH->outputKind = OUTPUT_OTHERDATA;
 
 					(*AH->PrintTocDataPtr) (AH, te, ropt);
 
 					/*
 					 * Terminate COPY if needed.
 					 */
-					if (AH->writingCopyData)
-					{
-						if (RestoringToDB(AH))
-							EndDBCopyMode(AH, te);
-						AH->writingCopyData = false;
-					}
+					if (AH->outputKind == OUTPUT_COPYDATA &&
+						RestoringToDB(AH))
+						EndDBCopyMode(AH, te);
+					AH->outputKind = OUTPUT_SQLCMDS;
 
 					/* close out the transaction started above */
 					if (is_parallel && te->created)
@@ -1849,11 +1852,19 @@ _discoverArchiveFormat(ArchiveHandle *AH)
 	else
 	{
 		/*
-		 * *Maybe* we have a tar archive format file... So, read first 512
-		 * byte header...
+		 * *Maybe* we have a tar archive format file or a text dump ... 
+		 * So, read first 512 byte header...
 		 */
 		cnt = fread(&AH->lookahead[AH->lookaheadLen], 1, 512 - AH->lookaheadLen, fh);
 		AH->lookaheadLen += cnt;
+
+		if (AH->lookaheadLen >= strlen(TEXT_DUMPALL_HEADER) &&
+			(strncmp(AH->lookahead, TEXT_DUMP_HEADER, strlen(TEXT_DUMP_HEADER)) == 0 ||
+			 strncmp(AH->lookahead, TEXT_DUMPALL_HEADER, strlen(TEXT_DUMPALL_HEADER)) == 0))
+		{
+			/* looks like it's probably a text format dump. so suggest they try psql */
+			die_horribly(AH, modulename, "input file appears to be a text format dump. Please use psql.\n");
+		}
 
 		if (AH->lookaheadLen != 512)
 			die_horribly(AH, modulename, "input file does not appear to be a valid archive (too short?)\n");
@@ -1952,6 +1963,8 @@ _allocAH(const char *FileSpec, const ArchiveFormat fmt,
 
 	AH->mode = mode;
 	AH->compression = compression;
+
+	memset(&(AH->sqlparse), 0, sizeof(AH->sqlparse));
 
 	/* Open stdout with no compression for AH output handle */
 	AH->gzOut = 0;
@@ -4057,7 +4070,8 @@ CloneArchive(ArchiveHandle *AH)
 	clone = (ArchiveHandle *) pg_malloc(sizeof(ArchiveHandle));
 	memcpy(clone, AH, sizeof(ArchiveHandle));
 
-	/* Handle format-independent fields ... none at the moment */
+	/* Handle format-independent fields */
+	memset(&(clone->sqlparse), 0, sizeof(clone->sqlparse));
 
 	/* The clone will have its own connection, so disregard connection state */
 	clone->connection = NULL;
@@ -4150,7 +4164,9 @@ DeCloneArchive(ArchiveHandle *AH)
 	/* Clear format-specific state */
 	(AH->DeClonePtr) (AH);
 
-	/* Clear state allocated by CloneArchive ... none at the moment */
+	/* Clear state allocated by CloneArchive */
+	if (AH->sqlparse.curCmd)
+		destroyPQExpBuffer(AH->sqlparse.curCmd);
 
 	/* Clear any connection-local state */
 	if (AH->currUser)

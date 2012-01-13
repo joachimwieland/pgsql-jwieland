@@ -153,11 +153,32 @@ typedef size_t (*CustomOutPtr) (struct _archiveHandle * AH, const void *buf, siz
 
 typedef enum
 {
+	SQL_SCAN = 0,				/* normal */
+	SQL_IN_SINGLE_QUOTE,		/* '...' literal */
+	SQL_IN_DOUBLE_QUOTE			/* "..." identifier */
+} sqlparseState;
+
+typedef struct
+{
+	sqlparseState state;		/* see above */
+	bool		backSlash;		/* next char is backslash quoted? */
+	PQExpBuffer curCmd;			/* incomplete line (NULL if not created) */
+} sqlparseInfo;
+
+typedef enum
+{
 	STAGE_NONE = 0,
 	STAGE_INITIALIZING,
 	STAGE_PROCESSING,
 	STAGE_FINALIZING
 } ArchiverStage;
+
+typedef enum
+{
+	OUTPUT_SQLCMDS = 0,			/* emitting general SQL commands */
+	OUTPUT_COPYDATA,			/* writing COPY data */
+	OUTPUT_OTHERDATA			/* writing data as INSERT commands */
+} ArchiverOutput;
 
 typedef enum
 {
@@ -187,6 +208,7 @@ typedef struct _archiveHandle
 	ArchiveFormat format;		/* Archive format */
 
 	bool		is_clone;		/* have we been cloned ? */
+	sqlparseInfo sqlparse;		/* state for parsing INSERT data */
 
 	time_t		createDate;		/* Date archive created */
 
@@ -247,7 +269,7 @@ typedef struct _archiveHandle
 	PGconn	   *connection;
 	int			connectToDB;	/* Flag to indicate if direct DB connection is
 								 * required */
-	bool		writingCopyData;	/* True when we are sending COPY data */
+	ArchiverOutput outputKind;	/* Flag for what we're currently writing */
 	bool		pgCopyIn;		/* Currently in libpq 'COPY IN' mode. */
 
 	int			loFd;			/* BLOB fd */

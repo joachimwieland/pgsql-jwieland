@@ -1034,6 +1034,7 @@ _equalAlterDomainStmt(const AlterDomainStmt *a, const AlterDomainStmt *b)
 	COMPARE_STRING_FIELD(name);
 	COMPARE_NODE_FIELD(def);
 	COMPARE_SCALAR_FIELD(behavior);
+	COMPARE_SCALAR_FIELD(missing_ok);
 
 	return true;
 }
@@ -1159,7 +1160,7 @@ _equalCreateStmt(const CreateStmt *a, const CreateStmt *b)
 }
 
 static bool
-_equalInhRelation(const InhRelation *a, const InhRelation *b)
+_equalTableLikeClause(const TableLikeClause *a, const TableLikeClause *b)
 {
 	COMPARE_NODE_FIELD(relation);
 	COMPARE_SCALAR_FIELD(options);
@@ -2676,8 +2677,8 @@ equal(const void *a, const void *b)
 		case T_CreateStmt:
 			retval = _equalCreateStmt(a, b);
 			break;
-		case T_InhRelation:
-			retval = _equalInhRelation(a, b);
+		case T_TableLikeClause:
+			retval = _equalTableLikeClause(a, b);
 			break;
 		case T_DefineStmt:
 			retval = _equalDefineStmt(a, b);
