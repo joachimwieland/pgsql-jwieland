@@ -2033,7 +2033,6 @@ WriteDataChunks(ArchiveHandle *AH, ParallelState *pstate)
 		if (!te->hadDumper)
 			continue;
 
-		printf("Dumping table %s (%d)\n", te->tag, te->dumpId);
 		if (pstate && pstate->numWorkers > 1)
 		{
 			/*
@@ -2092,8 +2091,6 @@ WriteToc(ArchiveHandle *AH)
 	TocEntry   *te;
 	char		workbuf[32];
 	int			i;
-
-	/* printf("%d TOC Entries to save\n", AH->tocCount); */
 
 	WriteInt(AH, AH->tocCount);
 
@@ -3459,7 +3456,6 @@ restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate,
 			while ((ret_child = ReapWorkerStatus(pstate, &work_status)) != NO_SLOT)
 			{
 				nTerm++;
-				printf("Marking the child's work as done\n");
 				mark_work_done(AH, &ready_list, ret_child, work_status, pstate);
 			}
 
@@ -4128,12 +4124,6 @@ CloneArchive(ArchiveHandle *AH)
 		pgport = PQport(AH->connection);
 		username = PQuser(AH->connection);
 		encname = pg_encoding_to_char(AH->public.encoding);
-
-		printf("Connecting: Db: %s host %s port %s user %s\n",
-						dbname,
-						pghost ? pghost : "(null)",
-						pgport ? pgport : "(null)",
-						username ? username : "(null)");
 
 		/* this also sets clone->connection */
 		ConnectDatabase((Archive *) clone, dbname, pghost, pgport, username, TRI_NO);

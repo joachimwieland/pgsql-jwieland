@@ -67,7 +67,7 @@ static void PrintStatus(ParallelState *pstate);
 static bool HasEveryWorkerTerminated(ParallelState *pstate);
 
 static void lockTableNoWait(ArchiveHandle *AH, TocEntry *te);
-static void WaitForCommands(ArchiveHandle *AH, int pipefd[2], int worker);
+static void WaitForCommands(ArchiveHandle *AH, int pipefd[2]);
 static char *getMessageFromMaster(ArchiveHandle *AH, int pipefd[2]);
 static void sendMessageToMaster(ArchiveHandle *AH, int pipefd[2], const char *str);
 static char *getMessageFromWorker(ArchiveHandle *AH, ParallelState *pstate,
@@ -276,7 +276,6 @@ select_loop(int maxFd, fd_set *workerset)
 		struct timeval tv = { 0, 250000 };
 		*workerset = saveSet;
 		i = select(maxFd + 1, workerset, NULL, NULL, &tv);
-		printf("select returned %d\n", i);
 
 		if (i == SOCKET_ERROR && WSAGetLastError() == WSAEINTR)
 			continue;
@@ -299,7 +298,6 @@ select_loop(int maxFd, fd_set *workerset)
 		i = select(maxFd + 1, workerset, NULL, NULL, NULL);
 		Assert(i != 0);
 		if (wantAbort && !aborting) {
-			printf("leaving select_loop, wantAbort == 1\n");
 			return NO_SLOT;
 		}
 		if (i < 0 && errno == EINTR)
@@ -317,8 +315,6 @@ select_loop(int maxFd, fd_set *workerset)
 static void
 ShutdownWorkersHard(ArchiveHandle *AH, ParallelState *pstate)
 {
-	printf("All workers going down!!!\n");
-
 #ifdef WIN32
 	/* The workers monitor this event via checkAborting(). */
 	SetEvent(termEvent);
@@ -343,7 +339,6 @@ ShutdownWorkersHard(ArchiveHandle *AH, ParallelState *pstate)
 #endif
 
 	WaitForTerminatingWorkers(AH, pstate);
-	printf("All workers shut down successfully\n");
 }
 
 static void
@@ -395,7 +390,7 @@ SetupWorker(ArchiveHandle *AH, int pipefd[2], int worker,
 
 	Assert(AH->connection != NULL);
 
-	WaitForCommands(AH, pipefd, worker);
+	WaitForCommands(AH, pipefd);
 
 	closesocket(pipefd[PIPE_READ]);
 	closesocket(pipefd[PIPE_WRITE]);
@@ -424,8 +419,6 @@ init_spawned_worker_win32(WorkerInfo *wi)
 	RestoreOptions *ropt = wi->ropt;
 
 	AH = CloneArchive(wi->AH);
-
-	printf("My thread handle: %d, master: %d\n", GetCurrentThreadId(), tMasterThreadId);
 
 	free(wi);
 	SetupWorker(AH, pipefd, worker, ropt);
@@ -768,7 +761,6 @@ ShutdownWorkersSoft(ArchiveHandle *AH, ParallelState *pstate, bool do_wait)
 		return;
 
 	WaitForTerminatingWorkers(AH, pstate);
-	printf("All workers terminated\n");
 }
 
 /*
@@ -796,25 +788,21 @@ ShutdownConnection(PGconn **conn)
 	Assert(conn != NULL);
 	Assert(*conn != NULL);
 
-	if (PQisBusy(*conn))
+	if ((cancel = PQgetCancel(*conn)))
 	{
-		if ((cancel = PQgetCancel(*conn)))
-		{
-			PQcancel(cancel, errbuf, sizeof(errbuf));
-			PQfreeCancel(cancel);
-		}
-
-		/* give the server a little while */
-		for (i = 0; i < 10; i++)
-		{
-			PQconsumeInput(*conn);
-			printf("busy in [%d]: %d\n", getpid(), PQisBusy(*conn));
-			if (!PQisBusy(*conn))
-				break;
-			pg_usleep((SHUTDOWN_GRACE_PERIOD / 10) * 1000);
-		}
+		PQcancel(cancel, errbuf, sizeof(errbuf));
+		PQfreeCancel(cancel);
 	}
-	printf("Finishing in [%d], busy: %d\n", getpid(), PQisBusy(*conn));
+
+	/* give the server a little while */
+	for (i = 0; i < 10; i++)
+	{
+		PQconsumeInput(*conn);
+		if (!PQisBusy(*conn))
+			break;
+		pg_usleep((SHUTDOWN_GRACE_PERIOD / 10) * 1000);
+	}
+
 	PQfinish(*conn);
 	*conn = NULL;
 	return 0;
@@ -872,8 +860,6 @@ lockTableNoWait(ArchiveHandle *AH, TocEntry *te)
 	appendPQExpBuffer(query, "LOCK TABLE %s IN ACCESS SHARE MODE NOWAIT", qualId);
 	PQclear(res);
 
-	printf("Locking table: %s\n", query->data);
-
 	res = PQexec(AH->connection, query->data);
 
 	if (!res || PQresultStatus(res) != PGRES_COMMAND_OK)
@@ -894,7 +880,7 @@ lockTableNoWait(ArchiveHandle *AH, TocEntry *te)
  * exit.
  */
 static void
-WaitForCommands(ArchiveHandle *AH, int pipefd[2], int worker /* XXX remove me */)
+WaitForCommands(ArchiveHandle *AH, int pipefd[2])
 {
 	char	   *command;
 	DumpId		dumpId;
@@ -905,14 +891,6 @@ WaitForCommands(ArchiveHandle *AH, int pipefd[2], int worker /* XXX remove me */
 	for(;;)
 	{
 		command = getMessageFromMaster(AH, pipefd);
-		printf("Got message %s from master in worker %d\n", command, worker);
-
-/* XXX
-		if (worker == 5) {
-			die_horribly(AH, modulename, "Null bock mehr\n");
-		}
-  XXX
-*/
 
 		if (messageStartsWith(command, "DUMP "))
 		{
@@ -920,9 +898,7 @@ WaitForCommands(ArchiveHandle *AH, int pipefd[2], int worker /* XXX remove me */
 			sscanf(command + strlen("DUMP "), "%d%n", &dumpId, &nBytes);
 			Assert(nBytes == strlen(command) - strlen("DUMP "));
 
-			printf("DumpId: %d\n", dumpId);
 			te = getTocEntryByDumpId(AH, dumpId);
-			printf("got TocEntry for %s\n", te->tag);
 			Assert(te != NULL);
 
 			/*
@@ -960,13 +936,11 @@ WaitForCommands(ArchiveHandle *AH, int pipefd[2], int worker /* XXX remove me */
 			 */
 			str = (AH->WorkerJobRestorePtr)(AH, te);
 			Assert(AH->connection != NULL);
-			printf("Got from workerjob: %s\n", str);
 			sendMessageToMaster(AH, pipefd, str);
 			free(str);
 		}
 		else if (messageEquals(command, "TERMINATE"))
 		{
-			printf("Terminating in %d\n", getpid());
 			PQfinish(AH->connection);
 			AH->connection = NULL;
 			return;
@@ -997,7 +971,6 @@ ListenToWorkers(ArchiveHandle *AH, ParallelState *pstate, bool do_wait)
 	int			worker;
 	char	   *msg;
 
-	printf("In ListenToWorkers()\n");
 	msg = getMessageFromWorker(AH, pstate, do_wait, &worker);
 
 	if (!msg)
@@ -1088,7 +1061,7 @@ EnsureIdleWorker(ArchiveHandle *AH, ParallelState *pstate)
 		while ((ret_worker = ReapWorkerStatus(pstate, &work_status)) != NO_SLOT)
 		{
 			if (work_status != 0)
-				die_horribly(AH, modulename, "Error processing a parallel work item.\n" /* XXX \n or not ? */);
+				die_horribly(AH, modulename, "Error processing a parallel work item.\n");
 
 			nTerm++;
 		}
@@ -1154,8 +1127,6 @@ static void
 sendMessageToMaster(ArchiveHandle *AH, int pipefd[2], const char *str)
 {
 	int			len = strlen(str) + 1;
-
-	printf("Sending message %s to master on fd %d\n", str, pipefd[PIPE_WRITE]);
 
 	if (pipewrite(pipefd[PIPE_WRITE], str, len) != len)
 		die_horribly(AH, modulename,
@@ -1224,7 +1195,6 @@ getMessageFromWorker(ArchiveHandle *AH, ParallelState *pstate, bool do_wait, int
 		*worker = i;
 		return msg;
 	}
-	printf("Nobody was ready...\n");
 	Assert(false);
 	return NULL;
 }
@@ -1238,8 +1208,6 @@ static void
 sendMessageToWorker(ArchiveHandle *AH, ParallelState *pstate, int worker, const char *str)
 {
 	int			len = strlen(str) + 1;
-
-	printf("Sending message %s to worker %d on fd %d\n", str, worker, pstate->parallelSlot[worker].pipeWrite);
 
 	if (pipewrite(pstate->parallelSlot[worker].pipeWrite, str, len) != len)
 		die_horribly(AH, modulename,
@@ -1271,8 +1239,7 @@ readMessageFromPipe(int fd, bool do_wait)
 	 * internal states for different file descriptors.
 	 */
 
-	/* XXX set this to some reasonable initial value for a release */
-	bufsize = 1;
+	bufsize = 64;  /* could be any number */
 	msg = (char *) pg_malloc(bufsize);
 
 	msgsize = 0;
@@ -1308,14 +1275,14 @@ readMessageFromPipe(int fd, bool do_wait)
 		Assert(ret == 1);
 
 		if (msg[msgsize] == '\0') {
-			printf("Got message %s from fd %d\n", msg, fd);
 			return msg;
 		}
 
 		msgsize++;
 		if (msgsize == bufsize)
 		{
-			bufsize += 10;
+			/* could be any number */
+			bufsize += 16;
 			msg = (char *) realloc(msg, bufsize);
 		}
 	}

@@ -163,11 +163,6 @@ ReadDataFromArchive(ArchiveHandle *AH, int compression, ReadFunc readF)
 
 	ParseCompressionOption(compression, &alg, NULL);
 
-	/*
-	 * Are we aborting?
-	 */
-	checkAborting(AH);
-
 	if (alg == COMPR_ALG_NONE)
 		ReadDataFromArchiveNone(AH, readF);
 	if (alg == COMPR_ALG_LIBZ)
@@ -187,9 +182,7 @@ size_t
 WriteDataToArchive(ArchiveHandle *AH, CompressorState *cs,
 				   const void *data, size_t dLen)
 {
-	/*
-	 * Are we aborting?
-	 */
+	/* Are we aborting? */
 	checkAborting(AH);
 
 	switch (cs->comprAlg)
@@ -361,6 +354,9 @@ ReadDataFromArchiveZlib(ArchiveHandle *AH, ReadFunc readF)
 	/* no minimal chunk size for zlib */
 	while ((cnt = readF(AH, &buf, &buflen)))
 	{
+		/* Are we aborting? */
+		checkAborting(AH);
+
 		zp->next_in = (void *) buf;
 		zp->avail_in = cnt;
 
@@ -421,6 +417,9 @@ ReadDataFromArchiveNone(ArchiveHandle *AH, ReadFunc readF)
 
 	while ((cnt = readF(AH, &buf, &buflen)))
 	{
+		/* Are we aborting? */
+		checkAborting(AH);
+
 		ahwrite(buf, 1, cnt, AH);
 	}
 

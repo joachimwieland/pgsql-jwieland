@@ -1027,10 +1027,8 @@ SetupConnection(Archive *AHX, const char *dumpencoding, const char *use_role)
 			 * Note: If we have it, we always use it, you cannot switch it off
 			 * then.
 			 */
-			if (AHX->remoteVersion >= 90200) {
+			if (AHX->remoteVersion >= 90200)
 				AH->sync_snapshot_id = get_synchronized_snapshot(AH);
-				printf("snapshotid: %s\n", AH->sync_snapshot_id);
-			}
 		}
 	}
 }
