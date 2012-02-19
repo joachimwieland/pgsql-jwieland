@@ -900,6 +900,9 @@ extern Datum macaddr_eq(PG_FUNCTION_ARGS);
 extern Datum macaddr_ge(PG_FUNCTION_ARGS);
 extern Datum macaddr_gt(PG_FUNCTION_ARGS);
 extern Datum macaddr_ne(PG_FUNCTION_ARGS);
+extern Datum macaddr_not(PG_FUNCTION_ARGS);
+extern Datum macaddr_and(PG_FUNCTION_ARGS);
+extern Datum macaddr_or(PG_FUNCTION_ARGS);
 extern Datum macaddr_trunc(PG_FUNCTION_ARGS);
 extern Datum hashmacaddr(PG_FUNCTION_ARGS);
 
@@ -910,6 +913,7 @@ extern Datum numeric_recv(PG_FUNCTION_ARGS);
 extern Datum numeric_send(PG_FUNCTION_ARGS);
 extern Datum numerictypmodin(PG_FUNCTION_ARGS);
 extern Datum numerictypmodout(PG_FUNCTION_ARGS);
+extern Datum numeric_transform(PG_FUNCTION_ARGS);
 extern Datum numeric (PG_FUNCTION_ARGS);
 extern Datum numeric_abs(PG_FUNCTION_ARGS);
 extern Datum numeric_uminus(PG_FUNCTION_ARGS);

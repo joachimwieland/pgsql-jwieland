@@ -4424,6 +4424,18 @@
      </row>
 
      <row>
+      <entry><structfield>proleakproof</structfield></entry>
+      <entry><type>bool</type></entry>
+      <entry></entry>
+      <entry>
+       The function has no side effects.  No information about the
+       arguments is conveyed except via the return value.  Any function
+       that might throw an error depending on the values of its arguments
+       is not leakproof.
+      </entry>
+     </row>
+
+     <row>
       <entry><structfield>proisstrict</structfield></entry>
       <entry><type>bool</type></entry>
       <entry></entry>
@@ -7320,7 +7332,7 @@
 
   <para>
    The <structfield>pid</structfield> column can be joined to the
-   <structfield>procpid</structfield> column of the
+   <structfield>pid</structfield> column of the
    <structname>pg_stat_activity</structname> view to get more
    information on the session holding or waiting to hold each lock.
    Also, if you are using prepared transactions, the

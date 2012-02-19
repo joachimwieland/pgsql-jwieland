@@ -772,7 +772,8 @@ inheritance_planner(PlannerInfo *root)
 		 * then fool around with subquery RTEs.
 		 */
 		subroot.parse = (Query *)
-			adjust_appendrel_attrs((Node *) parse,
+			adjust_appendrel_attrs(root,
+								   (Node *) parse,
 								   appinfo);
 
 		/*
@@ -835,8 +836,6 @@ inheritance_planner(PlannerInfo *root)
 		Assert(subroot.join_info_list == NIL);
 		/* and we haven't created PlaceHolderInfos, either */
 		Assert(subroot.placeholder_list == NIL);
-		/* build a separate list of initplans for each child */
-		subroot.init_plans = NIL;
 		/* hack to mark target relation as an inheritance partition */
 		subroot.hasInheritedTarget = true;
 
@@ -883,7 +882,7 @@ inheritance_planner(PlannerInfo *root)
 		save_rel_array = subroot.simple_rel_array;
 
 		/* Make sure any initplans from this rel get into the outer list */
-		root->init_plans = list_concat(root->init_plans, subroot.init_plans);
+		root->init_plans = subroot.init_plans;
 
 		/* Build list of target-relation RT indexes */
 		resultRelations = lappend_int(resultRelations, appinfo->child_relid);
@@ -3297,7 +3296,8 @@ plan_cluster_use_sort(Oid tableOid, Oid indexOid)
 	/* Estimate the cost of index scan */
 	indexScanPath = create_index_path(root, indexInfo,
 									  NIL, NIL, NIL, NIL, NIL,
-									  ForwardScanDirection, false, NULL);
+									  ForwardScanDirection, false,
+									  NULL, 1.0);
 
 	return (seqScanAndSortPath.total_cost < indexScanPath->path.total_cost);
 }

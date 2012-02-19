@@ -797,22 +797,13 @@ archive_cleanup_command = 'pg_archivecleanup /path/to/archive %r'
      It is very important that the access privileges for replication be set up
      so that only trusted users can read the WAL stream, because it is
      easy to extract privileged information from it.  Standby servers must
-     authenticate to the primary as an account that has the
-     <literal>REPLICATION</> privilege. So a role with the
-     <literal>REPLICATION</> and <literal>LOGIN</> privileges needs to be
-     created on the primary.
+     authenticate to the primary as a superuser or an account that has the
+     <literal>REPLICATION</> privilege. It is recommended to create a
+     dedicated user account with <literal>REPLICATION</> and <literal>LOGIN</>
+     privileges for replication. While <literal>REPLICATION</> privilege gives
+     very high permissions, it does not allow the user to modify any data on
+     the primary system, which the <literal>SUPERUSER</> privilege does.
     </para>
-
-    <note>
-     <para>
-      It is recommended that a dedicated user account is used for replication.
-      While the <literal>REPLICATION</> privilege is granted to superuser
-      accounts by default, it is not recommended to use superuser accounts
-      for replication. While <literal>REPLICATION</> privilege gives very high
-      permissions, it does not allow the user to modify any data on the
-      primary system, which the <literal>SUPERUSER</> privilege does.
-     </para>
-    </note>
 
     <para>
      Client authentication for replication is controlled by a
@@ -1020,6 +1011,16 @@ primary_conninfo = 'host=192.168.1.50 port=5432 user=foo password=foopass'
    </para>
 
    <para>
+    Setting <varname>synchronous_commit</> to <literal>write</> will
+    cause each commit to wait for confirmation that the standby has received
+    the commit record to memory. This provides a lower level of durability
+    than <literal>on</> does. However, it's a practically useful setting
+    because it can decrease the response time for the transaction, and causes
+    no data loss unless both the primary and the standby crashes and
+    the database of the primary gets corrupted at the same time.
+   </para>
+
+   <para>
     Users will stop waiting if a fast shutdown is requested.  However, as
     when using asynchronous replication, the server will does not fully
     shutdown until all outstanding WAL records are transferred to the currently
@@ -1074,13 +1075,13 @@ primary_conninfo = 'host=192.168.1.50 port=5432 user=foo password=foopass'
 
    <para>
     Commits made when <varname>synchronous_commit</> is set to <literal>on</>
-    will wait until the sync standby responds. The response may never occur
-    if the last, or only, standby should crash.
+    or <literal>write</> will wait until the synchronous standby responds. The response
+    may never occur if the last, or only, standby should crash.
    </para>
 
    <para>
     The best solution for avoiding data loss is to ensure you don't lose
-    your last remaining sync standby. This can be achieved by naming multiple
+    your last remaining synchronous standby. This can be achieved by naming multiple
     potential synchronous standbys using <varname>synchronous_standby_names</>.
     The first named standby will be used as the synchronous standby. Standbys
     listed after this will take over the role of synchronous standby if the

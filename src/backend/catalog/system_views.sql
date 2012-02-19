@@ -520,7 +520,7 @@ CREATE VIEW pg_stat_activity AS
     SELECT
             S.datid AS datid,
             D.datname AS datname,
-            S.procpid,
+            S.pid,
             S.usesysid,
             U.rolname AS usename,
             S.application_name,
@@ -530,15 +530,17 @@ CREATE VIEW pg_stat_activity AS
             S.backend_start,
             S.xact_start,
             S.query_start,
+            S.state_change,
             S.waiting,
-            S.current_query
+            S.state,
+            S.query
     FROM pg_database D, pg_stat_get_activity(NULL) AS S, pg_authid U
     WHERE S.datid = D.oid AND
             S.usesysid = U.oid;
 
 CREATE VIEW pg_stat_replication AS
     SELECT
-            S.procpid,
+            S.pid,
             S.usesysid,
             U.rolname AS usename,
             S.application_name,
@@ -556,7 +558,7 @@ CREATE VIEW pg_stat_replication AS
     FROM pg_stat_get_activity(NULL) AS S, pg_authid U,
             pg_stat_get_wal_senders() AS W
     WHERE S.usesysid = U.oid AND
-            S.procpid = W.procpid;
+            S.pid = W.pid;
 
 CREATE VIEW pg_stat_database AS
     SELECT
@@ -574,6 +576,9 @@ CREATE VIEW pg_stat_database AS
             pg_stat_get_db_tuples_updated(D.oid) AS tup_updated,
             pg_stat_get_db_tuples_deleted(D.oid) AS tup_deleted,
             pg_stat_get_db_conflict_all(D.oid) AS conflicts,
+            pg_stat_get_db_temp_files(D.oid) AS temp_files,
+            pg_stat_get_db_temp_bytes(D.oid) AS temp_bytes,
+            pg_stat_get_db_deadlocks(D.oid) AS deadlocks,
             pg_stat_get_db_stat_reset_time(D.oid) AS stats_reset
     FROM pg_database D;
 

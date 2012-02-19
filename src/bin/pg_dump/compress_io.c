@@ -55,6 +55,7 @@
 #include "compress_io.h"
 #include "dumpmem.h"
 #include "parallel.h"
+#include "dumputils.h"
 
 /*----------------------
  * Compressor API
@@ -110,8 +111,8 @@ ParseCompressionOption(int compression, CompressionAlgorithm *alg, int *level)
 		*alg = COMPR_ALG_NONE;
 	else
 	{
-		die_horribly(NULL, modulename, "Invalid compression code: %d\n",
-					 compression);
+		exit_horribly(modulename, "Invalid compression code: %d\n",
+					  compression);
 		*alg = COMPR_ALG_NONE;	/* keep compiler quiet */
 	}
 
@@ -134,7 +135,7 @@ AllocateCompressor(int compression, WriteFunc writeF)
 
 #ifndef HAVE_LIBZ
 	if (alg == COMPR_ALG_LIBZ)
-		die_horribly(NULL, modulename, "not built with zlib support\n");
+		exit_horribly(modulename, "not built with zlib support\n");
 #endif
 
 	cs = (CompressorState *) pg_calloc(1, sizeof(CompressorState));
@@ -170,7 +171,7 @@ ReadDataFromArchive(ArchiveHandle *AH, int compression, ReadFunc readF)
 #ifdef HAVE_LIBZ
 		ReadDataFromArchiveZlib(AH, readF);
 #else
-		die_horribly(NULL, modulename, "not built with zlib support\n");
+		exit_horribly(modulename, "not built with zlib support\n");
 #endif
 	}
 }
@@ -191,7 +192,7 @@ WriteDataToArchive(ArchiveHandle *AH, CompressorState *cs,
 #ifdef HAVE_LIBZ
 			return WriteDataToArchiveZlib(AH, cs, data, dLen);
 #else
-			die_horribly(NULL, modulename, "not built with zlib support\n");
+			exit_horribly(modulename, "not built with zlib support\n");
 #endif
 		case COMPR_ALG_NONE:
 			return WriteDataToArchiveNone(AH, cs, data, dLen);
@@ -238,9 +239,9 @@ InitCompressorZlib(CompressorState *cs, int level)
 	cs->zlibOutSize = ZLIB_OUT_SIZE;
 
 	if (deflateInit(zp, level) != Z_OK)
-		die_horribly(NULL, modulename,
-					 "could not initialize compression library: %s\n",
-					 zp->msg);
+		exit_horribly(modulename,
+					  "could not initialize compression library: %s\n",
+					  zp->msg);
 
 	/* Just be paranoid - maybe End is called after Start, with no Write */
 	zp->next_out = (void *) cs->zlibOut;
@@ -347,9 +348,9 @@ ReadDataFromArchiveZlib(ArchiveHandle *AH, ReadFunc readF)
 	out = pg_malloc(ZLIB_OUT_SIZE + 1);
 
 	if (inflateInit(zp) != Z_OK)
-		die_horribly(NULL, modulename,
-					 "could not initialize compression library: %s\n",
-					 zp->msg);
+		exit_horribly(modulename,
+					  "could not initialize compression library: %s\n",
+					  zp->msg);
 
 	/* no minimal chunk size for zlib */
 	while ((cnt = readF(AH, &buf, &buflen)))
@@ -524,7 +525,7 @@ cfopen_write(const char *path, const char *mode, int compression)
 		fp = cfopen(fname, mode, 1);
 		free(fname);
 #else
-		die_horribly(NULL, modulename, "not built with zlib support\n");
+		exit_horribly(modulename, "not built with zlib support\n");
 		fp = NULL;				/* keep compiler quiet */
 #endif
 	}
@@ -551,7 +552,7 @@ cfopen(const char *path, const char *mode, int compression)
 			fp = NULL;
 		}
 #else
-		die_horribly(NULL, modulename, "not built with zlib support\n");
+		exit_horribly(modulename, "not built with zlib support\n");
 #endif
 	}
 	else

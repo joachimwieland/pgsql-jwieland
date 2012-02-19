@@ -81,7 +81,7 @@ typedef enum
  *	We may want to have some more user-readable data, but in the mean
  *	time this gives us some abstraction and type checking.
  */
-typedef struct _Archive
+struct Archive
 {
 	int			verbose;
 	char	   *remoteVersionStr;		/* server's version string */
@@ -101,7 +101,7 @@ typedef struct _Archive
 	int			n_errors;		/* number of errors (if no die) */
 
 	/* The rest is private */
-} Archive;
+};
 
 typedef int (*DataDumperPtr) (Archive *AH, void *userArg);
 
@@ -119,7 +119,7 @@ typedef struct _restoreOptions
 	char	   *use_role;		/* Issue SET ROLE to this */
 	int			dataOnly;
 	int			dropSchema;
-	char	   *filename;
+	const char *filename;
 	int			schemaOnly;
 	int         dumpSections;
 	int			verbose;
@@ -160,16 +160,15 @@ typedef struct _restoreOptions
  * Main archiver interface.
  */
 
-
-/* Lets the archive know we have a DB connection to shutdown if it dies */
-
-PGconn *ConnectDatabase(Archive *AHX,
+extern void ConnectDatabase(Archive *AH,
 				const char *dbname,
 				const char *pghost,
 				const char *pgport,
 				const char *username,
 				enum trivalue prompt_password);
-PGconn *CloneDatabaseConnection(Archive *AHX);
+
+extern void DisconnectDatabase(Archive *AHX);
+extern PGconn *GetConnection(Archive *AHX);
 
 /* Called to add a TOC entry */
 extern void ArchiveEntry(Archive *AHX,

@@ -370,7 +370,7 @@ static void processCASbits(int cas_bits, int location, const char *constrType,
 
 %type <istmt>	insert_rest
 
-%type <vsetstmt> set_rest SetResetClause
+%type <vsetstmt> set_rest set_rest_more SetResetClause FunctionSetResetClause
 
 %type <node>	TableElement TypedTableElement ConstraintElem TableFuncElement
 				ForeignTableElement
@@ -526,7 +526,7 @@ static void processCASbits(int cas_bits, int location, const char *constrType,
 
 	KEY
 
-	LABEL LANGUAGE LARGE_P LAST_P LC_COLLATE_P LC_CTYPE_P LEADING
+	LABEL LANGUAGE LARGE_P LAST_P LC_COLLATE_P LC_CTYPE_P LEADING LEAKPROOF
 	LEAST LEFT LEVEL LIKE LIMIT LISTEN LOAD LOCAL LOCALTIME LOCALTIMESTAMP
 	LOCATION LOCK_P
 
@@ -1227,7 +1227,27 @@ VariableSetStmt:
 				}
 		;
 
-set_rest:	/* Generic SET syntaxes: */
+set_rest:
+			TRANSACTION transaction_mode_list
+				{
+					VariableSetStmt *n = makeNode(VariableSetStmt);
+					n->kind = VAR_SET_MULTI;
+					n->name = "TRANSACTION";
+					n->args = $2;
+					$$ = n;
+				}
+			| SESSION CHARACTERISTICS AS TRANSACTION transaction_mode_list
+				{
+					VariableSetStmt *n = makeNode(VariableSetStmt);
+					n->kind = VAR_SET_MULTI;
+					n->name = "SESSION CHARACTERISTICS";
+					n->args = $5;
+					$$ = n;
+				}
+			| set_rest_more
+			;
+
+set_rest_more:	/* Generic SET syntaxes: */
 			var_name TO var_list
 				{
 					VariableSetStmt *n = makeNode(VariableSetStmt);
@@ -1275,22 +1295,6 @@ set_rest:	/* Generic SET syntaxes: */
 						n->args = list_make1($3);
 					else
 						n->kind = VAR_SET_DEFAULT;
-					$$ = n;
-				}
-			| TRANSACTION transaction_mode_list
-				{
-					VariableSetStmt *n = makeNode(VariableSetStmt);
-					n->kind = VAR_SET_MULTI;
-					n->name = "TRANSACTION";
-					n->args = $2;
-					$$ = n;
-				}
-			| SESSION CHARACTERISTICS AS TRANSACTION transaction_mode_list
-				{
-					VariableSetStmt *n = makeNode(VariableSetStmt);
-					n->kind = VAR_SET_MULTI;
-					n->name = "SESSION CHARACTERISTICS";
-					n->args = $5;
 					$$ = n;
 				}
 			| CATALOG_P Sconst
@@ -1512,6 +1516,12 @@ SetResetClause:
 			| VariableResetStmt				{ $$ = (VariableSetStmt *) $1; }
 		;
 
+/* SetResetClause allows SET or RESET without LOCAL */
+FunctionSetResetClause:
+			SET set_rest_more				{ $$ = $2; }
+			| VariableResetStmt				{ $$ = (VariableSetStmt *) $1; }
+		;
+
 
 VariableShowStmt:
 			SHOW var_name
@@ -1629,6 +1639,16 @@ AlterTableStmt:
 					n->relation = $3;
 					n->cmds = $4;
 					n->relkind = OBJECT_TABLE;
+					n->missing_ok = false;
+					$$ = (Node *)n;
+				}
+		|	ALTER TABLE IF_P EXISTS relation_expr alter_table_cmds
+				{
+					AlterTableStmt *n = makeNode(AlterTableStmt);
+					n->relation = $5;
+					n->cmds = $6;
+					n->relkind = OBJECT_TABLE;
+					n->missing_ok = true;
 					$$ = (Node *)n;
 				}
 		|	ALTER INDEX qualified_name alter_table_cmds
@@ -1637,6 +1657,16 @@ AlterTableStmt:
 					n->relation = $3;
 					n->cmds = $4;
 					n->relkind = OBJECT_INDEX;
+					n->missing_ok = false;
+					$$ = (Node *)n;
+				}
+		|	ALTER INDEX IF_P EXISTS qualified_name alter_table_cmds
+				{
+					AlterTableStmt *n = makeNode(AlterTableStmt);
+					n->relation = $5;
+					n->cmds = $6;
+					n->relkind = OBJECT_INDEX;
+					n->missing_ok = true;
 					$$ = (Node *)n;
 				}
 		|	ALTER SEQUENCE qualified_name alter_table_cmds
@@ -1645,6 +1675,16 @@ AlterTableStmt:
 					n->relation = $3;
 					n->cmds = $4;
 					n->relkind = OBJECT_SEQUENCE;
+					n->missing_ok = false;
+					$$ = (Node *)n;
+				}
+		|	ALTER SEQUENCE IF_P EXISTS qualified_name alter_table_cmds
+				{
+					AlterTableStmt *n = makeNode(AlterTableStmt);
+					n->relation = $5;
+					n->cmds = $6;
+					n->relkind = OBJECT_SEQUENCE;
+					n->missing_ok = true;
 					$$ = (Node *)n;
 				}
 		|	ALTER VIEW qualified_name alter_table_cmds
@@ -1653,6 +1693,16 @@ AlterTableStmt:
 					n->relation = $3;
 					n->cmds = $4;
 					n->relkind = OBJECT_VIEW;
+					n->missing_ok = false;
+					$$ = (Node *)n;
+				}
+		|	ALTER VIEW IF_P EXISTS qualified_name alter_table_cmds
+				{
+					AlterTableStmt *n = makeNode(AlterTableStmt);
+					n->relation = $5;
+					n->cmds = $6;
+					n->relkind = OBJECT_VIEW;
+					n->missing_ok = true;
 					$$ = (Node *)n;
 				}
 		;
@@ -3068,8 +3118,18 @@ AlterSeqStmt:
 					AlterSeqStmt *n = makeNode(AlterSeqStmt);
 					n->sequence = $3;
 					n->options = $4;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
+			| ALTER SEQUENCE IF_P EXISTS qualified_name SeqOptList
+				{
+					AlterSeqStmt *n = makeNode(AlterSeqStmt);
+					n->sequence = $5;
+					n->options = $6;
+					n->missing_ok = true;
+					$$ = (Node *)n;
+				}
+
 		;
 
 OptSeqOptList: SeqOptList							{ $$ = $1; }
@@ -3906,6 +3966,16 @@ AlterForeignTableStmt:
 					n->relation = $4;
 					n->cmds = $5;
 					n->relkind = OBJECT_FOREIGN_TABLE;
+					n->missing_ok = false;
+					$$ = (Node *)n;
+				}
+			| ALTER FOREIGN TABLE IF_P EXISTS relation_expr alter_table_cmds
+				{
+					AlterTableStmt *n = makeNode(AlterTableStmt);
+					n->relation = $6;
+					n->cmds = $7;
+					n->relkind = OBJECT_FOREIGN_TABLE;
+					n->missing_ok = true;
 					$$ = (Node *)n;
 				}
 		;
@@ -6055,6 +6125,14 @@ common_func_opt_item:
 				{
 					$$ = makeDefElem("security", (Node *)makeInteger(FALSE));
 				}
+			| LEAKPROOF
+				{
+					$$ = makeDefElem("leakproof", (Node *)makeInteger(TRUE));
+				}
+			| NOT LEAKPROOF
+				{
+					$$ = makeDefElem("leakproof", (Node *)makeInteger(FALSE));
+				}
 			| COST NumericOnly
 				{
 					$$ = makeDefElem("cost", (Node *)$2);
@@ -6063,7 +6141,7 @@ common_func_opt_item:
 				{
 					$$ = makeDefElem("rows", (Node *)$2);
 				}
-			| SetResetClause
+			| FunctionSetResetClause
 				{
 					/* we abuse the normal content of a DefElem here */
 					$$ = makeDefElem("set", (Node *)$1);
@@ -6417,6 +6495,7 @@ RenameStmt: ALTER AGGREGATE func_name aggr_args RENAME TO name
 					n->object = $3;
 					n->objarg = $4;
 					n->newname = $7;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 			| ALTER COLLATION any_name RENAME TO name
@@ -6425,6 +6504,7 @@ RenameStmt: ALTER AGGREGATE func_name aggr_args RENAME TO name
 					n->renameType = OBJECT_COLLATION;
 					n->object = $3;
 					n->newname = $6;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 			| ALTER CONVERSION_P any_name RENAME TO name
@@ -6433,6 +6513,7 @@ RenameStmt: ALTER AGGREGATE func_name aggr_args RENAME TO name
 					n->renameType = OBJECT_CONVERSION;
 					n->object = $3;
 					n->newname = $6;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 			| ALTER DATABASE database_name RENAME TO database_name
@@ -6441,6 +6522,7 @@ RenameStmt: ALTER AGGREGATE func_name aggr_args RENAME TO name
 					n->renameType = OBJECT_DATABASE;
 					n->subname = $3;
 					n->newname = $6;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 			| ALTER DOMAIN_P any_name RENAME TO name
@@ -6449,6 +6531,7 @@ RenameStmt: ALTER AGGREGATE func_name aggr_args RENAME TO name
 					n->renameType = OBJECT_DOMAIN;
 					n->object = $3;
 					n->newname = $6;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 			| ALTER FOREIGN DATA_P WRAPPER name RENAME TO name
@@ -6457,6 +6540,7 @@ RenameStmt: ALTER AGGREGATE func_name aggr_args RENAME TO name
 					n->renameType = OBJECT_FDW;
 					n->subname = $5;
 					n->newname = $8;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 			| ALTER FUNCTION function_with_argtypes RENAME TO name
@@ -6466,6 +6550,7 @@ RenameStmt: ALTER AGGREGATE func_name aggr_args RENAME TO name
 					n->object = $3->funcname;
 					n->objarg = $3->funcargs;
 					n->newname = $6;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 			| ALTER GROUP_P RoleId RENAME TO RoleId
@@ -6474,6 +6559,7 @@ RenameStmt: ALTER AGGREGATE func_name aggr_args RENAME TO name
 					n->renameType = OBJECT_ROLE;
 					n->subname = $3;
 					n->newname = $6;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 			| ALTER opt_procedural LANGUAGE name RENAME TO name
@@ -6482,6 +6568,7 @@ RenameStmt: ALTER AGGREGATE func_name aggr_args RENAME TO name
 					n->renameType = OBJECT_LANGUAGE;
 					n->subname = $4;
 					n->newname = $7;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 			| ALTER OPERATOR CLASS any_name USING access_method RENAME TO name
@@ -6491,6 +6578,7 @@ RenameStmt: ALTER AGGREGATE func_name aggr_args RENAME TO name
 					n->object = $4;
 					n->subname = $6;
 					n->newname = $9;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 			| ALTER OPERATOR FAMILY any_name USING access_method RENAME TO name
@@ -6500,6 +6588,7 @@ RenameStmt: ALTER AGGREGATE func_name aggr_args RENAME TO name
 					n->object = $4;
 					n->subname = $6;
 					n->newname = $9;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 			| ALTER SCHEMA name RENAME TO name
@@ -6508,6 +6597,7 @@ RenameStmt: ALTER AGGREGATE func_name aggr_args RENAME TO name
 					n->renameType = OBJECT_SCHEMA;
 					n->subname = $3;
 					n->newname = $6;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 			| ALTER SERVER name RENAME TO name
@@ -6516,6 +6606,7 @@ RenameStmt: ALTER AGGREGATE func_name aggr_args RENAME TO name
 					n->renameType = OBJECT_FOREIGN_SERVER;
 					n->subname = $3;
 					n->newname = $6;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 			| ALTER TABLE relation_expr RENAME TO name
@@ -6525,6 +6616,17 @@ RenameStmt: ALTER AGGREGATE func_name aggr_args RENAME TO name
 					n->relation = $3;
 					n->subname = NULL;
 					n->newname = $6;
+					n->missing_ok = false;
+					$$ = (Node *)n;
+				}
+			| ALTER TABLE IF_P EXISTS relation_expr RENAME TO name
+				{
+					RenameStmt *n = makeNode(RenameStmt);
+					n->renameType = OBJECT_TABLE;
+					n->relation = $5;
+					n->subname = NULL;
+					n->newname = $8;
+					n->missing_ok = true;
 					$$ = (Node *)n;
 				}
 			| ALTER SEQUENCE qualified_name RENAME TO name
@@ -6534,6 +6636,17 @@ RenameStmt: ALTER AGGREGATE func_name aggr_args RENAME TO name
 					n->relation = $3;
 					n->subname = NULL;
 					n->newname = $6;
+					n->missing_ok = false;
+					$$ = (Node *)n;
+				}
+			| ALTER SEQUENCE IF_P EXISTS qualified_name RENAME TO name
+				{
+					RenameStmt *n = makeNode(RenameStmt);
+					n->renameType = OBJECT_SEQUENCE;
+					n->relation = $5;
+					n->subname = NULL;
+					n->newname = $8;
+					n->missing_ok = true;
 					$$ = (Node *)n;
 				}
 			| ALTER VIEW qualified_name RENAME TO name
@@ -6543,6 +6656,17 @@ RenameStmt: ALTER AGGREGATE func_name aggr_args RENAME TO name
 					n->relation = $3;
 					n->subname = NULL;
 					n->newname = $6;
+					n->missing_ok = false;
+					$$ = (Node *)n;
+				}
+			| ALTER VIEW IF_P EXISTS qualified_name RENAME TO name
+				{
+					RenameStmt *n = makeNode(RenameStmt);
+					n->renameType = OBJECT_VIEW;
+					n->relation = $5;
+					n->subname = NULL;
+					n->newname = $8;
+					n->missing_ok = true;
 					$$ = (Node *)n;
 				}
 			| ALTER INDEX qualified_name RENAME TO name
@@ -6552,6 +6676,17 @@ RenameStmt: ALTER AGGREGATE func_name aggr_args RENAME TO name
 					n->relation = $3;
 					n->subname = NULL;
 					n->newname = $6;
+					n->missing_ok = false;
+					$$ = (Node *)n;
+				}
+			| ALTER INDEX IF_P EXISTS qualified_name RENAME TO name
+				{
+					RenameStmt *n = makeNode(RenameStmt);
+					n->renameType = OBJECT_INDEX;
+					n->relation = $5;
+					n->subname = NULL;
+					n->newname = $8;
+					n->missing_ok = true;
 					$$ = (Node *)n;
 				}
 			| ALTER FOREIGN TABLE relation_expr RENAME TO name
@@ -6561,6 +6696,17 @@ RenameStmt: ALTER AGGREGATE func_name aggr_args RENAME TO name
 					n->relation = $4;
 					n->subname = NULL;
 					n->newname = $7;
+					n->missing_ok = false;
+					$$ = (Node *)n;
+				}
+			| ALTER FOREIGN TABLE IF_P EXISTS relation_expr RENAME TO name
+				{
+					RenameStmt *n = makeNode(RenameStmt);
+					n->renameType = OBJECT_FOREIGN_TABLE;
+					n->relation = $6;
+					n->subname = NULL;
+					n->newname = $9;
+					n->missing_ok = true;
 					$$ = (Node *)n;
 				}
 			| ALTER TABLE relation_expr RENAME opt_column name TO name
@@ -6571,6 +6717,18 @@ RenameStmt: ALTER AGGREGATE func_name aggr_args RENAME TO name
 					n->relation = $3;
 					n->subname = $6;
 					n->newname = $8;
+					n->missing_ok = false;
+					$$ = (Node *)n;
+				}
+			| ALTER TABLE IF_P EXISTS relation_expr RENAME opt_column name TO name
+				{
+					RenameStmt *n = makeNode(RenameStmt);
+					n->renameType = OBJECT_COLUMN;
+					n->relationType = OBJECT_TABLE;
+					n->relation = $5;
+					n->subname = $8;
+					n->newname = $10;
+					n->missing_ok = true;
 					$$ = (Node *)n;
 				}
 			| ALTER FOREIGN TABLE relation_expr RENAME opt_column name TO name
@@ -6581,6 +6739,18 @@ RenameStmt: ALTER AGGREGATE func_name aggr_args RENAME TO name
 					n->relation = $4;
 					n->subname = $7;
 					n->newname = $9;
+					n->missing_ok = false;
+					$$ = (Node *)n;
+				}
+			| ALTER FOREIGN TABLE IF_P EXISTS relation_expr RENAME opt_column name TO name
+				{
+					RenameStmt *n = makeNode(RenameStmt);
+					n->renameType = OBJECT_COLUMN;
+					n->relationType = OBJECT_FOREIGN_TABLE;
+					n->relation = $6;
+					n->subname = $9;
+					n->newname = $11;
+					n->missing_ok = true;
 					$$ = (Node *)n;
 				}
 			| ALTER TRIGGER name ON qualified_name RENAME TO name
@@ -6590,6 +6760,7 @@ RenameStmt: ALTER AGGREGATE func_name aggr_args RENAME TO name
 					n->relation = $5;
 					n->subname = $3;
 					n->newname = $8;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 			| ALTER ROLE RoleId RENAME TO RoleId
@@ -6598,6 +6769,7 @@ RenameStmt: ALTER AGGREGATE func_name aggr_args RENAME TO name
 					n->renameType = OBJECT_ROLE;
 					n->subname = $3;
 					n->newname = $6;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 			| ALTER USER RoleId RENAME TO RoleId
@@ -6606,6 +6778,7 @@ RenameStmt: ALTER AGGREGATE func_name aggr_args RENAME TO name
 					n->renameType = OBJECT_ROLE;
 					n->subname = $3;
 					n->newname = $6;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 			| ALTER TABLESPACE name RENAME TO name
@@ -6614,6 +6787,7 @@ RenameStmt: ALTER AGGREGATE func_name aggr_args RENAME TO name
 					n->renameType = OBJECT_TABLESPACE;
 					n->subname = $3;
 					n->newname = $6;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 			| ALTER TABLESPACE name SET reloptions
@@ -6640,6 +6814,7 @@ RenameStmt: ALTER AGGREGATE func_name aggr_args RENAME TO name
 					n->renameType = OBJECT_TSPARSER;
 					n->object = $5;
 					n->newname = $8;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 			| ALTER TEXT_P SEARCH DICTIONARY any_name RENAME TO name
@@ -6648,6 +6823,7 @@ RenameStmt: ALTER AGGREGATE func_name aggr_args RENAME TO name
 					n->renameType = OBJECT_TSDICTIONARY;
 					n->object = $5;
 					n->newname = $8;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 			| ALTER TEXT_P SEARCH TEMPLATE any_name RENAME TO name
@@ -6656,6 +6832,7 @@ RenameStmt: ALTER AGGREGATE func_name aggr_args RENAME TO name
 					n->renameType = OBJECT_TSTEMPLATE;
 					n->object = $5;
 					n->newname = $8;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 			| ALTER TEXT_P SEARCH CONFIGURATION any_name RENAME TO name
@@ -6664,6 +6841,7 @@ RenameStmt: ALTER AGGREGATE func_name aggr_args RENAME TO name
 					n->renameType = OBJECT_TSCONFIGURATION;
 					n->object = $5;
 					n->newname = $8;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 			| ALTER TYPE_P any_name RENAME TO name
@@ -6672,6 +6850,7 @@ RenameStmt: ALTER AGGREGATE func_name aggr_args RENAME TO name
 					n->renameType = OBJECT_TYPE;
 					n->object = $3;
 					n->newname = $6;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 			| ALTER TYPE_P any_name RENAME ATTRIBUTE name TO name opt_drop_behavior
@@ -6683,6 +6862,7 @@ RenameStmt: ALTER AGGREGATE func_name aggr_args RENAME TO name
 					n->subname = $6;
 					n->newname = $8;
 					n->behavior = $9;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 		;
@@ -6709,6 +6889,7 @@ AlterObjectSchemaStmt:
 					n->object = $3;
 					n->objarg = $4;
 					n->newschema = $7;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 			| ALTER COLLATION any_name SET SCHEMA name
@@ -6717,6 +6898,7 @@ AlterObjectSchemaStmt:
 					n->objectType = OBJECT_COLLATION;
 					n->object = $3;
 					n->newschema = $6;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 			| ALTER CONVERSION_P any_name SET SCHEMA name
@@ -6725,6 +6907,7 @@ AlterObjectSchemaStmt:
 					n->objectType = OBJECT_CONVERSION;
 					n->object = $3;
 					n->newschema = $6;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 			| ALTER DOMAIN_P any_name SET SCHEMA name
@@ -6733,6 +6916,7 @@ AlterObjectSchemaStmt:
 					n->objectType = OBJECT_DOMAIN;
 					n->object = $3;
 					n->newschema = $6;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 			| ALTER EXTENSION any_name SET SCHEMA name
@@ -6741,6 +6925,7 @@ AlterObjectSchemaStmt:
 					n->objectType = OBJECT_EXTENSION;
 					n->object = $3;
 					n->newschema = $6;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 			| ALTER FUNCTION function_with_argtypes SET SCHEMA name
@@ -6750,6 +6935,7 @@ AlterObjectSchemaStmt:
 					n->object = $3->funcname;
 					n->objarg = $3->funcargs;
 					n->newschema = $6;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 			| ALTER OPERATOR any_operator oper_argtypes SET SCHEMA name
@@ -6759,6 +6945,7 @@ AlterObjectSchemaStmt:
 					n->object = $3;
 					n->objarg = $4;
 					n->newschema = $7;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 			| ALTER OPERATOR CLASS any_name USING access_method SET SCHEMA name
@@ -6768,6 +6955,7 @@ AlterObjectSchemaStmt:
 					n->object = $4;
 					n->addname = $6;
 					n->newschema = $9;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 			| ALTER OPERATOR FAMILY any_name USING access_method SET SCHEMA name
@@ -6777,6 +6965,7 @@ AlterObjectSchemaStmt:
 					n->object = $4;
 					n->addname = $6;
 					n->newschema = $9;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 			| ALTER TABLE relation_expr SET SCHEMA name
@@ -6785,6 +6974,16 @@ AlterObjectSchemaStmt:
 					n->objectType = OBJECT_TABLE;
 					n->relation = $3;
 					n->newschema = $6;
+					n->missing_ok = false;
+					$$ = (Node *)n;
+				}
+			| ALTER TABLE IF_P EXISTS relation_expr SET SCHEMA name
+				{
+					AlterObjectSchemaStmt *n = makeNode(AlterObjectSchemaStmt);
+					n->objectType = OBJECT_TABLE;
+					n->relation = $5;
+					n->newschema = $8;
+					n->missing_ok = true;
 					$$ = (Node *)n;
 				}
 			| ALTER TEXT_P SEARCH PARSER any_name SET SCHEMA name
@@ -6793,6 +6992,7 @@ AlterObjectSchemaStmt:
 					n->objectType = OBJECT_TSPARSER;
 					n->object = $5;
 					n->newschema = $8;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 			| ALTER TEXT_P SEARCH DICTIONARY any_name SET SCHEMA name
@@ -6801,6 +7001,7 @@ AlterObjectSchemaStmt:
 					n->objectType = OBJECT_TSDICTIONARY;
 					n->object = $5;
 					n->newschema = $8;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 			| ALTER TEXT_P SEARCH TEMPLATE any_name SET SCHEMA name
@@ -6809,6 +7010,7 @@ AlterObjectSchemaStmt:
 					n->objectType = OBJECT_TSTEMPLATE;
 					n->object = $5;
 					n->newschema = $8;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 			| ALTER TEXT_P SEARCH CONFIGURATION any_name SET SCHEMA name
@@ -6817,6 +7019,7 @@ AlterObjectSchemaStmt:
 					n->objectType = OBJECT_TSCONFIGURATION;
 					n->object = $5;
 					n->newschema = $8;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 			| ALTER SEQUENCE qualified_name SET SCHEMA name
@@ -6825,6 +7028,16 @@ AlterObjectSchemaStmt:
 					n->objectType = OBJECT_SEQUENCE;
 					n->relation = $3;
 					n->newschema = $6;
+					n->missing_ok = false;
+					$$ = (Node *)n;
+				}
+			| ALTER SEQUENCE IF_P EXISTS qualified_name SET SCHEMA name
+				{
+					AlterObjectSchemaStmt *n = makeNode(AlterObjectSchemaStmt);
+					n->objectType = OBJECT_SEQUENCE;
+					n->relation = $5;
+					n->newschema = $8;
+					n->missing_ok = true;
 					$$ = (Node *)n;
 				}
 			| ALTER VIEW qualified_name SET SCHEMA name
@@ -6833,6 +7046,16 @@ AlterObjectSchemaStmt:
 					n->objectType = OBJECT_VIEW;
 					n->relation = $3;
 					n->newschema = $6;
+					n->missing_ok = false;
+					$$ = (Node *)n;
+				}
+			| ALTER VIEW IF_P EXISTS qualified_name SET SCHEMA name
+				{
+					AlterObjectSchemaStmt *n = makeNode(AlterObjectSchemaStmt);
+					n->objectType = OBJECT_VIEW;
+					n->relation = $5;
+					n->newschema = $8;
+					n->missing_ok = true;
 					$$ = (Node *)n;
 				}
 			| ALTER FOREIGN TABLE relation_expr SET SCHEMA name
@@ -6841,6 +7064,16 @@ AlterObjectSchemaStmt:
 					n->objectType = OBJECT_FOREIGN_TABLE;
 					n->relation = $4;
 					n->newschema = $7;
+					n->missing_ok = false;
+					$$ = (Node *)n;
+				}
+			| ALTER FOREIGN TABLE IF_P EXISTS relation_expr SET SCHEMA name
+				{
+					AlterObjectSchemaStmt *n = makeNode(AlterObjectSchemaStmt);
+					n->objectType = OBJECT_FOREIGN_TABLE;
+					n->relation = $6;
+					n->newschema = $9;
+					n->missing_ok = true;
 					$$ = (Node *)n;
 				}
 			| ALTER TYPE_P any_name SET SCHEMA name
@@ -6849,6 +7082,7 @@ AlterObjectSchemaStmt:
 					n->objectType = OBJECT_TYPE;
 					n->object = $3;
 					n->newschema = $6;
+					n->missing_ok = false;
 					$$ = (Node *)n;
 				}
 		;
@@ -10335,6 +10569,7 @@ c_expr:		columnref								{ $$ = $1; }
 					RowExpr *r = makeNode(RowExpr);
 					r->args = $1;
 					r->row_typeid = InvalidOid;	/* not analyzed yet */
+					r->colnames = NIL;	/* to be filled in during analysis */
 					r->location = @1;
 					$$ = (Node *)r;
 				}
@@ -12003,6 +12238,7 @@ unreserved_keyword:
 			| LAST_P
 			| LC_COLLATE_P
 			| LC_CTYPE_P
+			| LEAKPROOF
 			| LEVEL
 			| LISTEN
 			| LOAD
@@ -12086,6 +12322,7 @@ unreserved_keyword:
 			| SHARE
 			| SHOW
 			| SIMPLE
+			| SNAPSHOT
 			| STABLE
 			| STANDALONE_P
 			| START
@@ -12109,6 +12346,7 @@ unreserved_keyword:
 			| TRUNCATE
 			| TRUSTED
 			| TYPE_P
+			| TYPES_P
 			| UNBOUNDED
 			| UNCOMMITTED
 			| UNENCRYPTED

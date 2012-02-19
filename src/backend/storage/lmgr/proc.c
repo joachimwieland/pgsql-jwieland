@@ -186,6 +186,7 @@ InitProcGlobal(void)
 	ProcGlobal->startupProc = NULL;
 	ProcGlobal->startupProcPid = 0;
 	ProcGlobal->startupBufferPinWaitBufId = -1;
+	ProcGlobal->bgwriterLatch = NULL;
 
 	/*
 	 * Create and initialize all the PGPROC structures we'll need (except for
@@ -361,7 +362,7 @@ InitProcess(void)
 	if (IsAutoVacuumWorkerProcess())
 		MyPgXact->vacuumFlags |= PROC_IS_AUTOVACUUM;
 	MyProc->lwWaiting = false;
-	MyProc->lwExclusive = false;
+	MyProc->lwWaitMode = 0;
 	MyProc->lwWaitLink = NULL;
 	MyProc->waitLock = NULL;
 	MyProc->waitProcLock = NULL;
@@ -516,7 +517,7 @@ InitAuxiliaryProcess(void)
 	MyPgXact->inCommit = false;
 	MyPgXact->vacuumFlags = 0;
 	MyProc->lwWaiting = false;
-	MyProc->lwExclusive = false;
+	MyProc->lwWaitMode = 0;
 	MyProc->lwWaitLink = NULL;
 	MyProc->waitLock = NULL;
 	MyProc->waitProcLock = NULL;

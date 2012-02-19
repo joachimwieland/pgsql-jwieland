@@ -834,7 +834,12 @@ WalSndLoop(void)
 			if (pq_is_send_pending())
 				wakeEvents |= WL_SOCKET_WRITEABLE;
 			else
+			{
 				WalSndKeepalive(output_message);
+				/* Try to flush pending output to the client */
+				if (pq_flush_if_writable() != 0)
+					break;
+			}
 
 			/* Determine time until replication timeout */
 			if (replication_timeout > 0)
@@ -1405,7 +1410,8 @@ WalSndShmemInit(void)
 		/* First time through, so initialize */
 		MemSet(WalSndCtl, 0, WalSndShmemSize());
 
-		SHMQueueInit(&(WalSndCtl->SyncRepQueue));
+		for (i = 0; i < NUM_SYNC_REP_WAIT_MODE; i++)
+			SHMQueueInit(&(WalSndCtl->SyncRepQueue[i]));
 
 		for (i = 0; i < max_wal_senders; i++)
 		{

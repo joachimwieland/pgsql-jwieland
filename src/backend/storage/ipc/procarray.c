@@ -499,7 +499,7 @@ ProcArrayApplyRecoveryInfo(RunningTransactions running)
 	 * Remove stale transactions, if any.
 	 */
 	ExpireOldKnownAssignedTransactionIds(running->oldestRunningXid);
-	StandbyReleaseOldLocks(running->oldestRunningXid);
+	StandbyReleaseOldLocks(running->xcnt, running->xids);
 
 	/*
 	 * If our snapshot is already valid, nothing else to do...
@@ -552,12 +552,6 @@ ProcArrayApplyRecoveryInfo(RunningTransactions running)
 	/*
 	 * OK, we need to initialise from the RunningTransactionsData record
 	 */
-
-	/*
-	 * Release any locks belonging to old transactions that are not running
-	 * according to the running-xacts record.
-	 */
-	StandbyReleaseOldLocks(running->nextXid);
 
 	/*
 	 * Nobody else is running yet, but take locks anyhow
@@ -660,16 +654,27 @@ ProcArrayApplyRecoveryInfo(RunningTransactions running)
 							  running->latestCompletedXid))
 		ShmemVariableCache->latestCompletedXid = running->latestCompletedXid;
 
-	/* nextXid must be beyond any observed xid */
+	Assert(TransactionIdIsNormal(ShmemVariableCache->latestCompletedXid));
+
+	LWLockRelease(ProcArrayLock);
+
+	/*
+	 * ShmemVariableCache->nextXid must be beyond any observed xid.
+	 *
+	 * We don't expect anyone else to modify nextXid, hence we don't need to
+	 * hold a lock while examining it.  We still acquire the lock to modify
+	 * it, though.
+	 */
 	nextXid = latestObservedXid;
 	TransactionIdAdvance(nextXid);
 	if (TransactionIdFollows(nextXid, ShmemVariableCache->nextXid))
+	{
+		LWLockAcquire(XidGenLock, LW_EXCLUSIVE);
 		ShmemVariableCache->nextXid = nextXid;
+		LWLockRelease(XidGenLock);
+	}
 
-	Assert(TransactionIdIsNormal(ShmemVariableCache->latestCompletedXid));
 	Assert(TransactionIdIsValid(ShmemVariableCache->nextXid));
-
-	LWLockRelease(ProcArrayLock);
 
 	KnownAssignedXidsDisplay(trace_recovery(DEBUG3));
 	if (standbyState == STANDBY_SNAPSHOT_READY)
@@ -1220,7 +1225,7 @@ GetMaxSnapshotSubxidCount(void)
  *
  * We also update the following backend-global variables:
  *		TransactionXmin: the oldest xmin of any snapshot in use in the
- *			current transaction (this is the same as MyProc->xmin).
+ *			current transaction (this is the same as MyPgXact->xmin).
  *		RecentXmin: the xmin computed for the most recent snapshot.  XIDs
  *			older than this are known not running any more.
  *		RecentGlobalXmin: the global xmin (oldest TransactionXmin across all
@@ -1696,6 +1701,13 @@ GetOldestActiveTransactionId(void)
 
 	LWLockAcquire(ProcArrayLock, LW_SHARED);
 
+	/*
+	 * It's okay to read nextXid without acquiring XidGenLock because (1) we
+	 * assume TransactionIds can be read atomically and (2) we don't care if
+	 * we get a slightly stale value.  It can't be very stale anyway, because
+	 * the LWLockAcquire above will have done any necessary memory
+	 * interlocking.
+	 */
 	oldestRunningXid = ShmemVariableCache->nextXid;
 
 	/*
@@ -2615,7 +2627,9 @@ RecordKnownAssignedTransactionIds(TransactionId xid)
 		/* ShmemVariableCache->nextXid must be beyond any observed xid */
 		next_expected_xid = latestObservedXid;
 		TransactionIdAdvance(next_expected_xid);
+		LWLockAcquire(XidGenLock, LW_EXCLUSIVE);
 		ShmemVariableCache->nextXid = next_expected_xid;
+		LWLockRelease(XidGenLock);
 	}
 }
 

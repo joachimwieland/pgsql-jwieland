@@ -101,7 +101,7 @@ struct PGPROC
 
 	/* Info about LWLock the process is currently waiting for, if any. */
 	bool		lwWaiting;		/* true if waiting for an LW lock */
-	bool		lwExclusive;	/* true if waiting for exclusive access */
+	uint8		lwWaitMode;		/* lwlock mode being waited for */
 	struct PGPROC *lwWaitLink;	/* next waiter for same LW lock */
 
 	/* Info about lock the process is currently waiting for, if any. */
@@ -148,7 +148,7 @@ extern PGDLLIMPORT PGPROC *MyProc;
 extern PGDLLIMPORT struct PGXACT *MyPgXact;
 
 /*
- * Prior to PostgreSQL 9.2, the fieds below were stored as part of the
+ * Prior to PostgreSQL 9.2, the fields below were stored as part of the
  * PGPROC.  However, benchmarking revealed that packing these particular
  * members into a separate array as tightly as possible sped up GetSnapshotData
  * considerably on systems with many CPU cores, by reducing the number of
@@ -188,6 +188,8 @@ typedef struct PROC_HDR
 	PGPROC	   *freeProcs;
 	/* Head of list of autovacuum's free PGPROC structures */
 	PGPROC	   *autovacFreeProcs;
+	/* BGWriter process latch */
+	Latch	   *bgwriterLatch;
 	/* Current shared estimate of appropriate spins_per_delay value */
 	int			spins_per_delay;
 	/* The proc of the Startup process, since not in ProcArray */

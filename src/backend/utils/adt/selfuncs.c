@@ -110,6 +110,7 @@
 #include "optimizer/predtest.h"
 #include "optimizer/restrictinfo.h"
 #include "optimizer/var.h"
+#include "parser/parse_clause.h"
 #include "parser/parse_coerce.h"
 #include "parser/parsetree.h"
 #include "utils/builtins.h"
@@ -255,10 +256,11 @@ var_eq_const(VariableStatData *vardata, Oid operator,
 		return 0.0;
 
 	/*
-	 * If we matched the var to a unique index, assume there is exactly one
-	 * match regardless of anything else.  (This is slightly bogus, since the
-	 * index's equality operator might be different from ours, but it's more
-	 * likely to be right than ignoring the information.)
+	 * If we matched the var to a unique index or DISTINCT clause, assume
+	 * there is exactly one match regardless of anything else.  (This is
+	 * slightly bogus, since the index or clause's equality operator might be
+	 * different from ours, but it's much more likely to be right than
+	 * ignoring the information.)
 	 */
 	if (vardata->isunique && vardata->rel && vardata->rel->tuples >= 1.0)
 		return 1.0 / vardata->rel->tuples;
@@ -389,10 +391,11 @@ var_eq_non_const(VariableStatData *vardata, Oid operator,
 	bool		isdefault;
 
 	/*
-	 * If we matched the var to a unique index, assume there is exactly one
-	 * match regardless of anything else.  (This is slightly bogus, since the
-	 * index's equality operator might be different from ours, but it's more
-	 * likely to be right than ignoring the information.)
+	 * If we matched the var to a unique index or DISTINCT clause, assume
+	 * there is exactly one match regardless of anything else.  (This is
+	 * slightly bogus, since the index or clause's equality operator might be
+	 * different from ours, but it's much more likely to be right than
+	 * ignoring the information.)
 	 */
 	if (vardata->isunique && vardata->rel && vardata->rel->tuples >= 1.0)
 		return 1.0 / vardata->rel->tuples;
@@ -4128,10 +4131,11 @@ get_join_variables(PlannerInfo *root, List *args, SpecialJoinInfo *sjinfo,
  *	atttype, atttypmod: type data to pass to get_attstatsslot().  This is
  *		commonly the same as the exposed type of the variable argument,
  *		but can be different in binary-compatible-type cases.
- *	isunique: TRUE if we were able to match the var to a unique index,
- *		implying its values are unique for this query.  (Caution: this
- *		should be trusted for statistical purposes only, since we do not
- *		check indimmediate.)
+ *	isunique: TRUE if we were able to match the var to a unique index or a
+ *		single-column DISTINCT clause, implying its values are unique for
+ *		this query.  (Caution: this should be trusted for statistical
+ *		purposes only, since we do not check indimmediate nor verify that
+ *		the exact same definition of equality applies.)
  *
  * Caller is responsible for doing ReleaseVariableStats() before exiting.
  */
@@ -4357,32 +4361,21 @@ examine_simple_variable(PlannerInfo *root, Var *var,
 	{
 		/*
 		 * Plain subquery (not one that was converted to an appendrel).
-		 *
-		 * Punt if subquery uses set operations, GROUP BY, or DISTINCT --- any
-		 * of these will mash underlying columns' stats beyond recognition.
-		 * (Set ops are particularly nasty; if we forged ahead, we would
-		 * return stats relevant to only the leftmost subselect...)
 		 */
 		Query	   *subquery = rte->subquery;
 		RelOptInfo *rel;
 		TargetEntry *ste;
 
-		if (subquery->setOperations ||
-			subquery->groupClause ||
-			subquery->distinctClause)
-			return;
-
 		/*
-		 * If the sub-query originated from a view with the security_barrier
-		 * attribute, we treat it as a black-box from outside of the view.
-		 * This is probably a harsher restriction than necessary; it's
-		 * certainly OK for the selectivity estimator (which is a C function,
-		 * and therefore omnipotent anyway) to look at the statistics.  But
-		 * many selectivity estimators will happily *invoke the operator
-		 * function* to try to work out a good estimate - and that's not OK.
-		 * So for now, we do this.
+		 * Punt if subquery uses set operations or GROUP BY, as these will
+		 * mash underlying columns' stats beyond recognition.  (Set ops are
+		 * particularly nasty; if we forged ahead, we would return stats
+		 * relevant to only the leftmost subselect...)  DISTINCT is also
+		 * problematic, but we check that later because there is a possibility
+		 * of learning something even with it.
 		 */
-		if (rte->security_barrier)
+		if (subquery->setOperations ||
+			subquery->groupClause)
 			return;
 
 		/*
@@ -4414,6 +4407,37 @@ examine_simple_variable(PlannerInfo *root, Var *var,
 			elog(ERROR, "subquery %s does not have attribute %d",
 				 rte->eref->aliasname, var->varattno);
 		var = (Var *) ste->expr;
+
+		/*
+		 * If subquery uses DISTINCT, we can't make use of any stats for the
+		 * variable ... but, if it's the only DISTINCT column, we are entitled
+		 * to consider it unique.  We do the test this way so that it works
+		 * for cases involving DISTINCT ON.
+		 */
+		if (subquery->distinctClause)
+		{
+			if (list_length(subquery->distinctClause) == 1 &&
+				targetIsInSortList(ste, InvalidOid, subquery->distinctClause))
+				vardata->isunique = true;
+			/* cannot go further */
+			return;
+		}
+
+		/*
+		 * If the sub-query originated from a view with the security_barrier
+		 * attribute, we must not look at the variable's statistics, though
+		 * it seems all right to notice the existence of a DISTINCT clause.
+		 * So stop here.
+		 *
+		 * This is probably a harsher restriction than necessary; it's
+		 * certainly OK for the selectivity estimator (which is a C function,
+		 * and therefore omnipotent anyway) to look at the statistics.  But
+		 * many selectivity estimators will happily *invoke the operator
+		 * function* to try to work out a good estimate - and that's not OK.
+		 * So for now, don't dig down for stats.
+		 */
+		if (rte->security_barrier)
+			return;
 
 		/* Can only handle a simple Var of subquery's query level */
 		if (var && IsA(var, Var) &&
@@ -4513,10 +4537,10 @@ get_variable_numdistinct(VariableStatData *vardata, bool *isdefault)
 	}
 
 	/*
-	 * If there is a unique index for the variable, assume it is unique no
-	 * matter what pg_statistic says; the statistics could be out of date, or
-	 * we might have found a partial unique index that proves the var is
-	 * unique for this query.
+	 * If there is a unique index or DISTINCT clause for the variable, assume
+	 * it is unique no matter what pg_statistic says; the statistics could be
+	 * out of date, or we might have found a partial unique index that proves
+	 * the var is unique for this query.
 	 */
 	if (vardata->isunique)
 		stadistinct = -1.0;
@@ -5956,6 +5980,50 @@ string_to_bytea_const(const char *str, size_t str_len)
  *
  * Index cost estimation functions
  *
+ *-------------------------------------------------------------------------
+ */
+
+/*
+ * If the index is partial, add its predicate to the given qual list.
+ *
+ * ANDing the index predicate with the explicitly given indexquals produces
+ * a more accurate idea of the index's selectivity.  However, we need to be
+ * careful not to insert redundant clauses, because clauselist_selectivity()
+ * is easily fooled into computing a too-low selectivity estimate.  Our
+ * approach is to add only the predicate clause(s) that cannot be proven to
+ * be implied by the given indexquals.  This successfully handles cases such
+ * as a qual "x = 42" used with a partial index "WHERE x >= 40 AND x < 50".
+ * There are many other cases where we won't detect redundancy, leading to a
+ * too-low selectivity estimate, which will bias the system in favor of using
+ * partial indexes where possible.  That is not necessarily bad though.
+ *
+ * Note that indexQuals contains RestrictInfo nodes while the indpred
+ * does not, so the output list will be mixed.  This is OK for both
+ * predicate_implied_by() and clauselist_selectivity(), but might be
+ * problematic if the result were passed to other things.
+ */
+static List *
+add_predicate_to_quals(IndexOptInfo *index, List *indexQuals)
+{
+	List	   *predExtraQuals = NIL;
+	ListCell   *lc;
+
+	if (index->indpred == NIL)
+		return indexQuals;
+
+	foreach(lc, index->indpred)
+	{
+		Node	   *predQual = (Node *) lfirst(lc);
+		List	   *oneQual = list_make1(predQual);
+
+		if (!predicate_implied_by(oneQual, indexQuals))
+			predExtraQuals = list_concat(predExtraQuals, oneQual);
+	}
+	/* list_concat avoids modifying the passed-in indexQuals list */
+	return list_concat(predExtraQuals, indexQuals);
+}
+
+/*
  * genericcostestimate is a general-purpose estimator for use when we
  * don't have any better idea about how to estimate.  Index-type-specific
  * knowledge can be incorporated in the type-specific routines.
@@ -5964,14 +6032,11 @@ string_to_bytea_const(const char *str, size_t str_len)
  * in genericcostestimate is the estimate of the number of index tuples
  * visited.  If numIndexTuples is not 0 then it is used as the estimate,
  * otherwise we compute a generic estimate.
- *
- *-------------------------------------------------------------------------
  */
-
 static void
 genericcostestimate(PlannerInfo *root,
 					IndexPath *path,
-					RelOptInfo *outer_rel,
+					double loop_count,
 					double numIndexTuples,
 					Cost *indexStartupCost,
 					Cost *indexTotalCost,
@@ -5992,42 +6057,12 @@ genericcostestimate(PlannerInfo *root,
 	List	   *selectivityQuals;
 	ListCell   *l;
 
-	/*----------
+	/*
 	 * If the index is partial, AND the index predicate with the explicitly
 	 * given indexquals to produce a more accurate idea of the index
-	 * selectivity.  However, we need to be careful not to insert redundant
-	 * clauses, because clauselist_selectivity() is easily fooled into
-	 * computing a too-low selectivity estimate.  Our approach is to add
-	 * only the index predicate clause(s) that cannot be proven to be implied
-	 * by the given indexquals.  This successfully handles cases such as a
-	 * qual "x = 42" used with a partial index "WHERE x >= 40 AND x < 50".
-	 * There are many other cases where we won't detect redundancy, leading
-	 * to a too-low selectivity estimate, which will bias the system in favor
-	 * of using partial indexes where possible.  That is not necessarily bad
-	 * though.
-	 *
-	 * Note that indexQuals contains RestrictInfo nodes while the indpred
-	 * does not.  This is OK for both predicate_implied_by() and
-	 * clauselist_selectivity().
-	 *----------
+	 * selectivity.
 	 */
-	if (index->indpred != NIL)
-	{
-		List	   *predExtraQuals = NIL;
-
-		foreach(l, index->indpred)
-		{
-			Node	   *predQual = (Node *) lfirst(l);
-			List	   *oneQual = list_make1(predQual);
-
-			if (!predicate_implied_by(oneQual, indexQuals))
-				predExtraQuals = list_concat(predExtraQuals, oneQual);
-		}
-		/* list_concat avoids modifying the passed-in indexQuals list */
-		selectivityQuals = list_concat(predExtraQuals, indexQuals);
-	}
-	else
-		selectivityQuals = indexQuals;
+	selectivityQuals = add_predicate_to_quals(index, indexQuals);
 
 	/*
 	 * Check for ScalarArrayOpExpr index quals, and estimate the number of
@@ -6119,16 +6154,8 @@ genericcostestimate(PlannerInfo *root,
 	 * Note that we are counting pages not tuples anymore, so we take N = T =
 	 * index size, as if there were one "tuple" per page.
 	 */
-	if (outer_rel != NULL && outer_rel->rows > 1)
-	{
-		num_outer_scans = outer_rel->rows;
-		num_scans = num_sa_scans * num_outer_scans;
-	}
-	else
-	{
-		num_outer_scans = 1;
-		num_scans = num_sa_scans;
-	}
+	num_outer_scans = loop_count;
+	num_scans = num_sa_scans * num_outer_scans;
 
 	if (num_scans > 1)
 	{
@@ -6172,11 +6199,11 @@ genericcostestimate(PlannerInfo *root,
 	 *
 	 * We can deal with this by adding a very small "fudge factor" that
 	 * depends on the index size.  The fudge factor used here is one
-	 * spc_random_page_cost per 100000 index pages, which should be small
+	 * spc_random_page_cost per 10000 index pages, which should be small
 	 * enough to not alter index-vs-seqscan decisions, but will prevent
 	 * indexes of different sizes from looking exactly equally attractive.
 	 */
-	*indexTotalCost += index->pages * spc_random_page_cost / 100000.0;
+	*indexTotalCost += index->pages * spc_random_page_cost / 10000.0;
 
 	/*
 	 * CPU cost: any complex expressions in the indexquals will need to be
@@ -6234,7 +6261,7 @@ btcostestimate(PG_FUNCTION_ARGS)
 {
 	PlannerInfo *root = (PlannerInfo *) PG_GETARG_POINTER(0);
 	IndexPath  *path = (IndexPath *) PG_GETARG_POINTER(1);
-	RelOptInfo *outer_rel = (RelOptInfo *) PG_GETARG_POINTER(2);
+	double		loop_count = PG_GETARG_FLOAT8(2);
 	Cost	   *indexStartupCost = (Cost *) PG_GETARG_POINTER(3);
 	Cost	   *indexTotalCost = (Cost *) PG_GETARG_POINTER(4);
 	Selectivity *indexSelectivity = (Selectivity *) PG_GETARG_POINTER(5);
@@ -6394,9 +6421,17 @@ btcostestimate(PG_FUNCTION_ARGS)
 		numIndexTuples = 1.0;
 	else
 	{
+		List	   *selectivityQuals;
 		Selectivity btreeSelectivity;
 
-		btreeSelectivity = clauselist_selectivity(root, indexBoundQuals,
+		/*
+		 * If the index is partial, AND the index predicate with the
+		 * index-bound quals to produce a more accurate idea of the number
+		 * of rows covered by the bound conditions.
+		 */
+		selectivityQuals = add_predicate_to_quals(index, indexBoundQuals);
+
+		btreeSelectivity = clauselist_selectivity(root, selectivityQuals,
 												  index->rel->relid,
 												  JOIN_INNER,
 												  NULL);
@@ -6410,7 +6445,7 @@ btcostestimate(PG_FUNCTION_ARGS)
 		numIndexTuples = rint(numIndexTuples / num_sa_scans);
 	}
 
-	genericcostestimate(root, path, outer_rel,
+	genericcostestimate(root, path, loop_count,
 						numIndexTuples,
 						indexStartupCost, indexTotalCost,
 						indexSelectivity, indexCorrelation);
@@ -6527,13 +6562,13 @@ hashcostestimate(PG_FUNCTION_ARGS)
 {
 	PlannerInfo *root = (PlannerInfo *) PG_GETARG_POINTER(0);
 	IndexPath  *path = (IndexPath *) PG_GETARG_POINTER(1);
-	RelOptInfo *outer_rel = (RelOptInfo *) PG_GETARG_POINTER(2);
+	double		loop_count = PG_GETARG_FLOAT8(2);
 	Cost	   *indexStartupCost = (Cost *) PG_GETARG_POINTER(3);
 	Cost	   *indexTotalCost = (Cost *) PG_GETARG_POINTER(4);
 	Selectivity *indexSelectivity = (Selectivity *) PG_GETARG_POINTER(5);
 	double	   *indexCorrelation = (double *) PG_GETARG_POINTER(6);
 
-	genericcostestimate(root, path, outer_rel, 0.0,
+	genericcostestimate(root, path, loop_count, 0.0,
 						indexStartupCost, indexTotalCost,
 						indexSelectivity, indexCorrelation);
 
@@ -6545,13 +6580,13 @@ gistcostestimate(PG_FUNCTION_ARGS)
 {
 	PlannerInfo *root = (PlannerInfo *) PG_GETARG_POINTER(0);
 	IndexPath  *path = (IndexPath *) PG_GETARG_POINTER(1);
-	RelOptInfo *outer_rel = (RelOptInfo *) PG_GETARG_POINTER(2);
+	double		loop_count = PG_GETARG_FLOAT8(2);
 	Cost	   *indexStartupCost = (Cost *) PG_GETARG_POINTER(3);
 	Cost	   *indexTotalCost = (Cost *) PG_GETARG_POINTER(4);
 	Selectivity *indexSelectivity = (Selectivity *) PG_GETARG_POINTER(5);
 	double	   *indexCorrelation = (double *) PG_GETARG_POINTER(6);
 
-	genericcostestimate(root, path, outer_rel, 0.0,
+	genericcostestimate(root, path, loop_count, 0.0,
 						indexStartupCost, indexTotalCost,
 						indexSelectivity, indexCorrelation);
 
@@ -6563,13 +6598,13 @@ spgcostestimate(PG_FUNCTION_ARGS)
 {
 	PlannerInfo *root = (PlannerInfo *) PG_GETARG_POINTER(0);
 	IndexPath  *path = (IndexPath *) PG_GETARG_POINTER(1);
-	RelOptInfo *outer_rel = (RelOptInfo *) PG_GETARG_POINTER(2);
+	double		loop_count = PG_GETARG_FLOAT8(2);
 	Cost	   *indexStartupCost = (Cost *) PG_GETARG_POINTER(3);
 	Cost	   *indexTotalCost = (Cost *) PG_GETARG_POINTER(4);
 	Selectivity *indexSelectivity = (Selectivity *) PG_GETARG_POINTER(5);
 	double	   *indexCorrelation = (double *) PG_GETARG_POINTER(6);
 
-	genericcostestimate(root, path, outer_rel, 0.0,
+	genericcostestimate(root, path, loop_count, 0.0,
 						indexStartupCost, indexTotalCost,
 						indexSelectivity, indexCorrelation);
 
@@ -6884,7 +6919,7 @@ gincostestimate(PG_FUNCTION_ARGS)
 {
 	PlannerInfo *root = (PlannerInfo *) PG_GETARG_POINTER(0);
 	IndexPath  *path = (IndexPath *) PG_GETARG_POINTER(1);
-	RelOptInfo *outer_rel = (RelOptInfo *) PG_GETARG_POINTER(2);
+	double		loop_count = PG_GETARG_FLOAT8(2);
 	Cost	   *indexStartupCost = (Cost *) PG_GETARG_POINTER(3);
 	Cost	   *indexTotalCost = (Cost *) PG_GETARG_POINTER(4);
 	Selectivity *indexSelectivity = (Selectivity *) PG_GETARG_POINTER(5);
@@ -7051,10 +7086,7 @@ gincostestimate(PG_FUNCTION_ARGS)
 	}
 
 	/* Will we have more than one iteration of a nestloop scan? */
-	if (outer_rel != NULL && outer_rel->rows > 1)
-		outer_scans = outer_rel->rows;
-	else
-		outer_scans = 1;
+	outer_scans = loop_count;
 
 	/*
 	 * Compute cost to begin scan, first of all, pay attention to pending list.

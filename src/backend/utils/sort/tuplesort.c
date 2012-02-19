@@ -195,6 +195,9 @@ typedef enum
 #define TAPE_BUFFER_OVERHEAD		(BLCKSZ * 3)
 #define MERGE_BUFFER_SIZE			(BLCKSZ * 32)
 
+typedef int	(*SortTupleComparator) (const SortTuple *a, const SortTuple *b,
+	Tuplesortstate *state);
+
 /*
  * Private state of a Tuplesort operation.
  */
@@ -223,8 +226,7 @@ struct Tuplesortstate
 	 * <0, 0, >0 according as a<b, a=b, a>b.  The API must match
 	 * qsort_arg_comparator.
 	 */
-	int			(*comparetup) (const SortTuple *a, const SortTuple *b,
-										   Tuplesortstate *state);
+	SortTupleComparator	comparetup;
 
 	/*
 	 * Function to copy a supplied input tuple into palloc'd space and set up
@@ -363,12 +365,14 @@ struct Tuplesortstate
 	/* These are specific to the index_hash subcase: */
 	uint32		hash_mask;		/* mask for sortable part of hash code */
 
+	/* This is initialized when, and only when, there's just one key. */
+	SortSupport	onlyKey;
+
 	/*
 	 * These variables are specific to the Datum case; they are set by
 	 * tuplesort_begin_datum and used only by the DatumTuple routines.
 	 */
 	Oid			datumType;
-	SortSupport	datumKey;
 	/* we need typelen and byval in order to know how to copy the Datums. */
 	int			datumTypeLen;
 	bool		datumTypeByVal;
@@ -491,6 +495,11 @@ static void readtup_datum(Tuplesortstate *state, SortTuple *stup,
 			  int tapenum, unsigned int len);
 static void reversedirection_datum(Tuplesortstate *state);
 static void free_sort_tuple(Tuplesortstate *state, SortTuple *stup);
+
+/*
+ * Special version of qsort, just for SortTuple objects.
+ */
+#include "qsort_tuple.c"
 
 
 /*
@@ -630,6 +639,9 @@ tuplesort_begin_heap(TupleDesc tupDesc,
 
 		PrepareSortSupportFromOrderingOp(sortOperators[i], sortKey);
 	}
+
+	if (nkeys == 1)
+		state->onlyKey = state->sortKeys;
 
 	MemoryContextSwitchTo(oldcontext);
 
@@ -809,13 +821,13 @@ tuplesort_begin_datum(Oid datumType, Oid sortOperator, Oid sortCollation,
 	state->datumType = datumType;
 
 	/* Prepare SortSupport data */
-	state->datumKey = (SortSupport) palloc0(sizeof(SortSupportData));
+	state->onlyKey = (SortSupport) palloc0(sizeof(SortSupportData));
 
-	state->datumKey->ssup_cxt = CurrentMemoryContext;
-	state->datumKey->ssup_collation = sortCollation;
-	state->datumKey->ssup_nulls_first = nullsFirstFlag;
+	state->onlyKey->ssup_cxt = CurrentMemoryContext;
+	state->onlyKey->ssup_collation = sortCollation;
+	state->onlyKey->ssup_nulls_first = nullsFirstFlag;
 
-	PrepareSortSupportFromOrderingOp(sortOperator, state->datumKey);
+	PrepareSortSupportFromOrderingOp(sortOperator, state->onlyKey);
 
 	/* lookup necessary attributes of the datum type */
 	get_typlenbyval(datumType, &typlen, &typbyval);
@@ -1222,11 +1234,16 @@ tuplesort_performsort(Tuplesortstate *state)
 			 * amount of memory.  Just qsort 'em and we're done.
 			 */
 			if (state->memtupcount > 1)
-				qsort_arg((void *) state->memtuples,
-						  state->memtupcount,
-						  sizeof(SortTuple),
-						  (qsort_arg_comparator) state->comparetup,
-						  (void *) state);
+			{
+				if (state->onlyKey != NULL)
+					qsort_ssup(state->memtuples, state->memtupcount,
+							   state->onlyKey);
+				else
+					qsort_tuple(state->memtuples,
+								state->memtupcount,
+								state->comparetup,
+								state);
+			}
 			state->current = 0;
 			state->eof_reached = false;
 			state->markpos_offset = 0;
@@ -2660,9 +2677,6 @@ comparetup_heap(const SortTuple *a, const SortTuple *b, Tuplesortstate *state)
 	int			nkey;
 	int32		compare;
 
-	/* Allow interrupting long sorts */
-	CHECK_FOR_INTERRUPTS();
-
 	/* Compare the leading sort key */
 	compare = ApplySortComparator(a->datum1, a->isnull1,
 								  b->datum1, b->isnull1,
@@ -2803,9 +2817,6 @@ comparetup_cluster(const SortTuple *a, const SortTuple *b,
 	TupleDesc	tupDesc;
 	int			nkey;
 	int32		compare;
-
-	/* Allow interrupting long sorts */
-	CHECK_FOR_INTERRUPTS();
 
 	/* Compare the leading sort key, if it's simple */
 	if (state->indexInfo->ii_KeyAttrNumbers[0] != 0)
@@ -2995,9 +3006,6 @@ comparetup_index_btree(const SortTuple *a, const SortTuple *b,
 	int			nkey;
 	int32		compare;
 
-	/* Allow interrupting long sorts */
-	CHECK_FOR_INTERRUPTS();
-
 	/* Compare the leading sort key */
 	compare = inlineApplySortFunction(&scanKey->sk_func, scanKey->sk_flags,
 									  scanKey->sk_collation,
@@ -3047,16 +3055,18 @@ comparetup_index_btree(const SortTuple *a, const SortTuple *b,
 	 * sort algorithm wouldn't have checked whether one must appear before the
 	 * other.
 	 *
-	 * Some rather brain-dead implementations of qsort will sometimes call the
-	 * comparison routine to compare a value to itself.  (At this writing only
-	 * QNX 4 is known to do such silly things; we don't support QNX anymore,
-	 * but perhaps the behavior still exists elsewhere.)  Don't raise a bogus
-	 * error in that case.
 	 */
-	if (state->enforceUnique && !equal_hasnull && tuple1 != tuple2)
+	if (state->enforceUnique && !equal_hasnull)
 	{
 		Datum		values[INDEX_MAX_KEYS];
 		bool		isnull[INDEX_MAX_KEYS];
+
+		/*
+		 * Some rather brain-dead implementations of qsort (such as the one in QNX 4)
+		 * will sometimes call the comparison routine to compare a value to itself,
+		 * but we always use our own implementation, which does not.
+		 */
+		Assert(tuple1 != tuple2);
 
 		index_deform_tuple(tuple1, tupDes, values, isnull);
 		ereport(ERROR,
@@ -3070,9 +3080,8 @@ comparetup_index_btree(const SortTuple *a, const SortTuple *b,
 
 	/*
 	 * If key values are equal, we sort on ItemPointer.  This does not affect
-	 * validity of the finished index, but it offers cheap insurance against
-	 * performance problems with bad qsort implementations that have trouble
-	 * with large numbers of equal keys.
+	 * validity of the finished index, but it may be useful to have index scans
+	 * in physical order.
 	 */
 	{
 		BlockNumber blk1 = ItemPointerGetBlockNumber(&tuple1->t_tid);
@@ -3101,9 +3110,6 @@ comparetup_index_hash(const SortTuple *a, const SortTuple *b,
 	IndexTuple	tuple1;
 	IndexTuple	tuple2;
 
-	/* Allow interrupting long sorts */
-	CHECK_FOR_INTERRUPTS();
-
 	/*
 	 * Fetch hash keys and mask off bits we don't want to sort by. We know
 	 * that the first column of the index tuple is the hash key.
@@ -3120,9 +3126,8 @@ comparetup_index_hash(const SortTuple *a, const SortTuple *b,
 
 	/*
 	 * If hash values are equal, we sort on ItemPointer.  This does not affect
-	 * validity of the finished index, but it offers cheap insurance against
-	 * performance problems with bad qsort implementations that have trouble
-	 * with large numbers of equal keys.
+	 * validity of the finished index, but it may be useful to have index scans
+	 * in physical order.
 	 */
 	tuple1 = (IndexTuple) a->tuple;
 	tuple2 = (IndexTuple) b->tuple;
@@ -3231,12 +3236,9 @@ reversedirection_index_hash(Tuplesortstate *state)
 static int
 comparetup_datum(const SortTuple *a, const SortTuple *b, Tuplesortstate *state)
 {
-	/* Allow interrupting long sorts */
-	CHECK_FOR_INTERRUPTS();
-
-	return ApplySortComparator(a->datum1, a->isnull1,
-							   b->datum1, b->isnull1,
-							   state->datumKey);
+	/* Not currently needed */
+	elog(ERROR, "comparetup_datum() should not be called");
+	return 0;
 }
 
 static void
@@ -3328,8 +3330,8 @@ readtup_datum(Tuplesortstate *state, SortTuple *stup,
 static void
 reversedirection_datum(Tuplesortstate *state)
 {
-	state->datumKey->ssup_reverse = !state->datumKey->ssup_reverse;
-	state->datumKey->ssup_nulls_first = !state->datumKey->ssup_nulls_first;
+	state->onlyKey->ssup_reverse = !state->onlyKey->ssup_reverse;
+	state->onlyKey->ssup_nulls_first = !state->onlyKey->ssup_nulls_first;
 }
 
 /*

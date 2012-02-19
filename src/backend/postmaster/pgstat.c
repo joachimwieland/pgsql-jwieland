@@ -286,6 +286,8 @@ static void pgstat_recv_bgwriter(PgStat_MsgBgWriter *msg, int len);
 static void pgstat_recv_funcstat(PgStat_MsgFuncstat *msg, int len);
 static void pgstat_recv_funcpurge(PgStat_MsgFuncpurge *msg, int len);
 static void pgstat_recv_recoveryconflict(PgStat_MsgRecoveryConflict *msg, int len);
+static void pgstat_recv_deadlock(PgStat_MsgDeadlock *msg, int len);
+static void pgstat_recv_tempfile(PgStat_MsgTempFile *msg, int len);
 
 
 /* ------------------------------------------------------------
@@ -1338,6 +1340,46 @@ pgstat_report_recovery_conflict(int reason)
 	msg.m_reason = reason;
 	pgstat_send(&msg, sizeof(msg));
 }
+
+/* --------
+ * pgstat_report_deadlock() -
+ *
+ *	Tell the collector about a deadlock detected.
+ * --------
+ */
+void
+pgstat_report_deadlock(void)
+{
+	PgStat_MsgDeadlock msg;
+
+	if (pgStatSock == PGINVALID_SOCKET || !pgstat_track_counts)
+		return;
+
+	pgstat_setheader(&msg.m_hdr, PGSTAT_MTYPE_DEADLOCK);
+	msg.m_databaseid = MyDatabaseId;
+	pgstat_send(&msg, sizeof(msg));
+}
+
+/* --------
+ * pgstat_report_tempfile() -
+ *
+ *	Tell the collector about a temporary file.
+ * --------
+ */
+void
+pgstat_report_tempfile(size_t filesize)
+{
+	PgStat_MsgTempFile msg;
+
+	if (pgStatSock == PGINVALID_SOCKET || !pgstat_track_counts)
+		return;
+
+	pgstat_setheader(&msg.m_hdr, PGSTAT_MTYPE_TEMPFILE);
+	msg.m_databaseid = MyDatabaseId;
+	msg.m_filesize = filesize;
+	pgstat_send(&msg, sizeof(msg));
+}
+
 
 /* ----------
  * pgstat_ping() -
@@ -2410,12 +2452,14 @@ pgstat_bestart(void)
 	beentry->st_procpid = MyProcPid;
 	beentry->st_proc_start_timestamp = proc_start_timestamp;
 	beentry->st_activity_start_timestamp = 0;
+	beentry->st_state_start_timestamp = 0;
 	beentry->st_xact_start_timestamp = 0;
 	beentry->st_databaseid = MyDatabaseId;
 	beentry->st_userid = userid;
 	beentry->st_clientaddr = clientaddr;
 	beentry->st_clienthostname[0] = '\0';
 	beentry->st_waiting = false;
+	beentry->st_state = STATE_UNDEFINED;
 	beentry->st_appname[0] = '\0';
 	beentry->st_activity[0] = '\0';
 	/* Also make sure the last byte in each string area is always 0 */
@@ -2476,39 +2520,70 @@ pgstat_beshutdown_hook(int code, Datum arg)
  *
  *	Called from tcop/postgres.c to report what the backend is actually doing
  *	(usually "<IDLE>" or the start of the query to be executed).
+ *
+ * All updates of the status entry follow the protocol of bumping
+ * st_changecount before and after.  We use a volatile pointer here to
+ * ensure the compiler doesn't try to get cute.
  * ----------
  */
 void
-pgstat_report_activity(const char *cmd_str)
+pgstat_report_activity(BackendState state, const char *cmd_str)
 {
 	volatile PgBackendStatus *beentry = MyBEEntry;
 	TimestampTz start_timestamp;
-	int			len;
+	TimestampTz current_timestamp;
+	int			len = 0;
 
 	TRACE_POSTGRESQL_STATEMENT_STATUS(cmd_str);
 
-	if (!pgstat_track_activities || !beentry)
+	if (!beentry)
 		return;
 
 	/*
 	 * To minimize the time spent modifying the entry, fetch all the needed
 	 * data first.
 	 */
-	start_timestamp = GetCurrentStatementStartTimestamp();
+	current_timestamp = GetCurrentTimestamp();
 
-	len = strlen(cmd_str);
-	len = pg_mbcliplen(cmd_str, len, pgstat_track_activity_query_size - 1);
+	if (!pgstat_track_activities && beentry->st_state != STATE_DISABLED)
+	{
+		/*
+		 * Track activities is disabled, but we have a non-disabled state set.
+		 * That means the status changed - so as our last update, tell the
+		 * collector that we disabled it and will no longer update.
+		 */
+		beentry->st_changecount++;
+		beentry->st_state = STATE_DISABLED;
+		beentry->st_state_start_timestamp = current_timestamp;
+		beentry->st_changecount++;
+		Assert((beentry->st_changecount & 1) == 0);
+		return;
+	}
 
 	/*
-	 * Update my status entry, following the protocol of bumping
-	 * st_changecount before and after.  We use a volatile pointer here to
-	 * ensure the compiler doesn't try to get cute.
+	 * Fetch more data before we start modifying the entry
+	 */
+	start_timestamp = GetCurrentStatementStartTimestamp();
+	if (cmd_str != NULL)
+	{
+		len = pg_mbcliplen(cmd_str, strlen(cmd_str),
+						   pgstat_track_activity_query_size - 1);
+	}
+
+	/*
+	 * Now update the status entry
 	 */
 	beentry->st_changecount++;
 
-	beentry->st_activity_start_timestamp = start_timestamp;
-	memcpy((char *) beentry->st_activity, cmd_str, len);
-	beentry->st_activity[len] = '\0';
+	beentry->st_state = state;
+	beentry->st_state_start_timestamp = current_timestamp;
+
+	if (cmd_str != NULL)
+	{
+		memcpy((char *) beentry->st_activity, cmd_str, len);
+		beentry->st_activity[len] = '\0';
+		beentry->st_activity_start_timestamp = start_timestamp;
+	}
 
 	beentry->st_changecount++;
 	Assert((beentry->st_changecount & 1) == 0);
@@ -3185,6 +3260,14 @@ PgstatCollectorMain(int argc, char *argv[])
 					pgstat_recv_recoveryconflict((PgStat_MsgRecoveryConflict *) &msg, len);
 					break;
 
+				case PGSTAT_MTYPE_DEADLOCK:
+					pgstat_recv_deadlock((PgStat_MsgDeadlock *) &msg, len);
+					break;
+
+				case PGSTAT_MTYPE_TEMPFILE:
+					pgstat_recv_tempfile((PgStat_MsgTempFile *) &msg, len);
+					break;
+
 				default:
 					break;
 			}
@@ -3266,6 +3349,9 @@ pgstat_get_db_entry(Oid databaseid, bool create)
 		result->n_conflict_snapshot = 0;
 		result->n_conflict_bufferpin = 0;
 		result->n_conflict_startup_deadlock = 0;
+		result->n_temp_files = 0;
+		result->n_temp_bytes = 0;
+		result->n_deadlocks = 0;
 
 		result->stat_reset_timestamp = GetCurrentTimestamp();
 
@@ -4177,6 +4263,9 @@ pgstat_recv_resetcounter(PgStat_MsgResetcounter *msg, int len)
 	dbentry->n_tuples_updated = 0;
 	dbentry->n_tuples_deleted = 0;
 	dbentry->last_autovac_time = 0;
+	dbentry->n_temp_bytes = 0;
+	dbentry->n_temp_files = 0;
+	dbentry->n_deadlocks = 0;
 
 	dbentry->stat_reset_timestamp = GetCurrentTimestamp();
 
@@ -4365,7 +4454,7 @@ pgstat_recv_bgwriter(PgStat_MsgBgWriter *msg, int len)
 /* ----------
  * pgstat_recv_recoveryconflict() -
  *
- *	Process as RECOVERYCONFLICT message.
+ *	Process a RECOVERYCONFLICT message.
  * ----------
  */
 static void
@@ -4400,6 +4489,39 @@ pgstat_recv_recoveryconflict(PgStat_MsgRecoveryConflict *msg, int len)
 			dbentry->n_conflict_startup_deadlock++;
 			break;
 	}
+}
+
+/* ----------
+ * pgstat_recv_deadlock() -
+ *
+ *	Process a DEADLOCK message.
+ * ----------
+ */
+static void
+pgstat_recv_deadlock(PgStat_MsgDeadlock *msg, int len)
+{
+	PgStat_StatDBEntry *dbentry;
+
+	dbentry = pgstat_get_db_entry(msg->m_databaseid, true);
+
+	dbentry->n_deadlocks++;
+}
+
+/* ----------
+ * pgstat_recv_tempfile() -
+ *
+ *	Process a TEMPFILE message.
+ * ----------
+ */
+static void
+pgstat_recv_tempfile(PgStat_MsgTempFile *msg, int len)
+{
+	PgStat_StatDBEntry *dbentry;
+
+	dbentry = pgstat_get_db_entry(msg->m_databaseid, true);
+
+	dbentry->n_temp_bytes += msg->m_filesize;
+	dbentry->n_temp_files += 1;
 }
 
 /* ----------

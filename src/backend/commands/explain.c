@@ -24,6 +24,7 @@
 #include "rewrite/rewriteHandler.h"
 #include "tcop/tcopprot.h"
 #include "utils/builtins.h"
+#include "utils/json.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
@@ -99,7 +100,6 @@ static void ExplainDummyGroup(const char *objtype, const char *labelname,
 static void ExplainXMLTag(const char *tagname, int flags, ExplainState *es);
 static void ExplainJSONLineEnding(ExplainState *es);
 static void ExplainYAMLLineStarting(ExplainState *es);
-static void escape_json(StringInfo buf, const char *str);
 static void escape_yaml(StringInfo buf, const char *str);
 
 
@@ -116,6 +116,7 @@ ExplainQuery(ExplainStmt *stmt, const char *queryString,
 	TupOutputState *tstate;
 	List	   *rewritten;
 	ListCell   *lc;
+	bool	    timing_set = false;
 
 	/* Initialize ExplainState. */
 	ExplainInitState(&es);
@@ -133,6 +134,11 @@ ExplainQuery(ExplainStmt *stmt, const char *queryString,
 			es.costs = defGetBoolean(opt);
 		else if (strcmp(opt->defname, "buffers") == 0)
 			es.buffers = defGetBoolean(opt);
+		else if (strcmp(opt->defname, "timing") == 0)
+		{
+			timing_set = true;
+			es.timing = defGetBoolean(opt);
+		}
 		else if (strcmp(opt->defname, "format") == 0)
 		{
 			char	   *p = defGetString(opt);
@@ -162,6 +168,15 @@ ExplainQuery(ExplainStmt *stmt, const char *queryString,
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("EXPLAIN option BUFFERS requires ANALYZE")));
+	
+	/* if the timing was not set explicitly, set default value */
+	es.timing = (timing_set) ? es.timing : es.analyze;
+
+	/* check that timing is used with EXPLAIN ANALYZE */
+	if (es.timing && !es.analyze)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("EXPLAIN option TIMING requires ANALYZE")));
 
 	/*
 	 * Parse analysis was done already, but we still have to run the rule
@@ -242,7 +257,7 @@ ExplainResultDesc(ExplainStmt *stmt)
 {
 	TupleDesc	tupdesc;
 	ListCell   *lc;
-	bool		xml = false;
+	Oid			result_type = TEXTOID;
 
 	/* Check for XML format option */
 	foreach(lc, stmt->options)
@@ -253,7 +268,12 @@ ExplainResultDesc(ExplainStmt *stmt)
 		{
 			char	   *p = defGetString(opt);
 
-			xml = (strcmp(p, "xml") == 0);
+			if (strcmp(p, "xml") == 0)
+				result_type = XMLOID;
+			else if (strcmp(p, "json") == 0)
+				result_type = JSONOID;
+			else
+				result_type = TEXTOID;
 			/* don't "break", as ExplainQuery will use the last value */
 		}
 	}
@@ -261,7 +281,7 @@ ExplainResultDesc(ExplainStmt *stmt)
 	/* Need a tuple descriptor representing a single TEXT or XML column */
 	tupdesc = CreateTemplateTupleDesc(1, false);
 	TupleDescInitEntry(tupdesc, (AttrNumber) 1, "QUERY PLAN",
-					   xml ? XMLOID : TEXTOID, -1, 0);
+					   result_type, -1, 0);
 	return tupdesc;
 }
 
@@ -355,8 +375,11 @@ ExplainOnePlan(PlannedStmt *plannedstmt, ExplainState *es,
 	int			eflags;
 	int			instrument_option = 0;
 
-	if (es->analyze)
+	if (es->analyze && es->timing)
 		instrument_option |= INSTRUMENT_TIMER;
+	else if (es->analyze)
+		instrument_option |= INSTRUMENT_ROWS;
+
 	if (es->buffers)
 		instrument_option |= INSTRUMENT_BUFFERS;
 
@@ -951,29 +974,42 @@ ExplainNode(PlanState *planstate, List *ancestors,
 
 		if (es->format == EXPLAIN_FORMAT_TEXT)
 		{
-			appendStringInfo(es->str,
-							 " (actual time=%.3f..%.3f rows=%.0f loops=%.0f)",
-							 startup_sec, total_sec, rows, nloops);
+			if (planstate->instrument->need_timer)
+				appendStringInfo(es->str,
+								 " (actual time=%.3f..%.3f rows=%.0f loops=%.0f)",
+								 startup_sec, total_sec, rows, nloops);
+			else
+				appendStringInfo(es->str,
+								 " (actual rows=%.0f loops=%.0f)",
+								 rows, nloops);
 		}
 		else
 		{
-			ExplainPropertyFloat("Actual Startup Time", startup_sec, 3, es);
-			ExplainPropertyFloat("Actual Total Time", total_sec, 3, es);
+			if (planstate->instrument->need_timer)
+			{
+				ExplainPropertyFloat("Actual Startup Time", startup_sec, 3, es);
+				ExplainPropertyFloat("Actual Total Time", total_sec, 3, es);
+			}
 			ExplainPropertyFloat("Actual Rows", rows, 0, es);
 			ExplainPropertyFloat("Actual Loops", nloops, 0, es);
 		}
 	}
 	else if (es->analyze)
 	{
+
 		if (es->format == EXPLAIN_FORMAT_TEXT)
 			appendStringInfo(es->str, " (never executed)");
-		else
+		else if (planstate->instrument->need_timer)
 		{
 			ExplainPropertyFloat("Actual Startup Time", 0.0, 3, es);
 			ExplainPropertyFloat("Actual Total Time", 0.0, 3, es);
+		}
+		else
+		{
 			ExplainPropertyFloat("Actual Rows", 0.0, 0, es);
 			ExplainPropertyFloat("Actual Loops", 0.0, 0, es);
 		}
+
 	}
 
 	/* in text format, first line ends here */
@@ -1012,6 +1048,9 @@ ExplainNode(PlanState *planstate, List *ancestors,
 			if (plan->qual)
 				show_instrumentation_count("Rows Removed by Filter", 1,
 										   planstate, es);
+			if (es->analyze)
+				ExplainPropertyLong("Heap Fetches",
+					((IndexOnlyScanState *) planstate)->ioss_HeapFetches, es);
 			break;
 		case T_BitmapIndexScan:
 			show_scan_qual(((BitmapIndexScan *) plan)->indexqualorig,
@@ -2308,51 +2347,6 @@ ExplainYAMLLineStarting(ExplainState *es)
 		appendStringInfoChar(es->str, '\n');
 		appendStringInfoSpaces(es->str, es->indent * 2);
 	}
-}
-
-/*
- * Produce a JSON string literal, properly escaping characters in the text.
- */
-static void
-escape_json(StringInfo buf, const char *str)
-{
-	const char *p;
-
-	appendStringInfoCharMacro(buf, '\"');
-	for (p = str; *p; p++)
-	{
-		switch (*p)
-		{
-			case '\b':
-				appendStringInfoString(buf, "\\b");
-				break;
-			case '\f':
-				appendStringInfoString(buf, "\\f");
-				break;
-			case '\n':
-				appendStringInfoString(buf, "\\n");
-				break;
-			case '\r':
-				appendStringInfoString(buf, "\\r");
-				break;
-			case '\t':
-				appendStringInfoString(buf, "\\t");
-				break;
-			case '"':
-				appendStringInfoString(buf, "\\\"");
-				break;
-			case '\\':
-				appendStringInfoString(buf, "\\\\");
-				break;
-			default:
-				if ((unsigned char) *p < ' ')
-					appendStringInfo(buf, "\\u%04x", (int) *p);
-				else
-					appendStringInfoCharMacro(buf, *p);
-				break;
-		}
-	}
-	appendStringInfoCharMacro(buf, '\"');
 }
 
 /*

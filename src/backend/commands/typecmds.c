@@ -1521,6 +1521,7 @@ makeRangeConstructors(const char *name, Oid namespace,
 								  false,		/* isAgg */
 								  false,		/* isWindowFunc */
 								  false,		/* security_definer */
+								  false,		/* leakproof */
 								  false,		/* isStrict */
 								  PROVOLATILE_IMMUTABLE,		/* volatility */
 								  constructorArgTypesVector,	/* parameterTypes */
@@ -2005,7 +2006,8 @@ DefineCompositeType(const RangeVar *typevar, List *coldeflist)
 	 * check is here mainly to get a better error message about a "type"
 	 * instead of below about a "relation".
 	 */
-	typeNamespace = RangeVarGetCreationNamespace(createStmt->relation);
+	typeNamespace = RangeVarGetAndCheckCreationNamespace(createStmt->relation,
+														 NoLock, NULL);
 	RangeVarAdjustRelationPersistence(createStmt->relation, typeNamespace);
 	old_type_oid =
 		GetSysCacheOid2(TYPENAMENSP,
@@ -2317,7 +2319,7 @@ AlterDomainDropConstraint(List *names, const char *constrName,
 			conobj.objectId = HeapTupleGetOid(contup);
 			conobj.objectSubId = 0;
 
-			performDeletion(&conobj, behavior);
+			performDeletion(&conobj, behavior, 0);
 			found = true;
 		}
 	}
@@ -3164,7 +3166,7 @@ RenameType(RenameStmt *stmt)
  * Change the owner of a type.
  */
 void
-AlterTypeOwner(List *names, Oid newOwnerId)
+AlterTypeOwner(List *names, Oid newOwnerId, ObjectType objecttype)
 {
 	TypeName   *typename;
 	Oid			typeOid;
@@ -3193,6 +3195,13 @@ AlterTypeOwner(List *names, Oid newOwnerId)
 	ReleaseSysCache(tup);
 	tup = newtup;
 	typTup = (Form_pg_type) GETSTRUCT(tup);
+
+	/* Don't allow ALTER DOMAIN on a type */
+	if (objecttype == OBJECT_DOMAIN && typTup->typtype != TYPTYPE_DOMAIN)
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("%s is not a domain",
+						format_type_be(typeOid))));
 
 	/*
 	 * If it's a composite type, we need to check that it really is a
@@ -3327,7 +3336,7 @@ AlterTypeOwnerInternal(Oid typeOid, Oid newOwnerId,
  * Execute ALTER TYPE SET SCHEMA
  */
 void
-AlterTypeNamespace(List *names, const char *newschema)
+AlterTypeNamespace(List *names, const char *newschema, ObjectType objecttype)
 {
 	TypeName   *typename;
 	Oid			typeOid;
@@ -3336,6 +3345,13 @@ AlterTypeNamespace(List *names, const char *newschema)
 	/* Make a TypeName so we can use standard type lookup machinery */
 	typename = makeTypeNameFromNameList(names);
 	typeOid = typenameTypeId(NULL, typename);
+
+	/* Don't allow ALTER DOMAIN on a type */
+	if (objecttype == OBJECT_DOMAIN && get_typtype(typeOid) != TYPTYPE_DOMAIN)
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("%s is not a domain",
+						format_type_be(typeOid))));
 
 	/* get schema OID and check its permissions */
 	nspOid = LookupCreationNamespace(newschema);

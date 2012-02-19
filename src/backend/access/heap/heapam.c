@@ -833,7 +833,7 @@ heapgettup_pagemode(HeapScanDesc scan,
 #if defined(DISABLE_COMPLEX_MACRO)
 /*
  * This is formatted so oddly so that the correspondence to the macro
- * definition in access/heapam.h is maintained.
+ * definition in access/htup.h is maintained.
  */
 Datum
 fastgetattr(HeapTuple tup, int attnum, TupleDesc tupleDesc,
@@ -2290,6 +2290,14 @@ heap_multi_insert(Relation relation, HeapTuple *tuples, int ntuples,
 		for (i = 0; i < ntuples; i++)
 			CacheInvalidateHeapTuple(relation, heaptuples[i], NULL);
 	}
+
+	/*
+	 * Copy t_self fields back to the caller's original tuples. This does
+	 * nothing for untoasted tuples (tuples[i] == heaptuples[i)], but it's
+	 * probably faster to always copy than check.
+	 */
+	for (i = 0; i < ntuples; i++)
+		tuples[i]->t_self = heaptuples[i]->t_self;
 
 	pgstat_count_heap_insert(relation, ntuples);
 }

@@ -139,12 +139,12 @@ main(int argc, char **argv)
 		if (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-?") == 0)
 		{
 			usage(progname);
-			exit(0);
+			exit_nicely(0);
 		}
 		if (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-V") == 0)
 		{
 			puts("pg_restore (PostgreSQL) " PG_VERSION);
-			exit(0);
+			exit_nicely(0);
 		}
 	}
 
@@ -280,7 +280,7 @@ main(int argc, char **argv)
 
 			default:
 				fprintf(stderr, _("Try \"%s --help\" for more information.\n"), progname);
-				exit(1);
+				exit_nicely(1);
 		}
 	}
 
@@ -297,21 +297,21 @@ main(int argc, char **argv)
 				progname, argv[optind]);
 		fprintf(stderr, _("Try \"%s --help\" for more information.\n"),
 				progname);
-		exit(1);
+		exit_nicely(1);
 	}
 
 	if (opts->dataOnly && opts->schemaOnly)
 	{
 		fprintf(stderr, _("%s: options -s/--schema-only and -a/--data-only cannot be used together\n"),
 			progname);
-		exit(1);
+		exit_nicely(1);
 	}
 
 	if ((opts->dataOnly || opts->schemaOnly) && (opts->dumpSections != DUMP_UNSECTIONED))
 	{
 		fprintf(stderr, _("%s: options -s/--schema-only and -a/--data-only cannot be used with --section\n"),
 			progname);
-		exit(1);
+		exit_nicely(1);
 	}
 
 	if (opts->dataOnly)
@@ -333,7 +333,7 @@ main(int argc, char **argv)
 					progname);
 			fprintf(stderr, _("Try \"%s --help\" for more information.\n"),
 					progname);
-			exit(1);
+			exit_nicely(1);
 		}
 		opts->useDB = 1;
 	}
@@ -343,7 +343,7 @@ main(int argc, char **argv)
 	{
 		fprintf(stderr, _("%s: cannot specify both --single-transaction and multiple jobs\n"),
 				progname);
-		exit(1);
+		exit_nicely(1);
 	}
 
 	opts->disable_triggers = disable_triggers;
@@ -379,7 +379,7 @@ main(int argc, char **argv)
 			default:
 				write_msg(NULL, "unrecognized archive format \"%s\"; please specify \"c\", \"d\", or \"t\"\n",
 						  opts->formatName);
-				exit(1);
+				exit_nicely(1);
 		}
 	}
 

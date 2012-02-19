@@ -669,13 +669,13 @@ createDirectory(const char *dir)
 	if (stat(dir, &st) == 0)
 	{
 		if (S_ISDIR(st.st_mode))
-			die_horribly(NULL, modulename,
-						 "cannot create directory %s, it exists already\n",
-						 dir);
+			exit_horribly(modulename,
+						  "cannot create directory %s, it exists already\n",
+						  dir);
 		else
-			die_horribly(NULL, modulename,
-						 "cannot create directory %s, a file with this name "
-						 "exists already\n", dir);
+			exit_horribly(modulename,
+						  "cannot create directory %s, a file with this name "
+						  "exists already\n", dir);
 	}
 
 	/*
@@ -684,8 +684,8 @@ createDirectory(const char *dir)
 	 * between our two calls.
 	 */
 	if (mkdir(dir, 0700) < 0)
-		die_horribly(NULL, modulename, "could not create directory %s: %s",
-					 dir, strerror(errno));
+		exit_horribly(modulename, "could not create directory %s: %s",
+					  dir, strerror(errno));
 }
 
 /*

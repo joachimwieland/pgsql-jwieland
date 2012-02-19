@@ -225,7 +225,7 @@ _connectDB(ArchiveHandle *AH, const char *reqdb, const char *requser)
  * cache if the username keeps changing.  In current usage, however, the
  * username never does change, so one savedPassword is sufficient.
  */
-PGconn *
+void
 ConnectDatabase(Archive *AHX,
 				const char *dbname,
 				const char *pghost,
@@ -306,10 +306,24 @@ ConnectDatabase(Archive *AHX,
 	_check_database_version(AH);
 
 	PQsetNoticeProcessor(AH->connection, notice_processor, NULL);
+}
+
+void
+DisconnectDatabase(Archive *AHX)
+{
+	ArchiveHandle *AH = (ArchiveHandle *) AHX;
+
+	PQfinish(AH->connection);		/* noop if AH->connection is NULL */
+	AH->connection = NULL;
+}
+
+PGconn *
+GetConnection(Archive *AHX)
+{
+	ArchiveHandle *AH = (ArchiveHandle *) AHX;
 
 	return AH->connection;
 }
-
 
 static void
 notice_processor(void *arg, const char *message)
@@ -317,6 +331,30 @@ notice_processor(void *arg, const char *message)
 	write_msg(NULL, "%s", message);
 }
 
+
+void
+ExecuteSqlStatement(Archive *AHX, const char *query)
+{
+	ArchiveHandle	   *AH = (ArchiveHandle *) AHX;
+	PGresult   *res;
+
+	res = PQexec(AH->connection, query);
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		die_on_query_failure(AH, modulename, query);
+	PQclear(res);
+}
+
+PGresult *
+ExecuteSqlQuery(Archive *AHX, const char *query, ExecStatusType status)
+{
+	ArchiveHandle	   *AH = (ArchiveHandle *) AHX;
+	PGresult   *res;
+
+	res = PQexec(AH->connection, query);
+	if (PQresultStatus(res) != status)
+		die_on_query_failure(AH, modulename, query);
+	return res;
+}
 
 /*
  * Convenience function to send a query.

@@ -304,6 +304,7 @@ static void ATPrepAddColumn(List **wqueue, Relation rel, bool recurse, bool recu
 static void ATExecAddColumn(List **wqueue, AlteredTableInfo *tab, Relation rel,
 				ColumnDef *colDef, bool isOid,
 				bool recurse, bool recursing, LOCKMODE lockmode);
+static void check_for_column_name_collision(Relation rel, const char *colname);
 static void add_column_datatype_dependency(Oid relid, int32 attnum, Oid typid);
 static void add_column_collation_dependency(Oid relid, int32 attnum, Oid collid);
 static void ATPrepAddOids(List **wqueue, Relation rel, bool recurse,
@@ -451,10 +452,12 @@ DefineRelation(CreateStmt *stmt, char relkind, Oid ownerId)
 
 	/*
 	 * Look up the namespace in which we are supposed to create the relation,
-	 * and check we have permission to create there.
+	 * check we have permission to create there, lock it against concurrent
+	 * drop, and mark stmt->relation as RELPERSISTENCE_TEMP if a temporary
+	 * namespace is selected.
 	 */
-	namespaceId = RangeVarGetAndCheckCreationNamespace(stmt->relation);
-	RangeVarAdjustRelationPersistence(stmt->relation, namespaceId);
+	namespaceId =
+		RangeVarGetAndCheckCreationNamespace(stmt->relation, NoLock, NULL);
 
 	/*
 	 * Security check: disallow creating temp tables from security-restricted
@@ -814,7 +817,7 @@ RemoveRelations(DropStmt *drop)
 		add_exact_object_address(&obj, objects);
 	}
 
-	performMultipleDeletions(objects, drop->behavior);
+	performMultipleDeletions(objects, drop->behavior, 0);
 
 	free_object_addresses(objects);
 }
@@ -2255,15 +2258,7 @@ renameatt_internal(Oid myrelid,
 						oldattname)));
 
 	/* new name should not already exist */
-
-	/* this test is deliberately not attisdropped-aware */
-	if (SearchSysCacheExists2(ATTNAME,
-							  ObjectIdGetDatum(myrelid),
-							  PointerGetDatum(newattname)))
-		ereport(ERROR,
-				(errcode(ERRCODE_DUPLICATE_COLUMN),
-				 errmsg("column \"%s\" of relation \"%s\" already exists",
-					  newattname, RelationGetRelationName(targetrelation))));
+	check_for_column_name_collision(targetrelation, newattname);
 
 	/* apply the update */
 	namestrcpy(&(attform->attname), newattname);
@@ -2308,9 +2303,18 @@ renameatt(RenameStmt *stmt)
 
 	/* lock level taken here should match renameatt_internal */
 	relid = RangeVarGetRelidExtended(stmt->relation, AccessExclusiveLock,
-									 false, false,
+									 stmt->missing_ok, false,
 									 RangeVarCallbackForRenameAttribute,
 									 NULL);
+
+	if (!OidIsValid(relid))
+	{
+		ereport(NOTICE,
+				(errmsg("relation \"%s\" does not exist, skipping",
+							stmt->relation->relname)));
+		return;
+	}
+
 	renameatt_internal(relid,
 					   stmt->subname,	/* old att name */
 					   stmt->newname,	/* new att name */
@@ -2336,9 +2340,17 @@ RenameRelation(RenameStmt *stmt)
 	 * lock escalation.
 	 */
 	relid = RangeVarGetRelidExtended(stmt->relation, AccessExclusiveLock,
-									 false, false,
+									 stmt->missing_ok, false,
 									 RangeVarCallbackForAlterRelation,
 									 (void *) stmt);
+
+	if (!OidIsValid(relid))
+	{
+		ereport(NOTICE,
+				(errmsg("relation \"%s\" does not exist, skipping",
+							stmt->relation->relname)));
+		return;
+	}
 
 	/* Do the work */
 	RenameRelationInternal(relid, stmt->newname);
@@ -2480,7 +2492,7 @@ CheckTableNotInUse(Relation rel, const char *stmt)
 Oid
 AlterTableLookupRelation(AlterTableStmt *stmt, LOCKMODE lockmode)
 {
-	return RangeVarGetRelidExtended(stmt->relation, lockmode, false, false,
+	return RangeVarGetRelidExtended(stmt->relation, lockmode, stmt->missing_ok, false,
 									RangeVarCallbackForAlterRelation,
 									(void *) stmt);
 }
@@ -4291,17 +4303,8 @@ ATExecAddColumn(List **wqueue, AlteredTableInfo *tab, Relation rel,
 		elog(ERROR, "cache lookup failed for relation %u", myrelid);
 	relkind = ((Form_pg_class) GETSTRUCT(reltup))->relkind;
 
-	/*
-	 * this test is deliberately not attisdropped-aware, since if one tries to
-	 * add a column matching a dropped column name, it's gonna fail anyway.
-	 */
-	if (SearchSysCacheExists2(ATTNAME,
-							  ObjectIdGetDatum(myrelid),
-							  PointerGetDatum(colDef->colname)))
-		ereport(ERROR,
-				(errcode(ERRCODE_DUPLICATE_COLUMN),
-				 errmsg("column \"%s\" of relation \"%s\" already exists",
-						colDef->colname, RelationGetRelationName(rel))));
+	/* new name should not already exist */
+	check_for_column_name_collision(rel, colDef->colname);
 
 	/* Determine the new attribute's number */
 	if (isOid)
@@ -4541,6 +4544,46 @@ ATExecAddColumn(List **wqueue, AlteredTableInfo *tab, Relation rel,
 
 		heap_close(childrel, NoLock);
 	}
+}
+
+/*
+ * If a new or renamed column will collide with the name of an existing
+ * column, error out.
+ */
+static void
+check_for_column_name_collision(Relation rel, const char *colname)
+{
+	HeapTuple	attTuple;
+   	int			attnum;
+
+	/*
+	 * this test is deliberately not attisdropped-aware, since if one tries to
+	 * add a column matching a dropped column name, it's gonna fail anyway.
+	 */
+	attTuple = SearchSysCache2(ATTNAME,
+							   ObjectIdGetDatum(RelationGetRelid(rel)),
+							   PointerGetDatum(colname));
+	if (!HeapTupleIsValid(attTuple))
+		return;
+
+   	attnum = ((Form_pg_attribute) GETSTRUCT(attTuple))->attnum;
+	ReleaseSysCache(attTuple);
+
+	/*
+	 * We throw a different error message for conflicts with system column
+	 * names, since they are normally not shown and the user might otherwise
+	 * be confused about the reason for the conflict.
+	 */
+   	if (attnum <= 0)
+	    ereport(ERROR,
+			    (errcode(ERRCODE_DUPLICATE_COLUMN),
+			     errmsg("column name \"%s\" conflicts with a system column name",
+					    colname)));
+   	else
+	    ereport(ERROR,
+			    (errcode(ERRCODE_DUPLICATE_COLUMN),
+			     errmsg("column \"%s\" of relation \"%s\" already exists",
+					    colname, RelationGetRelationName(rel))));
 }
 
 /*
@@ -4784,8 +4827,13 @@ ATExecColumnDefault(Relation rel, const char *colName,
 	 * Remove any old default for the column.  We use RESTRICT here for
 	 * safety, but at present we do not expect anything to depend on the
 	 * default.
+	 *
+	 * We treat removing the existing default as an internal operation when
+	 * it is preparatory to adding a new default, but as a user-initiated
+	 * operation when the user asked for a drop.
 	 */
-	RemoveAttrDefault(RelationGetRelid(rel), attnum, DROP_RESTRICT, false);
+	RemoveAttrDefault(RelationGetRelid(rel), attnum, DROP_RESTRICT, false,
+					  newDefault == NULL ? false : true);
 
 	if (newDefault)
 	{
@@ -5198,7 +5246,7 @@ ATExecDropColumn(List **wqueue, Relation rel, const char *colName,
 	object.objectId = RelationGetRelid(rel);
 	object.objectSubId = attnum;
 
-	performDeletion(&object, behavior);
+	performDeletion(&object, behavior, 0);
 
 	/*
 	 * If we dropped the OID column, must adjust pg_class.relhasoids and tell
@@ -6712,7 +6760,7 @@ ATExecDropConstraint(Relation rel, const char *constrName,
 		conobj.objectId = HeapTupleGetOid(tuple);
 		conobj.objectSubId = 0;
 
-		performDeletion(&conobj, behavior);
+		performDeletion(&conobj, behavior, 0);
 
 		found = true;
 
@@ -7434,7 +7482,8 @@ ATExecAlterColumnType(AlteredTableInfo *tab, Relation rel,
 		 * We use RESTRICT here for safety, but at present we do not expect
 		 * anything to depend on the default.
 		 */
-		RemoveAttrDefault(RelationGetRelid(rel), attnum, DROP_RESTRICT, true);
+		RemoveAttrDefault(RelationGetRelid(rel), attnum, DROP_RESTRICT, true,
+						  true);
 
 		StoreAttrDefault(rel, attnum, defaultexpr);
 	}
@@ -7579,7 +7628,7 @@ ATPostAlterTypeCleanup(List **wqueue, AlteredTableInfo *tab, LOCKMODE lockmode)
 		obj.classId = ConstraintRelationId;
 		obj.objectId = lfirst_oid(oid_item);
 		obj.objectSubId = 0;
-		performDeletion(&obj, DROP_RESTRICT);
+		performDeletion(&obj, DROP_RESTRICT, PERFORM_DELETION_INTERNAL);
 	}
 
 	foreach(oid_item, tab->changedIndexOids)
@@ -7587,7 +7636,7 @@ ATPostAlterTypeCleanup(List **wqueue, AlteredTableInfo *tab, LOCKMODE lockmode)
 		obj.classId = RelationRelationId;
 		obj.objectId = lfirst_oid(oid_item);
 		obj.objectSubId = 0;
-		performDeletion(&obj, DROP_RESTRICT);
+		performDeletion(&obj, DROP_RESTRICT, PERFORM_DELETION_INTERNAL);
 	}
 
 	/*
@@ -8816,18 +8865,18 @@ MergeAttributesIntoExisting(Relation child_rel, Relation parent_rel)
  * Check constraints in child table match up with constraints in parent,
  * and increment their coninhcount.
  *
+ * Constraints that are marked ONLY in the parent are ignored.
+ *
  * Called by ATExecAddInherit
  *
  * Currently all constraints in parent must be present in the child. One day we
- * may consider adding new constraints like CREATE TABLE does. We may also want
- * to allow an optional flag on parent table constraints indicating they are
- * intended to ONLY apply to the master table, not to the children. That would
- * make it possible to ensure no records are mistakenly inserted into the
- * master in partitioned tables rather than the appropriate child.
+ * may consider adding new constraints like CREATE TABLE does.
  *
  * XXX This is O(N^2) which may be an issue with tables with hundreds of
  * constraints. As long as tables have more like 10 constraints it shouldn't be
  * a problem though. Even 100 constraints ought not be the end of the world.
+ *
+ * XXX See MergeWithExistingConstraint too if you change this code.
  */
 static void
 MergeConstraintsIntoExisting(Relation child_rel, Relation parent_rel)
@@ -8860,6 +8909,10 @@ MergeConstraintsIntoExisting(Relation child_rel, Relation parent_rel)
 		if (parent_con->contype != CONSTRAINT_CHECK)
 			continue;
 
+		/* if the parent's constraint is marked ONLY, it's not inherited */
+		if (parent_con->conisonly)
+			continue;
+
 		/* Search for a child constraint matching this one */
 		ScanKeyInit(&child_key,
 					Anum_pg_constraint_conrelid,
@@ -8886,6 +8939,14 @@ MergeConstraintsIntoExisting(Relation child_rel, Relation parent_rel)
 						 errmsg("child table \"%s\" has different definition for check constraint \"%s\"",
 								RelationGetRelationName(child_rel),
 								NameStr(parent_con->conname))));
+
+			/* If the constraint is "only" then cannot merge */
+			if (child_con->conisonly)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+						 errmsg("constraint \"%s\" conflicts with non-inherited constraint on child table \"%s\"",
+								NameStr(child_con->conname),
+								RelationGetRelationName(child_rel))));
 
 			/*
 			 * OK, bump the child constraint's inheritance count.  (If we fail
@@ -9417,11 +9478,21 @@ AlterTableNamespace(AlterObjectSchemaStmt *stmt)
 	Oid			oldNspOid;
 	Oid			nspOid;
 	Relation	classRel;
+	RangeVar   *newrv;
 
 	relid = RangeVarGetRelidExtended(stmt->relation, AccessExclusiveLock,
-									 false, false,
+									 stmt->missing_ok, false,
 									 RangeVarCallbackForAlterRelation,
 									 (void *) stmt);
+
+	if (!OidIsValid(relid))
+	{
+		ereport(NOTICE,
+				(errmsg("relation \"%s\" does not exist, skipping",
+							stmt->relation->relname)));
+		return;
+	}
+
 	rel = relation_open(relid, NoLock);
 
 	oldNspOid = RelationGetNamespace(rel);
@@ -9441,8 +9512,9 @@ AlterTableNamespace(AlterObjectSchemaStmt *stmt)
 						get_rel_name(tableId))));
 	}
 
-	/* get schema OID and check its permissions */
-	nspOid = LookupCreationNamespace(stmt->newschema);
+	/* Get and lock schema OID and check its permissions. */
+	newrv = makeRangeVar(stmt->newschema, RelationGetRelationName(rel), -1);
+	nspOid = RangeVarGetAndCheckCreationNamespace(newrv, NoLock, NULL);
 
 	/* common checks on switching namespaces */
 	CheckSetNamespace(oldNspOid, nspOid, RelationRelationId, relid);
@@ -9722,7 +9794,14 @@ PreCommit_on_commit_actions(void)
 					object.classId = RelationRelationId;
 					object.objectId = oc->relid;
 					object.objectSubId = 0;
-					performDeletion(&object, DROP_CASCADE);
+
+					/*
+					 * Since this is an automatic drop, rather than one
+					 * directly initiated by the user, we pass the
+					 * PERFORM_DELETION_INTERNAL flag.
+					 */
+					performDeletion(&object,
+									DROP_CASCADE, PERFORM_DELETION_INTERNAL);
 
 					/*
 					 * Note that table deletion will call

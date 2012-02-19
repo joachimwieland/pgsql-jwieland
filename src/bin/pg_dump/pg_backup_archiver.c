@@ -84,10 +84,10 @@ static int	RestoringToDB(ArchiveHandle *AH);
 static void dump_lo_buf(ArchiveHandle *AH);
 static void vdie_horribly(ArchiveHandle *AH, const char *modulename,
 						  const char *fmt, va_list ap)
-	__attribute__((format(PG_PRINTF_ATTRIBUTE, 3, 0)));
+	__attribute__((format(PG_PRINTF_ATTRIBUTE, 3, 0), noreturn));
 
 static void dumpTimestamp(ArchiveHandle *AH, const char *msg, time_t tim);
-static void SetOutput(ArchiveHandle *AH, char *filename, int compression);
+static void SetOutput(ArchiveHandle *AH, const char *filename, int compression);
 static OutputContext SaveOutput(ArchiveHandle *AH);
 static void RestoreOutput(ArchiveHandle *AH, OutputContext savedContext);
 
@@ -433,10 +433,7 @@ RestoreArchive(Archive *AHX, RestoreOptions *ropt)
 		RestoreOutput(AH, sav);
 
 	if (ropt->useDB)
-	{
-		PQfinish(AH->connection);
-		AH->connection = NULL;
-	}
+		DisconnectDatabase(&AH->public);
 }
 
 /*
@@ -1151,7 +1148,7 @@ archprintf(Archive *AH, const char *fmt,...)
  *******************************/
 
 static void
-SetOutput(ArchiveHandle *AH, char *filename, int compression)
+SetOutput(ArchiveHandle *AH, const char *filename, int compression)
 {
 	int			fn;
 
@@ -1422,11 +1419,10 @@ vdie_horribly(ArchiveHandle *AH, const char *modulename,
 	{
 		if (AH->public.verbose)
 			write_msg(NULL, "*** aborted because of error\n");
-		if (AH->connection)
-			PQfinish(AH->connection);
+		DisconnectDatabase(&AH->public);
 	}
 
-	exit(1);
+	exit_nicely(1);
 }
 
 /* As above, but with variable arg list */
@@ -1438,6 +1434,16 @@ die_horribly(ArchiveHandle *AH, const char *modulename, const char *fmt,...)
 	va_start(ap, fmt);
 	vdie_horribly(AH, modulename, fmt, ap);
 	va_end(ap);
+}
+
+/* As above, but with a complaint about a particular query. */
+void
+die_on_query_failure(ArchiveHandle *AH, const char *modulename,
+					 const char *query)
+{
+	write_msg(modulename, "query failed: %s",
+			  PQerrorMessage(AH->connection));
+	die_horribly(AH, modulename, "query was: %s\n", query);
 }
 
 /* on some error, we may decide to go on... */
@@ -3312,8 +3318,7 @@ restore_toc_entries_prefork(ArchiveHandle *AH)
 	 * mainly to ensure that we don't exceed the specified number of parallel
 	 * connections.
 	 */
-	PQfinish(AH->connection);
-	AH->connection = NULL;
+	DisconnectDatabase(&AH->public);
 
 	/* blow away any transient state from the old connection */
 	if (AH->currUser)
