@@ -142,7 +142,6 @@ GetSlotOfProcess(ParallelState *pstate, pid_t pid)
 #endif
 			return i;
 
-	Assert(false);
 	return NO_SLOT;
 }
 
@@ -166,42 +165,31 @@ vparallel_error_handler_imp(ArchiveHandle *AH,
 	ParallelState pstate;
 	char		buf[512];
 	int			pipefd[2];
-	int			i;
+	int			slotno;
 
-	if (AH->is_clone)
-	{
-		/* we are the child, get the message out to the parent */
-		parallel_error_handler_escrow_data(GET, &pstate);
+	/* Terminate our own connection to the database. */
+	if (AH->connection)
+		ShutdownConnection(&(AH->connection));
+
+	/*
+	 * Note that technically we're using a new pstate here, the old one
+	 * is copied over and then the old one isn't updated anymore. Only
+	 * the new one is, which is okay because control will never return
+	 * from this function.
+	 */
+	parallel_error_handler_escrow_data(GET, &pstate);
+
 #ifdef WIN32
-		i = GetSlotOfThread(&pstate, GetCurrentThreadId());
+	slotno = GetSlotOfThread(&pstate, GetCurrentThreadId());
 #else
-		i = GetSlotOfProcess(&pstate, getpid());
+	slotno = GetSlotOfProcess(&pstate, getpid());
 #endif
-		if (pstate.parallelSlot[i].inErrorHandling)
-			return;
 
-		pstate.parallelSlot[i].inErrorHandling = true;
-
-		pipefd[PIPE_READ] = pstate.parallelSlot[i].pipeRevRead;
-		pipefd[PIPE_WRITE] = pstate.parallelSlot[i].pipeRevWrite;
-
-		strcpy(buf, "ERROR ");
-		vsnprintf(buf + strlen("ERROR "), sizeof(buf) - strlen("ERROR "), fmt, ap);
-
-		sendMessageToMaster(AH, pipefd, buf);
-		if (AH->connection)
-			ShutdownConnection(&(AH->connection));
-#ifdef WIN32
-		ExitThread(1);
-#else
-		exit(1);
-#endif
-	}
-	else
+	if (slotno == NO_SLOT)
 	{
 #ifndef WIN32
 		/*
-		 * We are the parent. We need the handling variable to see if we're
+		 * We are the parent. We need the aborting variable to see if we're
 		 * already handling an error.
 		 */
 		if (aborting)
@@ -210,20 +198,33 @@ vparallel_error_handler_imp(ArchiveHandle *AH,
 
 		signal(SIGPIPE, SIG_IGN);
 #endif
-		/*
-		 * Note that technically we're using a new pstate here, the old one
-		 * is copied over and then the old one isn't updated anymore. Only
-		 * the new one is, which is okay because control will never return
-		 * from this function.
-		 */
-		parallel_error_handler_escrow_data(GET, &pstate);
 		ShutdownWorkersHard(AH, &pstate);
-		/* Terminate own connection */
-		if (AH->connection)
-			ShutdownConnection(&(AH->connection));
 		vwrite_msg(NULL, fmt, ap);
 		exit(1);
 	}
+	else
+	{
+		/* we are the child, get the message out to the parent */
+		if (pstate.parallelSlot[slotno].inErrorHandling)
+			return;
+
+		pstate.parallelSlot[slotno].inErrorHandling = true;
+
+		pipefd[PIPE_READ] = pstate.parallelSlot[slotno].pipeRevRead;
+		pipefd[PIPE_WRITE] = pstate.parallelSlot[slotno].pipeRevWrite;
+
+		strcpy(buf, "ERROR ");
+		vsnprintf(buf + strlen("ERROR "), sizeof(buf) - strlen("ERROR "), fmt, ap);
+
+		sendMessageToMaster(AH, pipefd, buf);
+#ifdef WIN32
+		ExitThread(1);
+#else
+		exit(1);
+#endif
+	}
+
+	/* We should have exited by now */
 	Assert(false);
 }
 

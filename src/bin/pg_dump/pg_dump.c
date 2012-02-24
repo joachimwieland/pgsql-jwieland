@@ -879,7 +879,12 @@ setup_connection(Archive *AH, const char *dumpencoding, char *use_role)
 	PGconn	   *conn = GetConnection(AH);
 	const char *std_strings;
 
-	/* Set the client encoding if requested */
+	/*
+	 * Set the client encoding if requested. If dumpencoding == NULL then
+	 * either it hasn't been requested or we're a cloned connection and then this
+	 * has already been set in CloneArchive according to the original
+	 * connection encoding.
+	 */
 	if (dumpencoding)
 	{
 		if (PQsetClientEncoding(conn, dumpencoding) < 0)
@@ -897,6 +902,10 @@ setup_connection(Archive *AH, const char *dumpencoding, char *use_role)
 	AH->std_strings = (std_strings && strcmp(std_strings, "on") == 0);
 
 	/* Set the role if requested */
+	if (!use_role && AH->use_role)
+		use_role = AH->use_role;
+
+	/* Set the role if requested */
 	if (use_role && AH->remoteVersion >= 80100)
 	{
 		PQExpBuffer query = createPQExpBuffer();
@@ -904,6 +913,10 @@ setup_connection(Archive *AH, const char *dumpencoding, char *use_role)
 		appendPQExpBuffer(query, "SET ROLE %s", fmtId(use_role));
 		ExecuteSqlStatement(AH, query->data);
 		destroyPQExpBuffer(query);
+
+		/* save this for later use on parallel connections */
+		if (!AH->use_role)
+			AH->use_role = strdup(use_role);
 	}
 
 	/* Set the datestyle to ISO to ensure the dump's portability */
@@ -989,58 +1002,6 @@ _SetupWorker(Archive *AHX, RestoreOptions *ropt)
 {
 	setup_connection(AHX, NULL, NULL);
 }
-
-static void
-SetupConnection(Archive *fout, const char *dumpencoding, const char *use_role)
-{
-	ArchiveHandle *AH = (ArchiveHandle *) fout;
-	//const char *std_strings;
-	//PGconn *conn = AH->connection;
-
-	/*
-	 * Set the client encoding if requested. If dumpencoding == NULL then
-	 * either it hasn't been requested or we're a cloned connection and then this
-	 * has already been set in CloneArchive according to the original
-	 * connection encoding.
-	 */
-	if (dumpencoding)
-	{
-		if (PQsetClientEncoding(AH->connection, dumpencoding) < 0)
-		{
-			write_msg(NULL, "invalid client encoding \"%s\" specified\n",
-					  dumpencoding);
-			exit(1);
-		}
-	}
-
-	/*
-	 * Get the active encoding and the standard_conforming_strings setting, so
-	 * we know how to escape strings.
-	 */
-//	AHX->encoding = PQclientEncoding(conn);
-
-//	std_strings = PQparameterStatus(conn, "standard_conforming_strings");
-//	AHX->std_strings = (std_strings && strcmp(std_strings, "on") == 0);
-
-	/* Set the role if requested */
-	if (!use_role && AH->use_role)
-		use_role = AH->use_role;
-
-	if (use_role && fout->remoteVersion >= 80100)
-	{
-		PQExpBuffer query = createPQExpBuffer();
-
-		appendPQExpBuffer(query, "SET ROLE %s", fmtId(use_role));
-		ExecuteSqlStatement(fout, query->data);
-		destroyPQExpBuffer(query);
-
-		/* save this for later use on parallel connections */
-		if (!AH->use_role)
-			AH->use_role = strdup(use_role);
-	}
-
-}
-
 
 static char*
 get_synchronized_snapshot(Archive *fout)
