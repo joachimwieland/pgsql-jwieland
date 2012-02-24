@@ -519,9 +519,9 @@ ParallelBackupStart(ArchiveHandle *AH, RestoreOptions *ropt)
 			/*
 			 * Call CloneArchive on Unix as well even though technically we
 			 * don't need to because fork() gives us a copy in our own address space
-			 * already. But CloneArchive resets the state information, sets is_clone
-			 * and also clones the database connection (for parallel dump)
-			 * which all seems kinda helpful.
+			 * already. But CloneArchive resets the state information and also
+			 * clones the database connection (for parallel dump) which both
+			 * seem kinda helpful.
 			 */
 			AH = CloneArchive(AH);
 

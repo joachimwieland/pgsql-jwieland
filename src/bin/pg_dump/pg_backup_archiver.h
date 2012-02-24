@@ -207,7 +207,6 @@ typedef struct _archiveHandle
 								 * Added V1.7 */
 	ArchiveFormat format;		/* Archive format */
 
-	bool		is_clone;		/* have we been cloned ? */
 	sqlparseInfo sqlparse;		/* state for parsing INSERT data */
 
 	time_t		createDate;		/* Date archive created */

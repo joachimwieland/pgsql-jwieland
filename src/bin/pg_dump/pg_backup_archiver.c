@@ -1937,8 +1937,6 @@ _allocAH(const char *FileSpec, const ArchiveFormat fmt,
 
 	AH->archiveDumpVersion = PG_VERSION;
 
-	AH->is_clone = false;
-
 	AH->createDate = time(NULL);
 
 	AH->intSize = sizeof(int);
@@ -4140,12 +4138,6 @@ CloneArchive(ArchiveHandle *AH)
 
 	/* clone has its own error count, too */
 	clone->public.n_errors = 0;
-
-	/*
-	 * Remember that we're a clone, this is used for deciding if we should
-	 * install a snapshot.
-	 */
-	clone->is_clone = true;
 
 	/*
 	 * Connect our new clone object to the database:
