@@ -825,6 +825,7 @@ ShutdownConnection(PGconn **conn)
 static void
 lockTableNoWait(ArchiveHandle *AH, TocEntry *te)
 {
+	Archive *AHX = (Archive *) AH;
 	const char *qualId;
 	PQExpBuffer query = createPQExpBuffer();
 	PGresult   *res;
@@ -832,12 +833,6 @@ lockTableNoWait(ArchiveHandle *AH, TocEntry *te)
 	Assert(AH->format == archDirectory);
 	Assert(strcmp(te->desc, "BLOBS") != 0);
 
-	/*
-	 * We are only locking tables and thus we can peek at the DROP command
-	 * which contains the fully qualified name.
-	 *
-	 * Additionally, strlen("DROP") == strlen("LOCK").
-	 */
 	appendPQExpBuffer(query, "SELECT pg_namespace.nspname,"
 							 "       pg_class.relname "
 							 "  FROM pg_class "
@@ -852,9 +847,7 @@ lockTableNoWait(ArchiveHandle *AH, TocEntry *te)
 
 	resetPQExpBuffer(query);
 
-	qualId = fmtQualifiedId(PQgetvalue(res, 0, 0),
-							PQgetvalue(res, 0, 1),
-							AH->public.remoteVersion);
+	qualId = fmtQualifiedId(AHX, PQgetvalue(res, 0, 0), PQgetvalue(res, 0, 1));
 
 	appendPQExpBuffer(query, "LOCK TABLE %s IN ACCESS SHARE MODE NOWAIT", qualId);
 	PQclear(res);

@@ -196,37 +196,27 @@ fmtId(const char *rawid)
  * the source database.
  *
  * Like fmtId, use the result before calling again.
+ *
+ * Since we call fmtId and it also uses getThreadLocalPQExpBuffer() we cannot
+ * use it until we're finished with calling fmtId().
  */
 const char *
-fmtQualifiedId(const char *schema, const char *id, int remoteVersion)
+fmtQualifiedId(Archive *fout, const char *schema, const char *id)
 {
 	PQExpBuffer id_return;
-	/*
-	 * We're using the same PQExpBuffer as fmtId(), that's why we first get all
-	 * the values from fmtId and then return them appended in the PQExpBuffer.
-	 * The reason we still use the PQExpBuffer to return the string is just for
-	 * ease of use in the caller, that doesn't have to free the string
-	 * explicitly.
-	 */
-	char	   *schemaBuf, *idBuf;
+	PQExpBuffer lcl_pqexp = createPQExpBuffer();
 
 	/* Suppress schema name if fetching from pre-7.3 DB */
-	if (remoteVersion >= 70300 && schema && *schema)
+	if (fout->remoteVersion >= 70300 && schema && *schema)
 	{
-		schemaBuf = pg_strdup(fmtId(schema));
-	} else
-		schemaBuf = pg_strdup("");
+		appendPQExpBuffer(lcl_pqexp, "%s.", fmtId(schema));
+	}
+	appendPQExpBuffer(lcl_pqexp, "%s", fmtId(id));
 
-	idBuf = pg_strdup(fmtId(id));
-
-	/* this will reset the PQExpBuffer */
 	id_return = getThreadLocalPQExpBuffer();
-	appendPQExpBuffer(id_return, "%s%s%s",
-								 schemaBuf,
-								 strlen(schemaBuf) > 0 ? "." : "",
-								 idBuf);
-	free(schemaBuf);
-	free(idBuf);
+
+	appendPQExpBuffer(id_return, "%s", lcl_pqexp->data);
+	destroyPQExpBuffer(lcl_pqexp);
 
 	return id_return->data;
 }

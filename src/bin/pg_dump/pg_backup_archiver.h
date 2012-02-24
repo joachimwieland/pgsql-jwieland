@@ -264,8 +264,6 @@ typedef struct _archiveHandle
 	enum trivalue promptPassword;
 	char	   *savedPassword;	/* password for ropt->username, if known */
 	char	   *use_role;
-	char	   *sync_snapshot_id;	/* sync snapshot id for parallel
-									   operation */
 	PGconn	   *connection;
 	int			connectToDB;	/* Flag to indicate if direct DB connection is
 								 * required */

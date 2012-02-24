@@ -92,6 +92,8 @@ static size_t _CustomReadFunc(ArchiveHandle *AH, char **buf, size_t *buflen);
 
 static const char *modulename = gettext_noop("custom archiver");
 
+
+
 /*
  *	Init routine required by ALL formats. This is a global routine
  *	and should be declared in pg_backup_archiver.h

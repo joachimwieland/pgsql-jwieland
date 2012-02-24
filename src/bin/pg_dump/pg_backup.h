@@ -91,6 +91,7 @@ struct Archive
 	int			maxRemoteVersion;
 
 	int			numWorkers;		/* number of parallel processes */
+	char	   *sync_snapshot_id;  /* sync snapshot id for parallel operation */
 
 	/* info needed for string escaping */
 	int			encoding;		/* libpq code for client_encoding */
@@ -166,7 +167,6 @@ extern void ConnectDatabase(Archive *AH,
 				const char *pgport,
 				const char *username,
 				enum trivalue prompt_password);
-
 extern void DisconnectDatabase(Archive *AHX);
 extern PGconn *GetConnection(Archive *AHX);
 

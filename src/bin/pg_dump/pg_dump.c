@@ -235,12 +235,8 @@ static const char *convertTSFunction(Archive *fout, Oid funcOid);
 static Oid	findLastBuiltinOid_V71(Archive *fout, const char *);
 static Oid	findLastBuiltinOid_V70(Archive *fout);
 static void selectSourceSchema(Archive *fout, const char *schemaName);
-static void selectSourceSchemaOnAH(ArchiveHandle *AH, const char *schemaName);
-static void selectSourceSchemaOnConnection(PGconn *conn, const char *schemaName);
 static char *getFormattedTypeName(Archive *fout, Oid oid, OidOptions opts);
 static char *myFormatType(const char *typname, int32 typmod);
-static const char *fmtQualifiedId(Archive *fout,
-								  const char *schema, const char *id);
 static void getBlobs(Archive *fout);
 static void dumpBlob(Archive *fout, BlobInfo *binfo);
 static int	dumpBlobs(Archive *fout, void *arg);
@@ -259,13 +255,8 @@ static void binary_upgrade_extension_member(PQExpBuffer upgrade_buffer,
 								const char *objlabel);
 static const char *getAttrName(int attrnum, TableInfo *tblInfo);
 static const char *fmtCopyColumnList(const TableInfo *ti, PQExpBuffer buffer);
-static void do_sql_command(PGconn *conn, const char *query);
-static void check_sql_result(PGresult *res, PGconn *conn, const char *query,
-				 ExecStatusType expected);
-static void SetupConnection(Archive *AHX, const char *dumpencoding,
-							const char *use_role);
-static char *get_synchronized_snapshot(ArchiveHandle *AH);
-static PGresult *ExecuteSqlQueryForSingleRow(Archive *fout, char *query);
+static char *get_synchronized_snapshot(Archive *fout);
+static PGresult *ExecuteSqlQueryForSingleRow(Archive *fout, const char *query);
 
 int
 main(int argc, char **argv)
@@ -631,7 +622,7 @@ main(int argc, char **argv)
 	fout->minRemoteVersion = 70000;
 	fout->maxRemoteVersion = (my_version / 100) * 100 + 99;
 
-	g_fout->numWorkers = numWorkers;
+	fout->numWorkers = numWorkers;
 
 	/*
 	 * Open the database using the Archiver, so it knows about it. Errors mean
@@ -647,25 +638,6 @@ main(int argc, char **argv)
 	if (fout->remoteVersion < 90100)
 		no_security_labels = 1;
 
-	/*
-	 * Start transaction-snapshot mode transaction to dump consistent data.
-	 */
-	ExecuteSqlStatement(fout, "BEGIN");
-	if (fout->remoteVersion >= 90100)
-	{
-		if (serializable_deferrable)
-			ExecuteSqlStatement(fout,
-								"SET TRANSACTION ISOLATION LEVEL "
-								"SERIALIZABLE, READ ONLY, DEFERRABLE");
-		else
-			ExecuteSqlStatement(fout,
-								"SET TRANSACTION ISOLATION LEVEL "
-								"REPEATABLE READ");
-	}
-	else
-		ExecuteSqlStatement(fout,
-							"SET TRANSACTION ISOLATION LEVEL SERIALIZABLE");
-
 	/* Select the appropriate subquery to convert user IDs to names */
 	if (fout->remoteVersion >= 80100)
 		username_subquery = "SELECT rolname FROM pg_catalog.pg_roles WHERE oid =";
@@ -677,12 +649,12 @@ main(int argc, char **argv)
 	if (numWorkers > 1)
 	{
 		/* check the version for the synchronized snapshots feature */
-		if (g_fout->remoteVersion < 90200 && !no_synchronized_snapshots)
+		if (fout->remoteVersion < 90200 && !no_synchronized_snapshots)
 		{
 			write_msg(NULL, "No synchronized snapshots available in this version\n"
 						 "You might have to run with --no-synchronized-snapshots\n");
 			exit(1);
-		} else if (g_fout->remoteVersion >= 90200 && no_synchronized_snapshots)
+		} else if (fout->remoteVersion >= 90200 && no_synchronized_snapshots)
 			write_msg(NULL, "Ignoring --no-synchronized-snapshots\n");
 	}
 
@@ -696,6 +668,7 @@ main(int argc, char **argv)
 			g_last_builtin_oid = findLastBuiltinOid_V70(fout);
 		if (g_verbose)
 			write_msg(NULL, "last built-in OID is %u\n", g_last_builtin_oid);
+	}
 
 	/* Expand schema selection patterns into OID lists */
 	if (schema_include_patterns.head != NULL)
@@ -967,6 +940,45 @@ setup_connection(Archive *AH, const char *dumpencoding, char *use_role)
 	 */
 	if (quote_all_identifiers && AH->remoteVersion >= 90100)
 		ExecuteSqlStatement(AH, "SET quote_all_identifiers = true");
+
+	/*
+	 * Start transaction-snapshot mode transaction to dump consistent data.
+	 */
+	ExecuteSqlStatement(AH, "BEGIN");
+	if (AH->remoteVersion >= 90100)
+	{
+		if (serializable_deferrable)
+			ExecuteSqlStatement(AH,
+						   "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE, "
+						   "READ ONLY, DEFERRABLE");
+		else
+			ExecuteSqlStatement(AH,
+						   "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+	}
+	else
+		ExecuteSqlStatement(AH, "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE");
+
+	if (AH->numWorkers > 1 && AH->remoteVersion >= 90200)
+	{
+		if (AH->sync_snapshot_id)
+		{
+			PQExpBuffer query = createPQExpBuffer();
+			appendPQExpBuffer(query, "SET TRANSACTION SNAPSHOT ");
+			appendStringLiteralConn(query, AH->sync_snapshot_id, conn);
+			destroyPQExpBuffer(query);
+		}
+		else {
+			/*
+			 * If the version is lower and we don't have synchronized snapshots
+			 * yet, we will error out earlier already. So either we have the
+			 * feature or the user has given the explicit command not to use it.
+			 * Note: If we have it, we always use it, you cannot switch it off
+			 * then.
+			 */
+			if (AH->remoteVersion >= 90200)
+				AH->sync_snapshot_id = get_synchronized_snapshot(AH);
+		}
+	}
 }
 
 /*
@@ -975,15 +987,15 @@ setup_connection(Archive *AH, const char *dumpencoding, char *use_role)
 void
 _SetupWorker(Archive *AHX, RestoreOptions *ropt)
 {
-	SetupConnection(AHX, NULL, NULL);
+	setup_connection(AHX, NULL, NULL);
 }
 
 static void
-SetupConnection(Archive *AHX, const char *dumpencoding, const char *use_role)
+SetupConnection(Archive *fout, const char *dumpencoding, const char *use_role)
 {
-	ArchiveHandle *AH = (ArchiveHandle *) AHX;
-	const char *std_strings;
-	PGconn *conn = AH->connection;
+	ArchiveHandle *AH = (ArchiveHandle *) fout;
+	//const char *std_strings;
+	//PGconn *conn = AH->connection;
 
 	/*
 	 * Set the client encoding if requested. If dumpencoding == NULL then
@@ -1005,21 +1017,21 @@ SetupConnection(Archive *AHX, const char *dumpencoding, const char *use_role)
 	 * Get the active encoding and the standard_conforming_strings setting, so
 	 * we know how to escape strings.
 	 */
-	AHX->encoding = PQclientEncoding(conn);
+//	AHX->encoding = PQclientEncoding(conn);
 
-	std_strings = PQparameterStatus(conn, "standard_conforming_strings");
-	AHX->std_strings = (std_strings && strcmp(std_strings, "on") == 0);
+//	std_strings = PQparameterStatus(conn, "standard_conforming_strings");
+//	AHX->std_strings = (std_strings && strcmp(std_strings, "on") == 0);
 
 	/* Set the role if requested */
 	if (!use_role && AH->use_role)
 		use_role = AH->use_role;
 
-	if (use_role && AHX->remoteVersion >= 80100)
+	if (use_role && fout->remoteVersion >= 80100)
 	{
 		PQExpBuffer query = createPQExpBuffer();
 
 		appendPQExpBuffer(query, "SET ROLE %s", fmtId(use_role));
-		do_sql_command(conn, query->data);
+		ExecuteSqlStatement(fout, query->data);
 		destroyPQExpBuffer(query);
 
 		/* save this for later use on parallel connections */
@@ -1027,109 +1039,17 @@ SetupConnection(Archive *AHX, const char *dumpencoding, const char *use_role)
 			AH->use_role = strdup(use_role);
 	}
 
-	/* Set the datestyle to ISO to ensure the dump's portability */
-	do_sql_command(conn, "SET DATESTYLE = ISO");
-
-	/* Likewise, avoid using sql_standard intervalstyle */
-	if (AHX->remoteVersion >= 80400)
-		do_sql_command(conn, "SET INTERVALSTYLE = POSTGRES");
-
-	/*
-	 * If supported, set extra_float_digits so that we can dump float data
-	 * exactly (given correctly implemented float I/O code, anyway)
-	 */
-	if (AHX->remoteVersion >= 80500)
-		do_sql_command(conn, "SET extra_float_digits TO 3");
-	else if (AHX->remoteVersion >= 70400)
-		do_sql_command(conn, "SET extra_float_digits TO 2");
-
-	/*
-	 * If synchronized scanning is supported, disable it, to prevent
-	 * unpredictable changes in row ordering across a dump and reload.
-	 */
-	if (AHX->remoteVersion >= 80300)
-		do_sql_command(conn, "SET synchronize_seqscans TO off");
-
-	/*
-	 * Quote all identifiers, if requested.
-	 */
-	if (quote_all_identifiers && AHX->remoteVersion >= 90100)
-		do_sql_command(conn, "SET quote_all_identifiers = true");
-
-	/*
-	 * Disable timeouts if supported.
-	 */
-	if (AHX->remoteVersion >= 70300)
-		do_sql_command(conn, "SET statement_timeout = 0");
-
-	/*
-	 * Quote all identifiers, if requested.
-	 */
-	if (quote_all_identifiers && AHX->remoteVersion >= 90100)
-		do_sql_command(conn, "SET quote_all_identifiers = true");
-
-	/*
-	 * Start transaction-snapshot mode transaction to dump consistent data.
-	 */
-	do_sql_command(conn, "BEGIN");
-	if (AHX->remoteVersion >= 90100)
-	{
-		if (serializable_deferrable)
-			do_sql_command(conn,
-						   "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE, "
-						   "READ ONLY, DEFERRABLE");
-		else
-			do_sql_command(conn,
-						   "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
-	}
-	else
-		do_sql_command(conn, "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE");
-
-	if (AHX->numWorkers > 1 && AHX->remoteVersion >= 90200)
-	{
-		if (AH->is_clone)
-		{
-			PQExpBuffer query = createPQExpBuffer();
-			appendPQExpBuffer(query, "SET TRANSACTION SNAPSHOT ");
-			appendStringLiteralConn(query, AH->sync_snapshot_id, conn);
-			destroyPQExpBuffer(query);
-		}
-		else {
-			/*
-			 * If the version is lower and we don't have synchronized snapshots
-			 * yet, we will error out earlier already. So either we have the
-			 * feature or the user has given the explicit command not to use it.
-			 * Note: If we have it, we always use it, you cannot switch it off
-			 * then.
-			 */
-			if (AHX->remoteVersion >= 90200)
-				AH->sync_snapshot_id = get_synchronized_snapshot(AH);
-		}
-	}
 }
 
+
 static char*
-get_synchronized_snapshot(ArchiveHandle *AH)
+get_synchronized_snapshot(Archive *fout)
 {
 	const char *query = "select pg_export_snapshot()";
 	char	   *result;
-	int			ntups;
-	PGconn	   *conn = AH->connection;
-	PGresult   *res = PQexec(conn, query);
+	PGresult   *res;
 
-	check_sql_result(res, conn, query, PGRES_TUPLES_OK);
-
-	/* Expecting a single result only */
-	ntups = PQntuples(res);
-	if (ntups != 1)
-	{
-		write_msg(NULL, ngettext("query returned %d row instead of one: %s\n",
-							   "query returned %d rows instead of one: %s\n",
-								 ntups),
-				  ntups, query);
-		exit_nicely();
-	}
-
+	res = ExecuteSqlQueryForSingleRow(fout, query);
 	result = strdup(PQgetvalue(res, 0, 0));
 	PQclear(res);
 
@@ -1455,7 +1375,6 @@ dumpTableData_copy(Archive *fout, void *dcontext)
 	 * This is a data dumper routine, executed in a child for parallel backup, so
 	 * it must not access the global g_conn but AH->connection instead.
 	 */
-	ArchiveHandle *AH = (ArchiveHandle *) fout;
 	TableDataInfo *tdinfo = (TableDataInfo *) dcontext;
 	TableInfo  *tbinfo = tdinfo->tdtable;
 	const char *classname = tbinfo->dobj.name;
@@ -1633,7 +1552,6 @@ dumpTableData_insert(Archive *fout, void *dcontext)
 	 * This is a data dumper routine, executed in a child for parallel backup, so
 	 * it must not access the global g_conn but AH->connection instead.
 	 */
-	ArchiveHandle *AH = (ArchiveHandle *) fout;
 	TableDataInfo *tdinfo = (TableDataInfo *) dcontext;
 	TableInfo  *tbinfo = tdinfo->tdtable;
 	const char *classname = tbinfo->dobj.name;
@@ -2547,7 +2465,6 @@ dumpBlobs(Archive *fout, void *arg)
 	 * This is a data dumper routine, executed in a child for parallel backup,
 	 * so it must not access the global g_conn but AH->connection instead.
 	 */
-	ArchiveHandle *AH = (ArchiveHandle *) AHX;
 	const char *blobQry;
 	const char *blobFetchQry;
 	PGconn	   *conn = GetConnection(fout);
@@ -14330,49 +14247,6 @@ getDependencies(Archive *fout)
 }
 
 /*
- * Select the source schema and use a static var to remember what we have set
- * as the default schema right now.  This function is never called in parallel
- * context, so the static var is okay. The parallel context will call
- * selectSourceSchemaOnAH, and this remembers the current schema via
- * AH->currSchema.
- */
-static void
-selectSourceSchema(const char *schemaName)
-{
-	static char *currSchemaName = NULL;
-
-	if (!schemaName || *schemaName == '\0' ||
-		(currSchemaName && strcmp(currSchemaName, schemaName) == 0))
-		return;					/* no need to do anything */
-
-	selectSourceSchemaOnConnection(g_conn, schemaName);
-
-	if (currSchemaName)
-		free(currSchemaName);
-	currSchemaName = pg_strdup(schemaName);
-}
-
-/*
- * This function lets a DataDumper function select a schema on an
- * ArchiveHandle. These functions can be called from a threaded program for
- * parallel dump/restore and must therefore not access global variables (read
- * only access to g_fout->remoteVersion is okay however).
- */
-static void
-selectSourceSchemaOnAH(ArchiveHandle *AH, const char *schemaName)
-{
-	if (!schemaName || *schemaName == '\0' ||
-		(AH->currSchema && strcmp(AH->currSchema, schemaName) == 0))
-		return;					/* no need to do anything */
-
-	selectSourceSchemaOnConnection(AH->connection, schemaName);
-
-	if (AH->currSchema)
-		free(AH->currSchema);
-	AH->currSchema = pg_strdup(schemaName);
-}
-
-/*
  * selectSourceSchema - make the specified schema the active search path
  * in the source database.
  *
@@ -14545,34 +14419,6 @@ myFormatType(const char *typname, int32 typmod)
 }
 
 /*
- * fmtQualifiedId - convert a qualified name to the proper format for
- * the source database.
- *
- * Like fmtId, use the result before calling again.
- */
-static const char *
-fmtQualifiedId(Archive *fout, const char *schema, const char *id)
-{
-	static PQExpBuffer id_return = NULL;
-
-	if (id_return)				/* first time through? */
-		resetPQExpBuffer(id_return);
-	else
-		id_return = createPQExpBuffer();
-
-	/* Suppress schema name if fetching from pre-7.3 DB */
-	if (fout->remoteVersion >= 70300 && schema && *schema)
-	{
-		appendPQExpBuffer(id_return, "%s.",
-						  fmtId(schema));
-	}
-	appendPQExpBuffer(id_return, "%s",
-					  fmtId(id));
-
-	return id_return->data;
-}
-
-/*
  * Return a column list clause for the given relation.
  *
  * Special case: if there are no undropped columns in the relation, return
@@ -14610,7 +14456,7 @@ fmtCopyColumnList(const TableInfo *ti, PQExpBuffer buffer)
  * Execute an SQL query and verify that we got exactly one row back.
  */
 static PGresult *
-ExecuteSqlQueryForSingleRow(Archive *fout, char *query)
+ExecuteSqlQueryForSingleRow(Archive *fout, const char *query)
 {
 	PGresult   *res;
 	int			ntups;

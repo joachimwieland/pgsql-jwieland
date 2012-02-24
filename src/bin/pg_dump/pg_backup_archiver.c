@@ -32,9 +32,6 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 
-static const char *modulename = gettext_noop("archiver");
-
-
 #ifdef WIN32
 #include <io.h>
 #endif
@@ -50,6 +47,8 @@ typedef struct _outputContext
 	void	   *OF;
 	int			gzOut;
 } OutputContext;
+
+static const char *modulename = gettext_noop("archiver");
 
 /* index array created by fix_dependencies -- only used in parallel restore */
 static TocEntry **tocsByDumpId; /* index by dumpId - 1 */
@@ -2097,6 +2096,8 @@ WriteToc(ArchiveHandle *AH)
 	TocEntry   *te;
 	char		workbuf[32];
 	int			i;
+
+	/* printf("%d TOC Entries to save\n", AH->tocCount); */
 
 	WriteInt(AH, AH->tocCount);
 
