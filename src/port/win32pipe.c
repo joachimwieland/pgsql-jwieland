@@ -24,6 +24,9 @@ pgwin32_pipe(int handles[2], char **error_string, int *error_code)
 	struct sockaddr_in serv_addr;
 	int			len = sizeof(serv_addr);
 
+	printf("In pgwin32_pipe\n");
+	elog(LOG, "In pgwin32_pipe");
+
 	handles[0] = handles[1] = INVALID_SOCKET;
 
 	if ((s = socket(AF_INET, SOCK_STREAM, 0)) == INVALID_SOCKET)
@@ -97,5 +100,3 @@ pgwin32_piperead(int s, char *buf, int len)
 		ret = 0;
 	return ret;
 }
-
-#endif
