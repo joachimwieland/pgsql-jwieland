@@ -400,6 +400,10 @@ extern int	pgwin32_ReserveSharedMemoryRegion(HANDLE);
 /* in backend/port/win32/crashdump.c */
 extern void pgwin32_install_crashdump_handler(void);
 
+/* in port/win32pipe.c */
+int pgwin32_pipe(int handles[2], char **error_string, int *error_code);
+int pgwin32_piperead(int s, char *buf, int len);
+
 /* in port/win32error.c */
 extern void _dosmaperr(unsigned long);
 
