@@ -23,7 +23,8 @@
 #include "postgres.h"
 
 #include "miscadmin.h"
-#include "foreign/fdwapi.h"
+#include "nodes/plannodes.h"
+#include "nodes/relation.h"
 #include "utils/datum.h"
 
 
@@ -590,23 +591,9 @@ _copyForeignScan(const ForeignScan *from)
 	/*
 	 * copy remainder of node
 	 */
-	COPY_SCALAR_FIELD(fsSystemCol);
-	COPY_NODE_FIELD(fdwplan);
-
-	return newnode;
-}
-
-/*
- * _copyFdwPlan
- */
-static FdwPlan *
-_copyFdwPlan(const FdwPlan *from)
-{
-	FdwPlan    *newnode = makeNode(FdwPlan);
-
-	COPY_SCALAR_FIELD(startup_cost);
-	COPY_SCALAR_FIELD(total_cost);
+	COPY_NODE_FIELD(fdw_exprs);
 	COPY_NODE_FIELD(fdw_private);
+	COPY_SCALAR_FIELD(fsSystemCol);
 
 	return newnode;
 }
@@ -2364,6 +2351,7 @@ _copyConstraint(const Constraint *from)
 	COPY_SCALAR_FIELD(fk_matchtype);
 	COPY_SCALAR_FIELD(fk_upd_action);
 	COPY_SCALAR_FIELD(fk_del_action);
+	COPY_NODE_FIELD(old_conpfeqop);
 	COPY_SCALAR_FIELD(skip_validation);
 	COPY_SCALAR_FIELD(initially_valid);
 
@@ -3840,9 +3828,6 @@ copyObject(const void *from)
 			break;
 		case T_ForeignScan:
 			retval = _copyForeignScan(from);
-			break;
-		case T_FdwPlan:
-			retval = _copyFdwPlan(from);
 			break;
 		case T_Join:
 			retval = _copyJoin(from);

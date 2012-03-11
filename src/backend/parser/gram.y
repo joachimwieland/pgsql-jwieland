@@ -6731,6 +6731,16 @@ RenameStmt: ALTER AGGREGATE func_name aggr_args RENAME TO name
 					n->missing_ok = true;
 					$$ = (Node *)n;
 				}
+			| ALTER TABLE relation_expr RENAME CONSTRAINT name TO name
+				{
+					RenameStmt *n = makeNode(RenameStmt);
+					n->renameType = OBJECT_CONSTRAINT;
+					n->relationType = OBJECT_TABLE;
+					n->relation = $3;
+					n->subname = $6;
+					n->newname = $8;
+					$$ = (Node *)n;
+				}
 			| ALTER FOREIGN TABLE relation_expr RENAME opt_column name TO name
 				{
 					RenameStmt *n = makeNode(RenameStmt);
@@ -10701,6 +10711,19 @@ func_expr:	func_name '(' ')' over_clause
 					n->location = @1;
 					$$ = (Node *)n;
 				}
+			| COLLATION FOR '(' a_expr ')'
+				{
+					FuncCall *n = makeNode(FuncCall);
+					n->funcname = SystemFuncName("pg_collation_for");
+					n->args = list_make1($4);
+					n->agg_order = NIL;
+					n->agg_star = FALSE;
+					n->agg_distinct = FALSE;
+					n->func_variadic = FALSE;
+					n->over = NULL;
+					n->location = @1;
+					$$ = (Node *)n;
+				}
 			| CURRENT_DATE
 				{
 					/*
@@ -12152,7 +12175,6 @@ unreserved_keyword:
 			| CLASS
 			| CLOSE
 			| CLUSTER
-			| COLLATION
 			| COMMENT
 			| COMMENTS
 			| COMMIT
@@ -12491,6 +12513,7 @@ reserved_keyword:
 			| CAST
 			| CHECK
 			| COLLATE
+			| COLLATION
 			| COLUMN
 			| CONSTRAINT
 			| CREATE

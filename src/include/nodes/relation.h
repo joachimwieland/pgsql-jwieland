@@ -334,10 +334,13 @@ typedef struct PlannerInfo
  *		allvisfrac - fraction of disk pages that are marked all-visible
  *		subplan - plan for subquery (NULL if it's not a subquery)
  *		subroot - PlannerInfo for subquery (NULL if it's not a subquery)
+ *		fdwroutine - function hooks for FDW, if foreign table (else NULL)
+ *		fdw_private - private state for FDW, if foreign table (else NULL)
  *
  *		Note: for a subquery, tuples, subplan, subroot are not set immediately
  *		upon creation of the RelOptInfo object; they are filled in when
- *		set_base_rel_pathlist processes the object.
+ *		set_subquery_pathlist processes the object.  Likewise, fdwroutine
+ *		and fdw_private are filled during initial path creation.
  *
  *		For otherrels that are appendrel members, these fields are filled
  *		in just as for a baserel.
@@ -414,8 +417,12 @@ typedef struct RelOptInfo
 	BlockNumber pages;			/* size estimates derived from pg_class */
 	double		tuples;
 	double		allvisfrac;
+	/* use "struct Plan" to avoid including plannodes.h here */
 	struct Plan *subplan;		/* if subquery */
 	PlannerInfo *subroot;		/* if subquery */
+	/* use "struct FdwRoutine" to avoid including fdwapi.h here */
+	struct FdwRoutine *fdwroutine;	/* if foreign table */
+	void	   *fdw_private;	/* if foreign table */
 
 	/* used by various scans and joins: */
 	List	   *baserestrictinfo;		/* RestrictInfo structures (if base
@@ -793,13 +800,18 @@ typedef struct TidPath
 } TidPath;
 
 /*
- * ForeignPath represents a scan of a foreign table
+ * ForeignPath represents a potential scan of a foreign table
+ *
+ * fdw_private stores FDW private data about the scan.  While fdw_private is
+ * not actually touched by the core code during normal operations, it's
+ * generally a good idea to use a representation that can be dumped by
+ * nodeToString(), so that you can examine the structure during debugging
+ * with tools like pprint().
  */
 typedef struct ForeignPath
 {
 	Path		path;
-	/* use struct pointer to avoid including fdwapi.h here */
-	struct FdwPlan *fdwplan;
+	List	   *fdw_private;
 } ForeignPath;
 
 /*

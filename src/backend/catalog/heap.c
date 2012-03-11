@@ -957,10 +957,12 @@ AddNewRelationType(const char *typeName,
  *	reltablespace: OID of tablespace it goes in
  *	relid: OID to assign to new rel, or InvalidOid to select a new OID
  *	reltypeid: OID to assign to rel's rowtype, or InvalidOid to select one
+ *	reloftypeid: if a typed table, OID of underlying type; else InvalidOid
  *	ownerid: OID of new rel's owner
  *	tupdesc: tuple descriptor (source of column definitions)
  *	cooked_constraints: list of precooked check constraints and defaults
  *	relkind: relkind for new rel
+ *	relpersistence: rel's persistence status (permanent, temp, or unlogged)
  *	shared_relation: TRUE if it's to be a shared relation
  *	mapped_relation: TRUE if the relation will use the relfilenode map
  *	oidislocal: TRUE if oid column (if any) should be marked attislocal
@@ -1182,7 +1184,7 @@ heap_create_with_catalog(const char *relname,
 				   F_ARRAY_SEND,	/* array send (bin) proc */
 				   InvalidOid,	/* typmodin procedure - none */
 				   InvalidOid,	/* typmodout procedure - none */
-				   InvalidOid,	/* analyze procedure - default */
+				   F_ARRAY_TYPANALYZE,	/* array analyze procedure */
 				   new_type_oid,	/* array element type - the rowtype */
 				   true,		/* yes, this is an array type */
 				   InvalidOid,	/* this has no array type */
@@ -1235,6 +1237,10 @@ heap_create_with_catalog(const char *relname,
 	 * should they have any ACL entries.  The same applies for extension
 	 * dependencies.
 	 *
+	 * If it's a temp table, we do not make it an extension member; this
+	 * prevents the unintuitive result that deletion of the temp table at
+	 * session end would make the whole extension go away.
+	 *
 	 * Also, skip this in bootstrap mode, since we don't make dependencies
 	 * while bootstrapping.
 	 */
@@ -1255,7 +1261,8 @@ heap_create_with_catalog(const char *relname,
 
 		recordDependencyOnOwner(RelationRelationId, relid, ownerid);
 
-		recordDependencyOnCurrentExtension(&myself, false);
+		if (relpersistence != RELPERSISTENCE_TEMP)
+			recordDependencyOnCurrentExtension(&myself, false);
 
 		if (reloftypeid)
 		{
@@ -1279,7 +1286,8 @@ heap_create_with_catalog(const char *relname,
 	}
 
 	/* Post creation hook for new relation */
-	InvokeObjectAccessHook(OAT_POST_CREATE, RelationRelationId, relid, 0);
+	InvokeObjectAccessHook(OAT_POST_CREATE,
+						   RelationRelationId, relid, 0, NULL);
 
 	/*
 	 * Store any supplied constraints and defaults.

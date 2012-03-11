@@ -168,11 +168,12 @@ mb_utf_validate(unsigned char *pwcs)
  */
 
 /*
- * pg_wcswidth is the dumb width function. It assumes that everything will
- * only appear on one line. OTOH it is easier to use if this applies to you.
+ * pg_wcswidth is the dumb display-width function.
+ * It assumes that everything will appear on one line.
+ * OTOH it is easier to use than pg_wcssize if this applies to you.
  */
 int
-pg_wcswidth(const unsigned char *pwcs, size_t len, int encoding)
+pg_wcswidth(const char *pwcs, size_t len, int encoding)
 {
 	int			width = 0;
 
@@ -181,15 +182,16 @@ pg_wcswidth(const unsigned char *pwcs, size_t len, int encoding)
 		int			chlen,
 					chwidth;
 
-		chlen = PQmblen((const char *) pwcs, encoding);
-		if (chlen > len)
+		chlen = PQmblen(pwcs, encoding);
+		if (len < (size_t) chlen)
 			break;				/* Invalid string */
 
-		chwidth = PQdsplen((const char *) pwcs, encoding);
-
+		chwidth = PQdsplen(pwcs, encoding);
 		if (chwidth > 0)
 			width += chwidth;
+
 		pwcs += chlen;
+		len -= chlen;
 	}
 	return width;
 }
@@ -217,10 +219,10 @@ pg_wcssize(const unsigned char *pwcs, size_t len, int encoding,
 
 	for (; *pwcs && len > 0; pwcs += chlen)
 	{
-		chlen = PQmblen((char *) pwcs, encoding);
+		chlen = PQmblen((const char *) pwcs, encoding);
 		if (len < (size_t) chlen)
 			break;
-		w = PQdsplen((char *) pwcs, encoding);
+		w = PQdsplen((const char *) pwcs, encoding);
 
 		if (chlen == 1)			/* single-byte char */
 		{
@@ -298,10 +300,10 @@ pg_wcsformat(const unsigned char *pwcs, size_t len, int encoding,
 
 	for (; *pwcs && len > 0; pwcs += chlen)
 	{
-		chlen = PQmblen((char *) pwcs, encoding);
+		chlen = PQmblen((const char *) pwcs, encoding);
 		if (len < (size_t) chlen)
 			break;
-		w = PQdsplen((char *) pwcs, encoding);
+		w = PQdsplen((const char *) pwcs, encoding);
 
 		if (chlen == 1)			/* single-byte char */
 		{
