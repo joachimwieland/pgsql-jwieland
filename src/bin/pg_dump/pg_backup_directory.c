@@ -325,6 +325,9 @@ _WriteData(ArchiveHandle *AH, const void *data, size_t dLen)
 	if (dLen == 0)
 		return 0;
 
+	/* Are we aborting? */
+	checkAborting(AH);
+
 	return cfwrite(data, dLen, ctx->dataFH);
 }
 
@@ -488,6 +491,9 @@ _WriteBuf(ArchiveHandle *AH, const void *buf, size_t len)
 {
 	lclContext *ctx = (lclContext *) AH->formatData;
 	size_t		res;
+
+	/* Are we aborting? */
+	checkAborting(AH);
 
 	res = cfwrite(buf, len, ctx->dataFH);
 	if (res != len)

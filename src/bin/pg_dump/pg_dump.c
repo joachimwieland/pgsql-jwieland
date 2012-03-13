@@ -596,7 +596,8 @@ main(int argc, char **argv)
 	}
 
 	/* Parallel backup only in the directory archive format so far */
-	if (archiveFormat != archDirectory && numWorkers > 1) {
+	if (archiveFormat != archDirectory && numWorkers > 1)
+	{
 		write_msg(NULL, "parallel backup only supported by the directory format\n");
 		exit(1);
 	}
@@ -654,8 +655,7 @@ main(int argc, char **argv)
 			write_msg(NULL, "No synchronized snapshots available in this version\n"
 						 "You might have to run with --no-synchronized-snapshots\n");
 			exit(1);
-		} else if (fout->remoteVersion >= 90200 && no_synchronized_snapshots)
-			write_msg(NULL, "Ignoring --no-synchronized-snapshots\n");
+		}
 	}
 
 	/* Find the last built-in OID, if needed */
@@ -971,7 +971,7 @@ setup_connection(Archive *AH, const char *dumpencoding, char *use_role)
 	else
 		ExecuteSqlStatement(AH, "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE");
 
-	if (AH->numWorkers > 1 && AH->remoteVersion >= 90200)
+	if (AH->numWorkers > 1 && AH->remoteVersion >= 90200 && !no_synchronized_snapshots)
 	{
 		if (AH->sync_snapshot_id)
 		{
@@ -980,17 +980,8 @@ setup_connection(Archive *AH, const char *dumpencoding, char *use_role)
 			appendStringLiteralConn(query, AH->sync_snapshot_id, conn);
 			destroyPQExpBuffer(query);
 		}
-		else {
-			/*
-			 * If the version is lower and we don't have synchronized snapshots
-			 * yet, we will error out earlier already. So either we have the
-			 * feature or the user has given the explicit command not to use it.
-			 * Note: If we have it, we always use it, you cannot switch it off
-			 * then.
-			 */
-			if (AH->remoteVersion >= 90200)
-				AH->sync_snapshot_id = get_synchronized_snapshot(AH);
-		}
+		else
+			AH->sync_snapshot_id = get_synchronized_snapshot(AH);
 	}
 }
 

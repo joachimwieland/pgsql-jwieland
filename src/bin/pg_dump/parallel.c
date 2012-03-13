@@ -58,7 +58,7 @@ static void vparallel_error_handler_imp(ArchiveHandle *AH, const char *modulenam
 
 static const char *modulename = gettext_noop("parallel archiver");
 
-static int ShutdownConnection(PGconn **conn);
+static void ShutdownConnection(PGconn **conn);
 
 static void WaitForTerminatingWorkers(ArchiveHandle *AH, ParallelState *pstate);
 static void ShutdownWorkersHard(ArchiveHandle *AH, ParallelState *pstate);
@@ -74,7 +74,7 @@ static char *getMessageFromWorker(ArchiveHandle *AH, ParallelState *pstate,
 								  bool do_wait, int *worker);
 static void sendMessageToWorker(ArchiveHandle *AH, ParallelState *pstate,
 							    int worker, const char *str);
-static char *readMessageFromPipe(int fd, bool do_wait);
+static char *readMessageFromPipe(int fd);
 
 static void SetupWorker(ArchiveHandle *AH, int pipefd[2], int worker,
 						RestoreOptions *ropt);
@@ -83,29 +83,6 @@ static void SetupWorker(ArchiveHandle *AH, int pipefd[2], int worker,
 	(strncmp(msg, prefix, strlen(prefix)) == 0)
 #define messageEquals(msg, pattern) \
 	(strcmp(msg, pattern) == 0)
-
-/* architecture dependent #defines */
-#ifdef WIN32
-	/* WIN32 */
-	/* pgpipe implemented in src/backend/port/pipe.c */
-	#define setnonblocking(fd) \
-		do { u_long mode = 1; \
-			 ioctlsocket((fd), FIONBIO, &mode); \
-		} while(0);
-	#define setblocking(fd) \
-		do { u_long mode = 0; \
-			 ioctlsocket((fd), FIONBIO, &mode); \
-		} while(0);
-#else /* UNIX */
-	#define setnonblocking(fd) \
-		do { long flags = (long) fcntl((fd), F_GETFL, 0); \
-			fcntl(fd, F_SETFL, flags | O_NONBLOCK); \
-		} while(0);
-	#define setblocking(fd) \
-		do { long flags = (long) fcntl((fd), F_GETFL, 0); \
-			fcntl(fd, F_SETFL, flags & ~O_NONBLOCK); \
-		} while(0);
-#endif
 
 #ifdef WIN32
 /*
@@ -243,13 +220,7 @@ checkAborting(ArchiveHandle *AH)
 #else
 	if (wantAbort)
 #endif
-		/*
-		 * Terminate, this error will actually never show up somewhere
-		 * because if termEvent/wantAbort is set, then we are already in the
-		 * process of going down and already have a reason why we're
-		 * terminating.
-		 */
-		die_horribly(AH, modulename, "worker is terminating");
+		die_horribly(AH, modulename, "worker is terminating\n");
 }
 
 /*
@@ -297,9 +268,8 @@ select_loop(int maxFd, fd_set *workerset)
 		*workerset = saveSet;
 		i = select(maxFd + 1, workerset, NULL, NULL, NULL);
 		Assert(i != 0);
-		if (wantAbort && !aborting) {
+		if (wantAbort && !aborting)
 			return NO_SLOT;
-		}
 		if (i < 0 && errno == EINTR)
 			continue;
 		break;
@@ -365,7 +335,7 @@ WaitForTerminatingWorkers(ArchiveHandle *AH, ParallelState *pstate)
 static void
 sigTermHandler(int signum)
 {
-	wantAbort++;
+	wantAbort = 1;
 }
 #endif
 
@@ -480,7 +450,7 @@ ParallelBackupStart(ArchiveHandle *AH, RestoreOptions *ropt)
 		int			pipeMW[2], pipeWM[2];
 
 		if (pgpipe(pipeMW) < 0 || pgpipe(pipeWM) < 0)
-			die_horribly(AH, modulename, "Cannot create communication channels: %s",
+			die_horribly(AH, modulename, "Cannot create communication channels: %s\n",
 						 strerror(errno));
 
 		pstate->parallelSlot[i].workerStatus = WRKR_IDLE;
@@ -524,23 +494,6 @@ ParallelBackupStart(ArchiveHandle *AH, RestoreOptions *ropt)
 			 * seem kinda helpful.
 			 */
 			AH = CloneArchive(AH);
-
-#ifdef HAVE_SETSID
-			/*
-			 * If we can, we try to make each process the leader of its own
-			 * process group. The reason is that if you hit Ctrl-C and they are
-			 * all in the same process group, any termination sequence is
-			 * possible, because every process will receive the signal. What
-			 * often happens is that a worker receives the signal, terminates
-			 * and the master detects that one of the workers had a problem,
-			 * even before acting on its own signal. That's still okay because
-			 * everyone still terminates but it looks a bit weird.
-			 *
-			 * With setsid() however, a Ctrl-C is only sent to the master and
-			 * he can then cascade it to the worker processes.
-			 */
-			setsid();
-#endif
 
 			closesocket(pipeWM[PIPE_READ]);		/* close read end of Worker -> Master */
 			closesocket(pipeMW[PIPE_WRITE]);	/* close write end of Master -> Worker */
@@ -768,17 +721,11 @@ ShutdownWorkersSoft(ArchiveHandle *AH, ParallelState *pstate, bool do_wait)
  * connection, but not too much, since the parent is waiting for the workers to
  * terminate. The cancellation of the database connection is done in an
  * asynchronous way, so we need to wait a bit after sending PQcancel().
- * Calling PQcancel() first and then and PQfinish() immediately afterwards
+ * Calling PQcancel() first and then PQfinish() immediately afterwards
  * would still cancel an active connection because most likely the PQfinish()
  * has not yet been processed.
- *
- * On Windows, when the master process terminates the childrens' database
- * connections it forks off new threads that do nothing else than close the
- * connection. These threads only live as long as they are in this function.
- * And since a thread needs to return a value this function needs to as well.
- * Hence this function returns an (unsigned) int.
  */
-static int
+static void
 ShutdownConnection(PGconn **conn)
 {
 	PGcancel   *cancel;
@@ -843,7 +790,7 @@ lockTableNoWait(ArchiveHandle *AH, TocEntry *te)
 	res = PQexec(AH->connection, query->data);
 
 	if (!res || PQresultStatus(res) != PGRES_TUPLES_OK)
-		die_horribly(AH, modulename, "could not get relation name for oid %d: %s",
+		die_horribly(AH, modulename, "could not get relation name for oid %d: %s\n",
 					 te->catalogId.oid, PQerrorMessage(AH->connection));
 
 	resetPQExpBuffer(query);
@@ -859,7 +806,7 @@ lockTableNoWait(ArchiveHandle *AH, TocEntry *te)
 		die_horribly(AH, modulename, "could not obtain lock on relation \"%s\". This "
 					 "usually means that someone requested an ACCESS EXCLUSIVE lock "
 					 "on the table after the pg_dump parent process has gotten the "
-					 "initial ACCESS SHARE lock on the table.", qualId);
+					 "initial ACCESS SHARE lock on the table.\n", qualId);
 
 	PQclear(res);
 	destroyPQExpBuffer(query);
@@ -941,7 +888,7 @@ WaitForCommands(ArchiveHandle *AH, int pipefd[2])
 		else
 		{
 			die_horribly(AH, modulename,
-						 "Unknown command on communication channel: %s", command);
+						 "Unknown command on communication channel: %s\n", command);
 		}
 	}
 }
@@ -968,7 +915,8 @@ ListenToWorkers(ArchiveHandle *AH, ParallelState *pstate, bool do_wait)
 
 	if (!msg)
 	{
-		Assert(!do_wait);
+		if (do_wait)
+			die_horribly(AH, modulename, "A worker process died unexpectedly\n");
 		return;
 	}
 
@@ -994,7 +942,7 @@ ListenToWorkers(ArchiveHandle *AH, ParallelState *pstate, bool do_wait)
 					(AH, te, statusString, ACT_DUMP);
 		}
 		else
-			die_horribly(AH, modulename, "Invalid message received from worker: %s", msg);
+			die_horribly(AH, modulename, "Invalid message received from worker: %s\n", msg);
 	}
 	else if (messageStartsWith(msg, "ERROR "))
 	{
@@ -1003,7 +951,7 @@ ListenToWorkers(ArchiveHandle *AH, ParallelState *pstate, bool do_wait)
 		die_horribly(AH, modulename, "%s", msg + strlen("ERROR "));
 	}
 	else
-		die_horribly(AH, modulename, "Invalid message received from worker: %s", msg);
+		die_horribly(AH, modulename, "Invalid message received from worker: %s\n", msg);
 
 	PrintStatus(pstate);
 
@@ -1095,7 +1043,7 @@ EnsureWorkersFinished(ArchiveHandle *AH, ParallelState *pstate)
 		if (ReapWorkerStatus(pstate, &work_status) == NO_SLOT)
 			ListenToWorkers(AH, pstate, true);
 		else if (work_status != 0)
-			die_horribly(AH, modulename, "Error processing a parallel work item");
+			die_horribly(AH, modulename, "Error processing a parallel work item\n");
 	}
 }
 
@@ -1108,7 +1056,7 @@ EnsureWorkersFinished(ArchiveHandle *AH, ParallelState *pstate)
 static char *
 getMessageFromMaster(ArchiveHandle *AH, int pipefd[2])
 {
-	return readMessageFromPipe(pipefd[PIPE_READ], true);
+	return readMessageFromPipe(pipefd[PIPE_READ]);
 }
 
 /*
@@ -1123,7 +1071,7 @@ sendMessageToMaster(ArchiveHandle *AH, int pipefd[2], const char *str)
 
 	if (pipewrite(pipefd[PIPE_WRITE], str, len) != len)
 		die_horribly(AH, modulename,
-					 "Error writing to the communication channel: %s",
+					 "Error writing to the communication channel: %s\n",
 					 strerror(errno));
 }
 
@@ -1172,10 +1120,7 @@ getMessageFromWorker(ArchiveHandle *AH, ParallelState *pstate, bool do_wait, int
 #endif
 
 	if (i < 0)
-	{
-		write_msg(NULL, "Error in ListenToWorkers(): %s", strerror(errno));
-		exit(1);
-	}
+		die_horribly(AH, modulename, "Error in ListenToWorkers(): %s", strerror(errno));
 
 	for (i = 0; i < pstate->numWorkers; i++)
 	{
@@ -1184,7 +1129,7 @@ getMessageFromWorker(ArchiveHandle *AH, ParallelState *pstate, bool do_wait, int
 		if (!FD_ISSET(pstate->parallelSlot[i].pipeRead, &workerset))
 			continue;
 
-		msg = readMessageFromPipe(pstate->parallelSlot[i].pipeRead, false);
+		msg = readMessageFromPipe(pstate->parallelSlot[i].pipeRead);
 		*worker = i;
 		return msg;
 	}
@@ -1203,9 +1148,16 @@ sendMessageToWorker(ArchiveHandle *AH, ParallelState *pstate, int worker, const 
 	int			len = strlen(str) + 1;
 
 	if (pipewrite(pstate->parallelSlot[worker].pipeWrite, str, len) != len)
-		die_horribly(AH, modulename,
-					 "Error writing to the communication channel: %s",
-					 strerror(errno));
+	{
+		/*
+		 * If we're already aborting anyway, don't care if we succeed or not.
+		 * The child might already be gone.
+		 */
+		if (!aborting)
+			die_horribly(AH, modulename,
+						 "Error writing to the communication channel: %s\n",
+						 strerror(errno));
+	}
 }
 
 /*
@@ -1213,7 +1165,7 @@ sendMessageToWorker(ArchiveHandle *AH, ParallelState *pstate, int worker, const 
  * with optional blocking (do_wait).
  */
 static char *
-readMessageFromPipe(int fd, bool do_wait)
+readMessageFromPipe(int fd)
 {
 	char	   *msg;
 	int			msgsize, bufsize;
@@ -1239,27 +1191,7 @@ readMessageFromPipe(int fd, bool do_wait)
 	for (;;)
 	{
 		Assert(msgsize <= bufsize);
-		/*
-		 * If we do non-blocking read, only set the channel non-blocking for
-		 * the very first character. We trust in our messages to be
-		 * \0-terminated, so if there is any character in the beginning, then
-		 * we read the message until we find a \0 somewhere, which indicates
-		 * the end of the message.
-		 */
-		if (msgsize == 0 && !do_wait) {
-			setnonblocking(fd);
-		}
-
 		ret = piperead(fd, msg + msgsize, 1);
-
-		if (msgsize == 0 && !do_wait)
-		{
-			int		saved_errno = errno;
-			setblocking(fd);
-			/* no data has been available */
-			if (ret < 0 && saved_errno == EAGAIN)
-				return NULL;
-		}
 
 		/* worker has closed the connection or another error happened */
 		if (ret <= 0)
@@ -1267,9 +1199,8 @@ readMessageFromPipe(int fd, bool do_wait)
 
 		Assert(ret == 1);
 
-		if (msg[msgsize] == '\0') {
+		if (msg[msgsize] == '\0')
 			return msg;
-		}
 
 		msgsize++;
 		if (msgsize == bufsize)

@@ -2048,9 +2048,7 @@ WriteDataChunks(ArchiveHandle *AH, ParallelState *pstate)
 			DispatchJobForTocEntry(AH, pstate, te, ACT_DUMP);
 		}
 		else
-		{
 			WriteDataChunksForTocEntry(AH, te);
-		}
 	}
 	EnsureWorkersFinished(AH, pstate);
 }
@@ -3487,10 +3485,8 @@ restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate,
 			DispatchJobForTocEntry(AH, pstate, next_work_item, ACT_RESTORE);
 		}
 		else
-		{
 			/* at least one child is working and we have nothing ready. */
 			Assert(!IsEveryWorkerIdle(pstate));
-		}
 
 		for (;;)
 		{
