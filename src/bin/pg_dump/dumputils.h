@@ -19,14 +19,12 @@
 #include "libpq-fe.h"
 #include "pqexpbuffer.h"
 
-struct Archive;
-
 extern int	quote_all_identifiers;
 extern const char *progname;
 
 extern void init_parallel_dump_utils(void);
 extern const char *fmtId(const char *identifier);
-extern const char *fmtQualifiedId(struct Archive *fout,
+extern const char *fmtQualifiedId(int remoteVersion,
 								  const char *schema, const char *id);
 extern void appendStringLiteral(PQExpBuffer buf, const char *str,
 					int encoding, bool std_strings);

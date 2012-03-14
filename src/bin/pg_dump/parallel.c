@@ -794,7 +794,7 @@ lockTableNoWait(ArchiveHandle *AH, TocEntry *te)
 
 	resetPQExpBuffer(query);
 
-	qualId = fmtQualifiedId(AHX, PQgetvalue(res, 0, 0), PQgetvalue(res, 0, 1));
+	qualId = fmtQualifiedId(AHX->remoteVersion, PQgetvalue(res, 0, 0), PQgetvalue(res, 0, 1));
 
 	appendPQExpBuffer(query, "LOCK TABLE %s IN ACCESS SHARE MODE NOWAIT", qualId);
 	PQclear(res);
