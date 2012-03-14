@@ -752,7 +752,6 @@ ShutdownConnection(PGconn **conn)
 
 	PQfinish(*conn);
 	*conn = NULL;
-	return 0;
 }
 
 /*
