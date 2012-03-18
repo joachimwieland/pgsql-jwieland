@@ -167,6 +167,7 @@ extern void ConnectDatabase(Archive *AH,
 				enum trivalue prompt_password);
 extern void DisconnectDatabase(Archive *AHX);
 extern PGconn *GetConnection(Archive *AHX);
+extern void archive_close_connection(int code, void *arg);
 
 /* Called to add a TOC entry */
 extern void ArchiveEntry(Archive *AHX,

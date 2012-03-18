@@ -62,6 +62,7 @@ extern void set_section (const char *arg, int *dumpSections);
 
 typedef void (*on_exit_nicely_callback) (int code, void *arg);
 extern void on_exit_nicely(on_exit_nicely_callback function, void *arg);
+extern void on_exit_nicely_reset(void);
 extern void exit_nicely(int code) __attribute__((noreturn));
 
 #endif   /* DUMPUTILS_H */

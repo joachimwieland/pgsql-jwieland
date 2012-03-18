@@ -61,11 +61,28 @@
 #define thandle HANDLE
 #endif
 
+typedef struct _parallel_state_entry
+{
+#ifdef WIN32
+	unsigned int		threadId;
+#else
+	pid_t				pid;
+#endif
+	ArchiveHandle	   *AH;
+} ParallelStateEntry;
+
+typedef struct _parallel_state
+{
+	int			numWorkers;
+	ParallelStateEntry *pse;
+} ParallelState;
+
 /* Arguments needed for a worker child */
 typedef struct _restore_args
 {
 	ArchiveHandle *AH;
 	TocEntry   *te;
+	ParallelStateEntry *pse;
 } RestoreArgs;
 
 /* State for each parallel activity slot */
@@ -3297,6 +3314,54 @@ dumpTimestamp(ArchiveHandle *AH, const char *msg, time_t tim)
 		ahprintf(AH, "-- %s %s\n\n", msg, buf);
 }
 
+static void
+setProcessIdentifier(ParallelStateEntry *pse, ArchiveHandle *AH)
+{
+#ifdef WIN32
+	pse->threadId = GetCurrentThreadId();
+#else
+	pse->pid = getpid();
+#endif
+	pse->AH = AH;
+}
+
+static void
+unsetProcessIdentifier(ParallelStateEntry *pse)
+{
+#ifdef WIN32
+	pse->threadId = 0;
+#else
+	pse->pid = 0;
+#endif
+	pse->AH = NULL;
+}
+
+static int
+GetMySlot(ParallelState *pstate)
+{
+	int i;
+
+	printf("Getting MySlot, numWorkers: %d\n", pstate->numWorkers);
+
+	for (i = 0; i < pstate->numWorkers; i++)
+#ifdef WIN32
+		if (pstate->pse[i].threadId == GetCurrentThreadId())
+#else
+		if (pstate->pse[i].pid == getpid())
+#endif
+			return i;
+
+	return NO_SLOT;
+}
+
+static void
+archive_close_connection_parallel(int code, void *ps)
+{
+	ParallelState *pstate = (ParallelState *) ps;
+	int slotno = GetMySlot(pstate);
+	if (slotno != NO_SLOT && pstate->pse[slotno].AH)
+		DisconnectDatabase(&pstate->pse[slotno].AH->public);
+}
 
 /*
  * Main engine for parallel restore.
@@ -3323,10 +3388,16 @@ restore_toc_entries_parallel(ArchiveHandle *AH)
 	TocEntry   *next_work_item;
 	thandle		ret_child;
 	TocEntry   *te;
+	ParallelState *pstate;
+	int			i;
 
 	ahlog(AH, 2, "entering restore_toc_entries_parallel\n");
 
 	slots = (ParallelSlot *) pg_calloc(sizeof(ParallelSlot), n_slots);
+	pstate = (ParallelState *) pg_malloc(sizeof(ParallelState));
+	pstate->numWorkers = ropt->number_of_jobs;
+	for (i = 0; i < pstate->numWorkers; i++)
+		unsetProcessIdentifier(&pstate->pse[i]);
 
 	/* Adjust dependency information */
 	fix_dependencies(AH);
@@ -3381,6 +3452,13 @@ restore_toc_entries_parallel(ArchiveHandle *AH)
 	 * connections.
 	 */
 	DisconnectDatabase(&AH->public);
+
+	/*
+	 * Both pg_dump and pg_restore that use this code set at most
+	 * one exit handler. So we can just reset the handlers.
+	 */
+	//on_exit_nicely_reset();
+	//on_exit_nicely(archive_close_connection_parallel, pstate);
 
 	/* blow away any transient state from the old connection */
 	if (AH->currUser)
@@ -3479,7 +3557,9 @@ restore_toc_entries_parallel(ArchiveHandle *AH)
 				/* this memory is dealloced in mark_work_done() */
 				args = pg_malloc(sizeof(RestoreArgs));
 				args->AH = CloneArchive(AH);
+
 				args->te = next_work_item;
+				args->pse = &pstate->pse[next_slot];
 
 				/* run the step in a worker child */
 				child = spawn_restore(args);
@@ -3513,6 +3593,8 @@ restore_toc_entries_parallel(ArchiveHandle *AH)
 	}
 
 	ahlog(AH, 1, "finished main parallel loop\n");
+	//on_exit_nicely_reset();
+	//on_exit_nicely(archive_close_connection, AH);
 
 	/*
 	 * Now reconnect the single parent connection.
@@ -3813,6 +3895,14 @@ parallel_restore(RestoreArgs *args)
 	RestoreOptions *ropt = AH->ropt;
 	int			retval;
 
+#ifndef WIN32
+	Assert(args->pse->pid == 0);
+#else
+	Assert(args->pse->threadId == 0);
+#endif
+	Assert(args->pse->AH == NULL);
+	//setProcessIdentifier(args->pse, AH);
+
 	/*
 	 * Close and reopen the input file so we have a private file pointer that
 	 * doesn't stomp on anyone else's file pointer, if we're actually going to
@@ -3843,6 +3933,7 @@ parallel_restore(RestoreArgs *args)
 
 	/* And clean up */
 	DisconnectDatabase((Archive *) AH);
+	//unsetProcessIdentifier(args->pse);
 
 	/* If we reopened the file, we are done with it, so close it now */
 	if (te->section == SECTION_DATA)
