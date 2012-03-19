@@ -3314,7 +3314,10 @@ archive_close_connection_parallel(int code, void *ps)
 	ParallelState *pstate = (ParallelState *) ps;
 	int slotno = GetMySlot(pstate);
 	if (slotno != NO_SLOT && pstate->pse[slotno].AH)
+	{
+		printf("Closing connection %p\n", pstate->pse[slotno].AH->connection);
 		DisconnectDatabase(&pstate->pse[slotno].AH->public);
+	}
 }
 
 /*
@@ -3884,6 +3887,9 @@ parallel_restore(RestoreArgs *args)
 
 	/* Restore the TOC item */
 	retval = restore_toc_entry(AH, te, ropt, true);
+
+	sleep(5);
+	exit_horribly(modulename, "Terminating");
 
 	/* And clean up */
 	DisconnectDatabase((Archive *) AH);
