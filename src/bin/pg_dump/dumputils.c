@@ -1330,7 +1330,7 @@ exit_nicely(int code)
 		(*on_exit_nicely_list[on_exit_nicely_index].function)(code,
 			on_exit_nicely_list[on_exit_nicely_index].arg);
 #ifdef WIN32
-	if (GetCurrentThreadId() != mainThreadId)
+	if (parallel_init_done && GetCurrentThreadId() != mainThreadId)
 		ExitThread(code);
 #endif
 	exit(code);
