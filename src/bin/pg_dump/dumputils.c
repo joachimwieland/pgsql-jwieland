@@ -1324,7 +1324,6 @@ on_exit_nicely_reset(void)
 void
 exit_nicely(int code)
 {
-	printf("exit_nicely: idx: %d\n", on_exit_nicely_index);
 	while (--on_exit_nicely_index >= 0)
 		(*on_exit_nicely_list[on_exit_nicely_index].function)(code,
 			on_exit_nicely_list[on_exit_nicely_index].arg);

@@ -169,7 +169,7 @@ InitArchiveFmt_Files(ArchiveHandle *AH)
 		ReadToc(AH);
 		/* Nothing else in the file... */
 		if (fclose(AH->FH) != 0)
-			die_horribly(AH, modulename, "could not close TOC file: %s\n", strerror(errno));
+			exit_horribly(modulename, "could not close TOC file: %s\n", strerror(errno));
 	}
 }
 
@@ -259,8 +259,8 @@ _StartData(ArchiveHandle *AH, TocEntry *te)
 #endif
 
 	if (tctx->FH == NULL)
-		die_horribly(AH, modulename, "could not open output file \"%s\": %s\n",
-					 tctx->filename, strerror(errno));
+		exit_horribly(modulename, "could not open output file \"%s\": %s\n",
+					  tctx->filename, strerror(errno));
 }
 
 static size_t
@@ -280,7 +280,7 @@ _EndData(ArchiveHandle *AH, TocEntry *te)
 
 	/* Close the file */
 	if (GZCLOSE(tctx->FH) != 0)
-		die_horribly(AH, modulename, "could not close data file\n");
+		exit_horribly(modulename, "could not close data file\n");
 
 	tctx->FH = NULL;
 }
@@ -304,7 +304,7 @@ _PrintFileData(ArchiveHandle *AH, char *filename, RestoreOptions *ropt)
 #endif
 
 	if (AH->FH == NULL)
-		die_horribly(AH, modulename, "could not open input file \"%s\": %s\n",
+		exit_horribly(modulename, "could not open input file \"%s\": %s\n",
 					 filename, strerror(errno));
 
 	while ((cnt = GZREAD(buf, 1, 4095, AH->FH)) > 0)
@@ -314,7 +314,7 @@ _PrintFileData(ArchiveHandle *AH, char *filename, RestoreOptions *ropt)
 	}
 
 	if (GZCLOSE(AH->FH) != 0)
-		die_horribly(AH, modulename, "could not close data file after reading\n");
+		exit_horribly(modulename, "could not close data file after reading\n");
 }
 
 
@@ -376,7 +376,7 @@ _LoadBlobs(ArchiveHandle *AH, RestoreOptions *ropt)
 	ctx->blobToc = fopen("blobs.toc", PG_BINARY_R);
 
 	if (ctx->blobToc == NULL)
-		die_horribly(AH, modulename, "could not open large object TOC for input: %s\n", strerror(errno));
+		exit_horribly(modulename, "could not open large object TOC for input: %s\n", strerror(errno));
 
 	_getBlobTocEntry(AH, &oid, fname);
 
@@ -389,7 +389,7 @@ _LoadBlobs(ArchiveHandle *AH, RestoreOptions *ropt)
 	}
 
 	if (fclose(ctx->blobToc) != 0)
-		die_horribly(AH, modulename, "could not close large object TOC file: %s\n", strerror(errno));
+		exit_horribly(modulename, "could not close large object TOC file: %s\n", strerror(errno));
 
 	EndRestoreBlobs(AH);
 }
@@ -401,7 +401,7 @@ _WriteByte(ArchiveHandle *AH, const int i)
 	lclContext *ctx = (lclContext *) AH->formatData;
 
 	if (fputc(i, AH->FH) == EOF)
-		die_horribly(AH, modulename, "could not write byte\n");
+		exit_horribly(modulename, "could not write byte\n");
 
 	ctx->filePos += 1;
 
@@ -416,7 +416,7 @@ _ReadByte(ArchiveHandle *AH)
 
 	res = getc(AH->FH);
 	if (res == EOF)
-		die_horribly(AH, modulename, "unexpected end of file\n");
+		exit_horribly(modulename, "unexpected end of file\n");
 	ctx->filePos += 1;
 	return res;
 }
@@ -429,7 +429,7 @@ _WriteBuf(ArchiveHandle *AH, const void *buf, size_t len)
 
 	res = fwrite(buf, 1, len, AH->FH);
 	if (res != len)
-		die_horribly(AH, modulename, "could not write to output file: %s\n", strerror(errno));
+		exit_horribly(modulename, "could not write to output file: %s\n", strerror(errno));
 
 	ctx->filePos += res;
 	return res;
@@ -454,7 +454,7 @@ _CloseArchive(ArchiveHandle *AH)
 		WriteHead(AH);
 		WriteToc(AH);
 		if (fclose(AH->FH) != 0)
-			die_horribly(AH, modulename, "could not close TOC file: %s\n", strerror(errno));
+			exit_horribly(modulename, "could not close TOC file: %s\n", strerror(errno));
 		WriteDataChunks(AH);
 	}
 
@@ -486,7 +486,7 @@ _StartBlobs(ArchiveHandle *AH, TocEntry *te)
 	ctx->blobToc = fopen(fname, PG_BINARY_W);
 
 	if (ctx->blobToc == NULL)
-		die_horribly(AH, modulename,
+		exit_horribly(modulename,
 		"could not open large object TOC for output: %s\n", strerror(errno));
 }
 
@@ -507,7 +507,7 @@ _StartBlob(ArchiveHandle *AH, TocEntry *te, Oid oid)
 	char	   *sfx;
 
 	if (oid == 0)
-		die_horribly(AH, modulename, "invalid OID for large object (%u)\n", oid);
+		exit_horribly(modulename, "invalid OID for large object (%u)\n", oid);
 
 	if (AH->compression != 0)
 		sfx = ".gz";
@@ -526,7 +526,7 @@ _StartBlob(ArchiveHandle *AH, TocEntry *te, Oid oid)
 #endif
 
 	if (tctx->FH == NULL)
-		die_horribly(AH, modulename, "could not open large object file \"%s\" for input: %s\n",
+		exit_horribly(modulename, "could not open large object file \"%s\" for input: %s\n",
 					 fname, strerror(errno));
 }
 
@@ -541,7 +541,7 @@ _EndBlob(ArchiveHandle *AH, TocEntry *te, Oid oid)
 	lclTocEntry *tctx = (lclTocEntry *) te->formatData;
 
 	if (GZCLOSE(tctx->FH) != 0)
-		die_horribly(AH, modulename, "could not close large object file\n");
+		exit_horribly(modulename, "could not close large object file\n");
 }
 
 /*
@@ -558,5 +558,5 @@ _EndBlobs(ArchiveHandle *AH, TocEntry *te)
 	/* WriteInt(AH, 0); */
 
 	if (fclose(ctx->blobToc) != 0)
-		die_horribly(AH, modulename, "could not close large object TOC file: %s\n", strerror(errno));
+		exit_horribly(modulename, "could not close large object TOC file: %s\n", strerror(errno));
 }
