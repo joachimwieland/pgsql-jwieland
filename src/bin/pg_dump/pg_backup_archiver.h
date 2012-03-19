@@ -376,17 +376,4 @@ int			ahprintf(ArchiveHandle *AH, const char *fmt,...) __attribute__((format(PG_
 
 void		ahlog(ArchiveHandle *AH, int level, const char *fmt,...) __attribute__((format(PG_PRINTF_ATTRIBUTE, 3, 4)));
 
-#ifdef USE_ASSERT_CHECKING
-#define Assert(condition) \
-  if (!(condition)) \
-  { \
-      write_msg(NULL, "Failed assertion in %s, line %d\n", \
-                __FILE__, __LINE__); \
-      abort();\
-  }
-#else
-#define Assert(condition)
-#endif
-
-
 #endif

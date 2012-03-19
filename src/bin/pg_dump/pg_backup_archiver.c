@@ -3849,12 +3849,6 @@ parallel_restore(RestoreArgs *args)
 	RestoreOptions *ropt = AH->ropt;
 	int			retval;
 
-#ifndef WIN32
-	Assert(args->pse->pid == 0);
-#else
-	Assert(args->pse->threadId == 0);
-#endif
-	Assert(args->pse->AH == NULL);
 	setProcessIdentifier(args->pse, AH);
 
 	/*
