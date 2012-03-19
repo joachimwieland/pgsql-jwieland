@@ -64,11 +64,11 @@
 typedef struct _parallel_state_entry
 {
 #ifdef WIN32
-	unsigned int		threadId;
+	unsigned int threadId;
 #else
-	pid_t				pid;
+	pid_t		pid;
 #endif
-	ArchiveHandle	   *AH;
+	ArchiveHandle *AH;
 } ParallelStateEntry;
 
 typedef struct _parallel_state
