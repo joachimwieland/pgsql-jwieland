@@ -3888,9 +3888,6 @@ parallel_restore(RestoreArgs *args)
 	/* Restore the TOC item */
 	retval = restore_toc_entry(AH, te, ropt, true);
 
-	sleep(5);
-	exit_horribly(modulename, "Terminating");
-
 	/* And clean up */
 	DisconnectDatabase((Archive *) AH);
 	unsetProcessIdentifier(args->pse);
