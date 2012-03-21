@@ -51,6 +51,7 @@ static PQExpBuffer getThreadLocalPQExpBuffer(void);
 #ifdef WIN32
 static bool parallel_init_done = false;
 static DWORD tls_index;
+static DWORD mainThreadId;
 #endif
 
 void
@@ -61,6 +62,7 @@ init_parallel_dump_utils(void)
 	{
 		tls_index = TlsAlloc();
 		parallel_init_done = true;
+		mainThreadId = GetCurrentThreadId();
 	}
 #endif
 }
@@ -1360,5 +1362,9 @@ exit_nicely(int code)
 	while (--on_exit_nicely_index >= 0)
 		(*on_exit_nicely_list[on_exit_nicely_index].function)(code,
 			on_exit_nicely_list[on_exit_nicely_index].arg);
+#ifdef WIN32
+	if (parallel_init_done && GetCurrentThreadId() != mainThreadId)
+		ExitThread(code);
+#endif
 	exit(code);
 }

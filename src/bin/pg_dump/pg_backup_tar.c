@@ -361,7 +361,7 @@ tarOpen(ArchiveHandle *AH, const char *filename, char mode)
 				 * Couldn't find the requested file. Future: do SEEK(0) and
 				 * retry.
 				 */
-				die_horribly(AH, modulename, "could not find file \"%s\" in archive\n", filename);
+				exit_horribly(modulename, "could not find file \"%s\" in archive\n", filename);
 			}
 			else
 			{
@@ -375,7 +375,7 @@ tarOpen(ArchiveHandle *AH, const char *filename, char mode)
 		if (AH->compression == 0)
 			tm->nFH = ctx->tarFH;
 		else
-			die_horribly(AH, modulename, "compression is not supported by tar archive format\n");
+			exit_horribly(modulename, "compression is not supported by tar archive format\n");
 		/* tm->zFH = gzdopen(dup(fileno(ctx->tarFH)), "rb"); */
 #else
 		tm->nFH = ctx->tarFH;
@@ -417,7 +417,7 @@ tarOpen(ArchiveHandle *AH, const char *filename, char mode)
 #endif
 
 		if (tm->tmpFH == NULL)
-			die_horribly(AH, modulename, "could not generate temporary file name: %s\n", strerror(errno));
+			exit_horribly(modulename, "could not generate temporary file name: %s\n", strerror(errno));
 
 #ifdef HAVE_LIBZ
 
@@ -426,7 +426,7 @@ tarOpen(ArchiveHandle *AH, const char *filename, char mode)
 			sprintf(fmode, "wb%d", AH->compression);
 			tm->zFH = gzdopen(dup(fileno(tm->tmpFH)), fmode);
 			if (tm->zFH == NULL)
-				die_horribly(AH, modulename, "could not open temporary file\n");
+				exit_horribly(modulename, "could not open temporary file\n");
 		}
 		else
 			tm->nFH = tm->tmpFH;
@@ -453,7 +453,7 @@ tarClose(ArchiveHandle *AH, TAR_MEMBER *th)
 	 */
 	if (AH->compression != 0)
 		if (GZCLOSE(th->zFH) != 0)
-			die_horribly(AH, modulename, "could not close tar member\n");
+			exit_horribly(modulename, "could not close tar member\n");
 
 	if (th->mode == 'w')
 		_tarAddFile(AH, th);	/* This will close the temp file */
@@ -553,7 +553,7 @@ _tarReadRaw(ArchiveHandle *AH, void *buf, size_t len, TAR_MEMBER *th, FILE *fh)
 				res = fread(&((char *) buf)[used], 1, len, th->nFH);
 		}
 		else
-			die_horribly(AH, modulename, "internal error -- neither th nor fh specified in tarReadRaw()\n");
+			exit_horribly(modulename, "internal error -- neither th nor fh specified in tarReadRaw()\n");
 	}
 
 	ctx->tarFHpos += res + used;
@@ -590,8 +590,8 @@ tarWrite(const void *buf, size_t len, TAR_MEMBER *th)
 		res = fwrite(buf, 1, len, th->nFH);
 
 	if (res != len)
-		die_horribly(th->AH, modulename,
-					 "could not write to output file: %s\n", strerror(errno));
+		exit_horribly(modulename,
+					  "could not write to output file: %s\n", strerror(errno));
 
 	th->pos += res;
 	return res;
@@ -678,8 +678,8 @@ _PrintTocData(ArchiveHandle *AH, TocEntry *te, RestoreOptions *ropt)
 		 * we search the string for it in a paranoid sort of way.
 		 */
 		if (strncmp(tmpCopy, "copy ", 5) != 0)
-			die_horribly(AH, modulename,
-						 "invalid COPY statement -- could not find \"copy\" in string \"%s\"\n", tmpCopy);
+			exit_horribly(modulename,
+						  "invalid COPY statement -- could not find \"copy\" in string \"%s\"\n", tmpCopy);
 
 		pos1 = 5;
 		for (pos1 = 5; pos1 < strlen(tmpCopy); pos1++)
@@ -696,9 +696,9 @@ _PrintTocData(ArchiveHandle *AH, TocEntry *te, RestoreOptions *ropt)
 				break;
 
 		if (pos2 >= strlen(tmpCopy))
-			die_horribly(AH, modulename,
-						 "invalid COPY statement -- could not find \"from stdin\" in string \"%s\" starting at position %lu\n",
-						 tmpCopy, (unsigned long) pos1);
+			exit_horribly(modulename,
+						  "invalid COPY statement -- could not find \"from stdin\" in string \"%s\" starting at position %lu\n",
+						  tmpCopy, (unsigned long) pos1);
 
 		ahwrite(tmpCopy, 1, pos2, AH);	/* 'copy "table" [with oids]' */
 		ahprintf(AH, " from '$$PATH$$/%s' %s", tctx->filename, &tmpCopy[pos2 + 10]);
@@ -790,7 +790,7 @@ _ReadByte(ArchiveHandle *AH)
 
 	res = tarRead(&c, 1, ctx->FH);
 	if (res != 1)
-		die_horribly(AH, modulename, "unexpected end of file\n");
+		exit_horribly(modulename, "unexpected end of file\n");
 	ctx->filePos += 1;
 	return c;
 }
@@ -884,7 +884,7 @@ _CloseArchive(ArchiveHandle *AH)
 		for (i = 0; i < 512; i++)
 		{
 			if (fputc(0, ctx->tarFH) == EOF)
-				die_horribly(AH, modulename,
+				exit_horribly(modulename,
 					   "could not write null block at end of tar archive\n");
 		}
 	}
@@ -940,7 +940,7 @@ _StartBlob(ArchiveHandle *AH, TocEntry *te, Oid oid)
 	char	   *sfx;
 
 	if (oid == 0)
-		die_horribly(AH, modulename, "invalid OID for large object (%u)\n", oid);
+		exit_horribly(modulename, "invalid OID for large object (%u)\n", oid);
 
 	if (AH->compression != 0)
 		sfx = ".gz";
@@ -1083,7 +1083,7 @@ _tarAddFile(ArchiveHandle *AH, TAR_MEMBER *th)
 	 * because pgoff_t can't exceed the compared maximum on their platform.
 	 */
 	if (th->fileLen > MAX_TAR_MEMBER_FILELEN)
-		die_horribly(AH, modulename, "archive member too large for tar format\n");
+		exit_horribly(modulename, "archive member too large for tar format\n");
 
 	_tarWriteHeader(th);
 
@@ -1091,15 +1091,15 @@ _tarAddFile(ArchiveHandle *AH, TAR_MEMBER *th)
 	{
 		res = fwrite(buf, 1, cnt, th->tarFH);
 		if (res != cnt)
-			die_horribly(AH, modulename,
-						 "could not write to output file: %s\n",
-						 strerror(errno));
+			exit_horribly(modulename,
+						  "could not write to output file: %s\n",
+						  strerror(errno));
 		len += res;
 	}
 
 	if (fclose(tmp) != 0)		/* This *should* delete it... */
-		die_horribly(AH, modulename, "could not close temporary file: %s\n",
-					 strerror(errno));
+		exit_horribly(modulename, "could not close temporary file: %s\n",
+					  strerror(errno));
 
 	if (len != th->fileLen)
 	{
@@ -1108,15 +1108,15 @@ _tarAddFile(ArchiveHandle *AH, TAR_MEMBER *th)
 
 		snprintf(buf1, sizeof(buf1), INT64_FORMAT, (int64) len);
 		snprintf(buf2, sizeof(buf2), INT64_FORMAT, (int64) th->fileLen);
-		die_horribly(AH, modulename, "actual file length (%s) does not match expected (%s)\n",
-					 buf1, buf2);
+		exit_horribly(modulename, "actual file length (%s) does not match expected (%s)\n",
+					  buf1, buf2);
 	}
 
 	pad = ((len + 511) & ~511) - len;
 	for (i = 0; i < pad; i++)
 	{
 		if (fputc('\0', th->tarFH) == EOF)
-			die_horribly(AH, modulename, "could not output padding at end of tar member\n");
+			exit_horribly(modulename, "could not output padding at end of tar member\n");
 	}
 
 	ctx->tarFHpos += len + pad;
@@ -1165,7 +1165,7 @@ _tarPositionTo(ArchiveHandle *AH, const char *filename)
 	if (!_tarGetHeader(AH, th))
 	{
 		if (filename)
-			die_horribly(AH, modulename, "could not find header for file \"%s\" in tar archive\n", filename);
+			exit_horribly(modulename, "could not find header for file \"%s\" in tar archive\n", filename);
 		else
 		{
 			/*
@@ -1183,9 +1183,9 @@ _tarPositionTo(ArchiveHandle *AH, const char *filename)
 
 		id = atoi(th->targetFile);
 		if ((TocIDRequired(AH, id, AH->ropt) & REQ_DATA) != 0)
-			die_horribly(AH, modulename, "restoring data out of order is not supported in this archive format: "
-						 "\"%s\" is required, but comes before \"%s\" in the archive file.\n",
-						 th->targetFile, filename);
+			exit_horribly(modulename, "restoring data out of order is not supported in this archive format: "
+						  "\"%s\" is required, but comes before \"%s\" in the archive file.\n",
+						  th->targetFile, filename);
 
 		/* Header doesn't match, so read to next header */
 		len = ((th->fileLen + 511) & ~511);		/* Padded length */
@@ -1195,7 +1195,7 @@ _tarPositionTo(ArchiveHandle *AH, const char *filename)
 			_tarReadRaw(AH, &header[0], 512, NULL, ctx->tarFH);
 
 		if (!_tarGetHeader(AH, th))
-			die_horribly(AH, modulename, "could not find header for file \"%s\" in tar archive\n", filename);
+			exit_horribly(modulename, "could not find header for file \"%s\" in tar archive\n", filename);
 	}
 
 	ctx->tarNextMember = ctx->tarFHpos + ((th->fileLen + 511) & ~511);
@@ -1228,7 +1228,7 @@ _tarGetHeader(ArchiveHandle *AH, TAR_MEMBER *th)
 
 			snprintf(buf1, sizeof(buf1), INT64_FORMAT, (int64) ftello(ctx->tarFH));
 			snprintf(buf2, sizeof(buf2), INT64_FORMAT, (int64) ftello(ctx->tarFHpos));
-			die_horribly(AH, modulename,
+			exit_horribly(modulename,
 			  "mismatch in actual vs. predicted file position (%s vs. %s)\n",
 						 buf1, buf2);
 		}
@@ -1243,11 +1243,11 @@ _tarGetHeader(ArchiveHandle *AH, TAR_MEMBER *th)
 			return 0;
 
 		if (len != 512)
-			die_horribly(AH, modulename,
-						 ngettext("incomplete tar header found (%lu byte)\n",
-								  "incomplete tar header found (%lu bytes)\n",
-								  len),
-						 (unsigned long) len);
+			exit_horribly(modulename,
+						  ngettext("incomplete tar header found (%lu byte)\n",
+								   "incomplete tar header found (%lu bytes)\n",
+								   len),
+						  (unsigned long) len);
 
 		/* Calc checksum */
 		chk = _tarChecksum(h);
@@ -1291,10 +1291,10 @@ _tarGetHeader(ArchiveHandle *AH, TAR_MEMBER *th)
 		char		buf[100];
 
 		snprintf(buf, sizeof(buf), INT64_FORMAT, (int64) ftello(ctx->tarFH));
-		die_horribly(AH, modulename,
-					 "corrupt tar header found in %s "
-					 "(expected %d, computed %d) file position %s\n",
-					 tag, sum, chk, buf);
+		exit_horribly(modulename,
+					  "corrupt tar header found in %s "
+					  "(expected %d, computed %d) file position %s\n",
+					  tag, sum, chk, buf);
 	}
 
 	th->targetFile = pg_strdup(tag);
@@ -1385,5 +1385,5 @@ _tarWriteHeader(TAR_MEMBER *th)
 	}
 
 	if (fwrite(h, 1, 512, th->tarFH) != 512)
-		die_horribly(th->AH, modulename, "could not write to output file: %s\n", strerror(errno));
+		exit_horribly(modulename, "could not write to output file: %s\n", strerror(errno));
 }
