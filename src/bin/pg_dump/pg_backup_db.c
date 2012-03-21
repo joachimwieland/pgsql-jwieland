@@ -325,14 +325,6 @@ GetConnection(Archive *AHX)
 	return AH->connection;
 }
 
-void
-archive_close_connection(int code, void *arg)
-{
-	Archive	   *AH = (Archive *) arg;
-
-	DisconnectDatabase(AH);
-}
-
 static void
 notice_processor(void *arg, const char *message)
 {

@@ -92,6 +92,14 @@ typedef struct _parallel_slot
 	RestoreArgs *args;
 } ParallelSlot;
 
+typedef struct _shutdown_information
+{
+	ParallelState *pstate;
+	Archive       *AHX;
+} ShutdownInformation;
+
+static ShutdownInformation shutdown_info;
+
 #define NO_SLOT (-1)
 
 #define TEXT_DUMP_HEADER "--\n-- PostgreSQL database dump\n--\n\n"
@@ -172,6 +180,11 @@ static void mark_create_done(ArchiveHandle *AH, TocEntry *te);
 static void inhibit_data_for_failed_table(ArchiveHandle *AH, TocEntry *te);
 static ArchiveHandle *CloneArchive(ArchiveHandle *AH);
 static void DeCloneArchive(ArchiveHandle *AH);
+
+static void setProcessIdentifier(ParallelStateEntry *pse, ArchiveHandle *AH);
+static void unsetProcessIdentifier(ParallelStateEntry *pse);
+static int GetMySlot(ParallelState *pstate);
+static void archive_close_connection(int code, void *arg);
 
 
 /*
@@ -3309,12 +3322,24 @@ GetMySlot(ParallelState *pstate)
 }
 
 static void
-archive_close_connection_parallel(int code, void *ps)
+archive_close_connection(int code, void *arg)
 {
-	ParallelState *pstate = (ParallelState *) ps;
-	int slotno = GetMySlot(pstate);
-	if (slotno != NO_SLOT && pstate->pse[slotno].AH)
-		DisconnectDatabase(&pstate->pse[slotno].AH->public);
+	ShutdownInformation *si = (ShutdownInformation *) arg;
+	if (si->pstate)
+	{
+		int slotno = GetMySlot(si->pstate);
+		if (slotno != NO_SLOT && si->pstate->pse[slotno].AH)
+			DisconnectDatabase(&si->pstate->pse[slotno].AH->public);
+	}
+	else if (si->AHX)
+		DisconnectDatabase(si->AHX);
+}
+
+void
+on_exit_close_archive(Archive *AHX)
+{
+	shutdown_info.AHX = AHX;
+	on_exit_nicely(archive_close_connection, &shutdown_info);
 }
 
 /*
@@ -3409,11 +3434,10 @@ restore_toc_entries_parallel(ArchiveHandle *AH)
 	DisconnectDatabase(&AH->public);
 
 	/*
-	 * Both pg_dump and pg_restore that use this code set at most
-	 * one exit handler. So we can just reset the handlers.
+	 * Set the pstate in the shutdown_info. The exit handler uses pstate if set
+	 * and falls back to AHX otherwise.
 	 */
-	on_exit_nicely_reset();
-	on_exit_nicely(archive_close_connection_parallel, pstate);
+	shutdown_info.pstate = pstate;
 
 	/* blow away any transient state from the old connection */
 	if (AH->currUser)
@@ -3547,8 +3571,12 @@ restore_toc_entries_parallel(ArchiveHandle *AH)
 	}
 
 	ahlog(AH, 1, "finished main parallel loop\n");
-	on_exit_nicely_reset();
-	on_exit_nicely(archive_close_connection, AH);
+
+	/*
+	 * Remove the pstate again, so the exit handler will now fall back to
+	 * closing AH->connection again.
+	 */
+	shutdown_info.pstate = NULL;
 
 	/*
 	 * Now reconnect the single parent connection.

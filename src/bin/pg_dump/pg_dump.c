@@ -574,7 +574,9 @@ main(int argc, char **argv)
 
 	/* Open the output file */
 	fout = CreateArchive(filename, archiveFormat, compressLevel, archiveMode);
-	on_exit_nicely(archive_close_connection, fout);
+
+	/* Register the cleanup hook */
+	on_exit_close_archive(fout);
 
 	if (fout == NULL)
 		exit_horribly(NULL, "could not open output file \"%s\" for writing\n", filename);
