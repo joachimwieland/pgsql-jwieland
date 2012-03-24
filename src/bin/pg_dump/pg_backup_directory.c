@@ -94,8 +94,6 @@ static char *_WorkerJobDumpDirectory(ArchiveHandle *AH, TocEntry *te);
 
 static void createDirectory(const char *dir);
 static char *prependDirectory(ArchiveHandle *AH, char *buf, const char *relativeFilename);
-static char *_WorkerJobDumpDirectory(ArchiveHandle *AH, TocEntry *te);
-static char *_WorkerJobRestoreDirectory(ArchiveHandle *AH, TocEntry *te);
 
 /*
  *	Init routine required by ALL formats. This is a global routine
@@ -730,8 +728,6 @@ _Clone(ArchiveHandle *AH)
 	lclContext *ctx = (lclContext *) AH->formatData;
 
 	AH->formatData = (lclContext *) pg_malloc(sizeof(lclContext));
-	if (AH->formatData == NULL)
-		die_horribly(AH, modulename, "out of memory\n");
 	memcpy(AH->formatData, ctx, sizeof(lclContext));
 	ctx = (lclContext *) AH->formatData;
 
@@ -800,7 +796,7 @@ _WorkerJobDumpDirectory(ArchiveHandle *AH, TocEntry *te)
 
 	/* This should never happen */
 	if (!tctx)
-		die_horribly(AH, modulename, "Error during backup\n");
+		exit_horribly(modulename, "Error during backup\n");
 
 	/*
 	 * This function returns void. We either fail and die horribly or succeed...

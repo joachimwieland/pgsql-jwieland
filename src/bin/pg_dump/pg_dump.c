@@ -589,17 +589,11 @@ main(int argc, char **argv)
 			|| numWorkers > MAXIMUM_WAIT_OBJECTS
 #endif
 		)
-	{
-		write_msg(NULL, _("%s: invalid number of parallel jobs\n"), progname);
-		exit(1);
-	}
+		exit_horribly(NULL, "%s: invalid number of parallel jobs\n", progname);
 
 	/* Parallel backup only in the directory archive format so far */
 	if (archiveFormat != archDirectory && numWorkers > 1)
-	{
-		write_msg(NULL, "parallel backup only supported by the directory format\n");
-		exit(1);
-	}
+		exit_horribly(NULL, "parallel backup only supported by the directory format\n");
 
 	/* Open the output file */
 	fout = CreateArchive(filename, archiveFormat, compressLevel, archiveMode);
@@ -648,16 +642,12 @@ main(int argc, char **argv)
 	else
 		username_subquery = "SELECT usename FROM pg_user WHERE usesysid =";
 
-	if (numWorkers > 1)
-	{
-		/* check the version for the synchronized snapshots feature */
-		if (fout->remoteVersion < 90200 && !no_synchronized_snapshots)
-		{
-			write_msg(NULL, "No synchronized snapshots available in this version\n"
-						 "You might have to run with --no-synchronized-snapshots\n");
-			exit(1);
-		}
-	}
+	/* check the version for the synchronized snapshots feature */
+	if (numWorkers > 1 && fout->remoteVersion < 90200
+		&& !no_synchronized_snapshots)
+		exit_horribly(NULL,
+					 "No synchronized snapshots available in this version.\n"
+					 "Run with --no-synchronized-snapshots instead if you really want to.\n");
 
 	/* Find the last built-in OID, if needed */
 	if (fout->remoteVersion < 70300)
@@ -1309,10 +1299,6 @@ selectDumpableObject(DumpableObject *dobj)
 static int
 dumpTableData_copy(Archive *fout, void *dcontext)
 {
-	/*
-	 * This is a data dumper routine, executed in a child for parallel backup, so
-	 * it must not access the global g_conn but AH->connection instead.
-	 */
 	TableDataInfo *tdinfo = (TableDataInfo *) dcontext;
 	TableInfo  *tbinfo = tdinfo->tdtable;
 	const char *classname = tbinfo->dobj.name;
@@ -1486,10 +1472,6 @@ dumpTableData_copy(Archive *fout, void *dcontext)
 static int
 dumpTableData_insert(Archive *fout, void *dcontext)
 {
-	/*
-	 * This is a data dumper routine, executed in a child for parallel backup, so
-	 * it must not access the global g_conn but AH->connection instead.
-	 */
 	TableDataInfo *tdinfo = (TableDataInfo *) dcontext;
 	TableInfo  *tbinfo = tdinfo->tdtable;
 	const char *classname = tbinfo->dobj.name;
@@ -2398,10 +2380,6 @@ dumpBlob(Archive *fout, BlobInfo *binfo)
 static int
 dumpBlobs(Archive *fout, void *arg)
 {
-	/*
-	 * This is a data dumper routine, executed in a child for parallel backup,
-	 * so it must not access the global g_conn but AH->connection instead.
-	 */
 	const char *blobQry;
 	const char *blobFetchQry;
 	PGconn	   *conn = GetConnection(fout);

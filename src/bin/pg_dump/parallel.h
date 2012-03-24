@@ -83,9 +83,5 @@ extern void DispatchJobForTocEntry(struct _archiveHandle *AH,
 								   struct _tocEntry *te, T_Action act);
 extern void ParallelBackupEnd(struct _archiveHandle *AH, ParallelState *pstate);
 
-extern void (* volatile vparallel_error_handler)(struct _archiveHandle *AH,
-									const char *modulename,
-									const char *fmt, va_list ap);
-
 extern void checkAborting(struct _archiveHandle *AH);
 

@@ -36,6 +36,7 @@ static struct
 } on_exit_nicely_list[MAX_ON_EXIT_NICELY];
 
 static int on_exit_nicely_index;
+void (*on_exit_msg_func)(const char *modulename, const char *fmt, va_list ap) = vwrite_msg;
 
 #define supports_grant_options(version) ((version) >= 70400)
 
@@ -1309,7 +1310,7 @@ exit_horribly(const char *modulename, const char *fmt,...)
 	va_list		ap;
 
 	va_start(ap, fmt);
-	vwrite_msg(modulename, fmt, ap);
+	on_exit_msg_func(modulename, fmt, ap);
 	va_end(ap);
 
 	exit_nicely(1);

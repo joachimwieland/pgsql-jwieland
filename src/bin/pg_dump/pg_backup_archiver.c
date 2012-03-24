@@ -111,13 +111,6 @@ static void reduce_dependencies(ArchiveHandle *AH, TocEntry *te,
 					TocEntry *ready_list);
 static void mark_create_done(ArchiveHandle *AH, TocEntry *te);
 static void inhibit_data_for_failed_table(ArchiveHandle *AH, TocEntry *te);
-static ArchiveHandle *CloneArchive(ArchiveHandle *AH);
-static void DeCloneArchive(ArchiveHandle *AH);
-
-static void setProcessIdentifier(ParallelStateEntry *pse, ArchiveHandle *AH);
-static void unsetProcessIdentifier(ParallelStateEntry *pse);
-static ParallelStateEntry *GetMyPSEntry(ParallelState *pstate);
-static void archive_close_connection(int code, void *arg);
 
 /*
  *	Wrapper functions.
@@ -3244,67 +3237,6 @@ dumpTimestamp(ArchiveHandle *AH, const char *msg, time_t tim)
 		ahprintf(AH, "-- %s %s\n\n", msg, buf);
 }
 
-static void
-setProcessIdentifier(ParallelStateEntry *pse, ArchiveHandle *AH)
-{
-#ifdef WIN32
-	pse->threadId = GetCurrentThreadId();
-#else
-	pse->pid = getpid();
-#endif
-	pse->AH = AH;
-}
-
-static void
-unsetProcessIdentifier(ParallelStateEntry *pse)
-{
-#ifdef WIN32
-	pse->threadId = 0;
-#else
-	pse->pid = 0;
-#endif
-	pse->AH = NULL;
-}
-
-static ParallelStateEntry *
-GetMyPSEntry(ParallelState *pstate)
-{
-	int i;
-
-	for (i = 0; i < pstate->numWorkers; i++)
-#ifdef WIN32
-		if (pstate->pse[i].threadId == GetCurrentThreadId())
-#else
-		if (pstate->pse[i].pid == getpid())
-#endif
-			return &(pstate->pse[i]);
-
-	return NULL;
-}
-
-static void
-archive_close_connection(int code, void *arg)
-{
-	ShutdownInformation *si = (ShutdownInformation *) arg;
-
-	if (si->pstate)
-	{
-		ParallelStateEntry *entry = GetMyPSEntry(si->pstate);
-
-		if (entry != NULL && entry->AH)
-			DisconnectDatabase(&(entry->AH->public));
-	}
-	else if (si->AHX)
-		DisconnectDatabase(si->AHX);
-}
-
-void
-on_exit_close_archive(Archive *AHX)
-{
-	shutdown_info.AHX = AHX;
-	on_exit_nicely(archive_close_connection, &shutdown_info);
-}
-
 /*
  * Main engine for parallel restore.
  *
@@ -3323,30 +3255,15 @@ restore_toc_entries_prefork(ArchiveHandle *AH)
 	bool		skipped_some;
 	TocEntry   *next_work_item;
 
-	/* XXX merged here */
-	thandle		ret_child;
-	TocEntry   *te;
-	ParallelState *pstate;
-	int			i;
-
 	ahlog(AH, 2, "entering restore_toc_entries_prefork\n");
 
-	/* XXX still needed start ? */
 	/* we haven't got round to making this work for all archive formats */
 	if (AH->ClonePtr == NULL || AH->ReopenPtr == NULL)
-		die_horribly(AH, modulename, "parallel restore is not supported with this archive file format\n");
+		exit_horribly(modulename, "parallel restore is not supported with this archive file format\n");
 
 	/* doesn't work if the archive represents dependencies as OIDs, either */
 	if (AH->version < K_VERS_1_8)
-		die_horribly(AH, modulename, "parallel restore is not supported with archives made by pre-8.0 pg_dump\n");
-	/* XXX still needed end ? */
-
-	slots = (ParallelSlot *) pg_calloc(n_slots, sizeof(ParallelSlot));
-	pstate = (ParallelState *) pg_malloc(sizeof(ParallelState));
-	pstate->pse = (ParallelStateEntry *) pg_calloc(n_slots, sizeof(ParallelStateEntry));
-	pstate->numWorkers = ropt->number_of_jobs;
-	for (i = 0; i < pstate->numWorkers; i++)
-		unsetProcessIdentifier(&(pstate->pse[i]));
+		exit_horribly(modulename, "parallel restore is not supported with archives made by pre-8.0 pg_dump\n");
 
 	/* Adjust dependency information */
 	fix_dependencies(AH);
@@ -3401,12 +3318,6 @@ restore_toc_entries_prefork(ArchiveHandle *AH)
 	 * connections.
 	 */
 	DisconnectDatabase(&AH->public);
-
-	/*
-	 * Set the pstate in the shutdown_info. The exit handler uses pstate if set
-	 * and falls back to AHX otherwise.
-	 */
-	shutdown_info.pstate = pstate;
 
 	/* blow away any transient state from the old connection */
 	if (AH->currUser)
@@ -3520,14 +3431,12 @@ restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate,
 
 			par_list_remove(next_work_item);
 
-		/* XXX merged here */
 			Assert(GetIdleWorker(pstate) != NO_SLOT);
 			DispatchJobForTocEntry(AH, pstate, next_work_item, ACT_RESTORE);
 		}
 		else
 			/* at least one child is working and we have nothing ready. */
 			Assert(!IsEveryWorkerIdle(pstate));
-	/* XXX merged here */
 
 		for (;;)
 		{
@@ -3581,12 +3490,6 @@ restore_toc_entries_postfork(ArchiveHandle *AH, TocEntry *pending_list)
 	TocEntry   *te;
 
 	ahlog(AH, 2, "entering restore_toc_entries_postfork\n");
-
-	/*
-	 * Remove the pstate again, so the exit handler will now fall back to
-	 * closing AH->connection again.
-	 */
-	shutdown_info.pstate = NULL;
 
 	/*
 	 * Now reconnect the single parent connection.
@@ -3777,11 +3680,6 @@ parallel_restore(ParallelArgs *args)
 	_doSetFixedOutputState(AH);
 
 	Assert(AH->connection != NULL);
-
-	/* XXX merged here
-	setProcessIdentifier(args->pse, AH);
-	unsetProcessIdentifier(args->pse);
-	*/
 
 	AH->public.n_errors = 0;
 

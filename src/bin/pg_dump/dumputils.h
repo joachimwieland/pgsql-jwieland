@@ -66,4 +66,8 @@ typedef void (*on_exit_nicely_callback) (int code, void *arg);
 extern void on_exit_nicely(on_exit_nicely_callback function, void *arg);
 extern void exit_nicely(int code) __attribute__((noreturn));
 
+extern void (*on_exit_msg_func)(const char *modulename, const char *fmt, va_list ap)
+				__attribute__((format(PG_PRINTF_ATTRIBUTE, 2, 0)));
+
+
 #endif   /* DUMPUTILS_H */
