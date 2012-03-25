@@ -352,6 +352,8 @@ main(int argc, char **argv)
 
 	set_pglocale_pgservice(argv[0], PG_TEXTDOMAIN("pg_dump"));
 
+	init_parallel_dump_utils();
+
 	g_verbose = false;
 
 	strcpy(g_comment_start, "-- ");

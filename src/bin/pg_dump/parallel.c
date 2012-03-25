@@ -38,6 +38,8 @@
 #ifdef WIN32
 static unsigned int	tMasterThreadId = 0;
 static HANDLE		termEvent = INVALID_HANDLE_VALUE;
+static int pgpipe(int handles[2]);
+static int piperead(int s, char *buf, int len);
 #else
 static volatile sig_atomic_t wantAbort = 0;
 static bool aborting = false;
@@ -298,8 +300,8 @@ ShutdownWorkersHard(ParallelState *pstate)
 #else
 	/* The workers monitor this event via checkAborting(). */
 	SetEvent(termEvent);
-	ShutdownWorkersSoft(pstate, false);
-	WaitForTerminatingWorkers(pstate);
+	/* No hard shutdown on Windows, wait for the workers to terminate */
+	ShutdownWorkersSoft(pstate, true);
 #endif
 }
 
@@ -864,6 +866,10 @@ WaitForCommands(ArchiveHandle *AH, int pipefd[2])
 	{
 		command = getMessageFromMaster(pipefd);
 
+		printf("command: %s\n", command);
+		if (strcmp(command, "DUMP 3442") == 0)
+			exit_horribly(modulename, "I'm out, do your stuff alone\n");
+
 		if (messageStartsWith(command, "DUMP "))
 		{
 			Assert(AH->format == archDirectory);
@@ -1182,7 +1188,9 @@ sendMessageToWorker(ParallelState *pstate, int worker, const char *str)
 		 * If we're already aborting anyway, don't care if we succeed or not.
 		 * The child might have gone already.
 		 */
+#ifndef WIN32
 		if (!aborting)
+#endif
 			exit_horribly(modulename,
 						  "Error writing to the communication channel: %s\n",
 						  strerror(errno));
@@ -1248,7 +1256,7 @@ readMessageFromPipe(int fd)
  *	with recv/send.
  */
 
-int
+static int
 pgpipe(int handles[2])
 {
 	SOCKET		s;
@@ -1317,7 +1325,7 @@ pgpipe(int handles[2])
 	return 0;
 }
 
-int
+static int
 piperead(int s, char *buf, int len)
 {
 	int			ret = recv(s, buf, len, 0);
