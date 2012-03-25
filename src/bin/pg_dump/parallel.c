@@ -32,7 +32,6 @@
 
 #define PIPE_READ							0
 #define PIPE_WRITE							1
-#define SHUTDOWN_GRACE_PERIOD				(500)
 
 /* file-scope variables */
 #ifdef WIN32
@@ -55,11 +54,7 @@ static ShutdownInformation shutdown_info;
 
 static const char *modulename = gettext_noop("parallel archiver");
 
-#ifndef WIN32
-static ParallelSlot *GetPidPSlot(ParallelState *pstate, pid_t pid);
-#else
-static ParallelSlot *GetThreadIdPSlot(ParallelState *pstate, DWORD threadid);
-#endif
+static ParallelSlot *GetMyPSlot(ParallelState *pstate);
 static void parallel_exit_msg_func(const char *modulename,
 								   const char *fmt, va_list ap)
 			__attribute__((format(PG_PRINTF_ATTRIBUTE, 2, 0)));
@@ -78,9 +73,6 @@ static void SetupWorker(ArchiveHandle *AH, int pipefd[2], int worker,
 static void PrintStatus(ParallelState *pstate);
 static bool HasEveryWorkerTerminated(ParallelState *pstate);
 
-static void ShutdownConnection(PGconn **conn);
-
-
 static void lockTableNoWait(ArchiveHandle *AH, TocEntry *te);
 static void WaitForCommands(ArchiveHandle *AH, int pipefd[2]);
 static char *getMessageFromMaster(int pipefd[2]);
@@ -97,23 +89,16 @@ static char *readMessageFromPipe(int fd);
 #define messageEquals(msg, pattern) \
 	(strcmp(msg, pattern) == 0)
 
-#ifndef WIN32
-#define GetMyPSlot(pstate) GetPidPSlot(pstate, getpid())
 static ParallelSlot *
-GetPidPSlot(ParallelState *pstate, pid_t pid)
-#else
-#define GetMyPSlot(pstate) GetThreadIdPSlot(pstate, GetCurrentThreadId())
-static ParallelSlot *
-GetThreadIdPSlot(ParallelState *pstate, DWORD threadId)
-#endif
+GetMyPSlot(ParallelState *pstate)
 {
 	int i;
 
 	for (i = 0; i < pstate->numWorkers; i++)
 #ifdef WIN32
-		if (pstate->parallelSlot[i].threadId == threadId)
+		if (pstate->parallelSlot[i].threadId == GetCurrentThreadId())
 #else
-		if (pstate->parallelSlot[i].pid == pid)
+		if (pstate->parallelSlot[i].pid == getpid())
 #endif
 			return &(pstate->parallelSlot[i]);
 
@@ -287,13 +272,35 @@ WaitForTerminatingWorkers(ParallelState *pstate)
 {
 	while (!HasEveryWorkerTerminated(pstate))
 	{
-		int		status;
-		pid_t	pid;
 		ParallelSlot *slot;
+		int j;
+#ifndef WIN32
+		int		status;
+		pid_t	pid = wait(&status);
+		for (j = 0; j < pstate->numWorkers; j++)
+			if (pstate->parallelSlot[j].pid == pid)
+				slot = &(pstate->parallelSlot[j]);
+#else
+		uintptr_t hThread;
+		DWORD	ret;
+		uintptr_t *lpHandles = pg_malloc(sizeof(HANDLE) * pstate->numWorkers);
+		int nrun = 0;
+		for (j = 0; j < pstate->numWorkers; j++)
+			if (pstate->parallelSlot[j].workerStatus != WRKR_TERMINATED)
+			{
+				lpHandles[nrun] = pstate->parallelSlot[j].hThread;
+				nrun++;
+			}
+		ret = WaitForMultipleObjects(nrun, (HANDLE*) lpHandles, false, INFINITE);
+		Assert(ret != WAIT_FAILED);
+		hThread = lpHandles[ret - WAIT_OBJECT_0];
 
-		pid = wait(&status);
-		slot = GetPidPSlot(pstate, pid);
+		for (j = 0; j < pstate->numWorkers; j++)
+			if (pstate->parallelSlot[j].hThread == hThread)
+				slot = &(pstate->parallelSlot[j]);
 
+		free(lpHandles);
+#endif
 		Assert(slot);
 
 		slot->workerStatus = WRKR_TERMINATED;
@@ -702,44 +709,6 @@ IsEveryWorkerIdle(ParallelState *pstate)
 }
 
 /*
- * This routine does some effort to gracefully shut down the database
- * connection, but not too much, since the parent is waiting for the workers to
- * terminate. The cancellation of the database connection is done in an
- * asynchronous way, so we need to wait a bit after sending PQcancel().
- * Calling PQcancel() first and then PQfinish() immediately afterwards
- * would still cancel an active connection because most likely the PQfinish()
- * has not yet been processed.
- */
-static void /* XXX remove */
-ShutdownConnection(PGconn **conn)
-{
-	PGcancel   *cancel;
-	char		errbuf[1];
-	int			i;
-
-	Assert(conn != NULL);
-	Assert(*conn != NULL);
-
-	if ((cancel = PQgetCancel(*conn)))
-	{
-		PQcancel(cancel, errbuf, sizeof(errbuf));
-		PQfreeCancel(cancel);
-	}
-
-	/* give the server a little while */
-	for (i = 0; i < 10; i++)
-	{
-		PQconsumeInput(*conn);
-		if (!PQisBusy(*conn))
-			break;
-		pg_usleep((SHUTDOWN_GRACE_PERIOD / 10) * 1000);
-	}
-
-	PQfinish(*conn);
-	*conn = NULL;
-}
-
-/*
  * ---------------------------------------------------------------------
  * One danger of the parallel backup is a possible deadlock:
  *
@@ -817,11 +786,6 @@ WaitForCommands(ArchiveHandle *AH, int pipefd[2])
 	for(;;)
 	{
 		command = getMessageFromMaster(pipefd);
-
-		printf("command: %s\n", command);
-		if (strcmp(command, "DUMP 3442") == 0)
-		        exit_horribly(modulename, "I'm out, do your stuff alone\n");
-
 
 		if (messageStartsWith(command, "DUMP "))
 		{

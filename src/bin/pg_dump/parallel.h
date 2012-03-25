@@ -58,7 +58,6 @@ typedef struct _parallel_slot
 #else
 	pid_t				pid;
 #endif
-	bool				inErrorHandling;
 } ParallelSlot;
 
 #define NO_SLOT (-1)
