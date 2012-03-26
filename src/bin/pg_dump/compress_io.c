@@ -54,8 +54,8 @@
 
 #include "compress_io.h"
 #include "dumpmem.h"
-#include "parallel.h"
 #include "dumputils.h"
+#include "parallel.h"
 
 /*----------------------
  * Compressor API

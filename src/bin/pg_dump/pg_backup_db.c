@@ -308,6 +308,10 @@ ConnectDatabase(Archive *AHX,
 	PQsetNoticeProcessor(AH->connection, notice_processor, NULL);
 }
 
+/*
+ * Close the connection to the database and also cancel off the query if we
+ * have one running.
+ */
 void
 DisconnectDatabase(Archive *AHX)
 {
