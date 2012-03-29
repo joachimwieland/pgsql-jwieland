@@ -1393,7 +1393,7 @@ ahwrite(const void *ptr, size_t size, size_t nmemb, ArchiveHandle *AH)
 /* on some error, we may decide to go on... */
 void
 warn_or_exit_horribly(ArchiveHandle *AH,
-					  const char *modulename, const char *fmt,...)
+ 					  const char *modulename, const char *fmt,...)
 {
 	va_list		ap;
 

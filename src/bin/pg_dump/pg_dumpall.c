@@ -1919,5 +1919,3 @@ doShellQuoting(PQExpBuffer buf, const char *str)
 #endif   /* WIN32 */
 }
 
-/* dummy, no parallel dump/restore for pg_dumpall yet */
-void _SetupWorker(Archive *AHX, RestoreOptions *ropt) {}

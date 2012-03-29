@@ -272,7 +272,7 @@ WaitForTerminatingWorkers(ParallelState *pstate)
 {
 	while (!HasEveryWorkerTerminated(pstate))
 	{
-		ParallelSlot *slot;
+		ParallelSlot *slot = NULL;
 		int j;
 #ifndef WIN32
 		int		status;

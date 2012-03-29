@@ -410,7 +410,8 @@ main(int argc, char **argv)
 #ifdef WIN32
 	if (numWorkers > MAXIMUM_WAIT_OBJECTS)
 	{
-		fprintf(stderr, _("%s: invalid number of parallel jobs\n"),	progname);
+		fprintf(stderr, _("%s: maximum number of parallel jobs is %d\n"),
+				progname, MAXIMUM_WAIT_OBJECTS);
 		exit(1);
 	}
 #endif
