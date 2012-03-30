@@ -63,7 +63,6 @@ static void parallel_msg_master(ParallelSlot *slot, const char *modulename,
 			__attribute__((format(PG_PRINTF_ATTRIBUTE, 3, 0)));
 static void archive_close_connection(int code, void *arg);
 static void ShutdownWorkersHard(ParallelState *pstate);
-static void ShutdownWorkersSoft(ParallelState *pstate, bool do_wait);
 static void WaitForTerminatingWorkers(ParallelState *pstate);
 #ifndef WIN32
 static void sigTermHandler(int signum);
@@ -227,39 +226,21 @@ ShutdownWorkersHard(ParallelState *pstate)
 #ifndef WIN32
 	int i;
 	signal(SIGPIPE, SIG_IGN);
-	ShutdownWorkersSoft(pstate, false);
+
+	/* close the sockets so that the workers know they can exit */
+	for (i = 0; i < pstate->numWorkers; i++)
+	{
+		closesocket(pstate->parallelSlot[i].pipeRead);
+		closesocket(pstate->parallelSlot[i].pipeWrite);
+	}
+
 	for (i = 0; i < pstate->numWorkers; i++)
 		kill(pstate->parallelSlot[i].pid, SIGTERM);
-	WaitForTerminatingWorkers(pstate);
+
 #else
 	/* The workers monitor this event via checkAborting(). */
 	SetEvent(termEvent);
-	/* No hard shutdown on Windows, wait for the workers to terminate */
-	ShutdownWorkersSoft(pstate, true);
 #endif
-}
-
-/*
- * Performs a soft shutdown and optionally waits for every worker to terminate.
- * A soft shutdown sends a "TERMINATE" message to every worker only.
- */
-static void
-ShutdownWorkersSoft(ParallelState *pstate, bool do_wait)
-{
-	int			i;
-
-	/* soft shutdown */
-	for (i = 0; i < pstate->numWorkers; i++)
-	{
-		if (pstate->parallelSlot[i].workerStatus != WRKR_TERMINATED)
-		{
-			sendMessageToWorker(pstate, i, "TERMINATE");
-			pstate->parallelSlot[i].workerStatus = WRKR_WORKING;
-		}
-	}
-
-	if (!do_wait)
-		return;
 
 	WaitForTerminatingWorkers(pstate);
 }
@@ -538,16 +519,13 @@ ParallelBackupEnd(ArchiveHandle *AH, ParallelState *pstate)
 	PrintStatus(pstate);
 	Assert(IsEveryWorkerIdle(pstate));
 
-	/* no hard shutdown, let workers exit by themselves and wait for them */
-	ShutdownWorkersSoft(pstate, true);
-
-	PrintStatus(pstate);
-
+	/* close the sockets so that the workers know they can exit */
 	for (i = 0; i < pstate->numWorkers; i++)
 	{
 		closesocket(pstate->parallelSlot[i].pipeRead);
 		closesocket(pstate->parallelSlot[i].pipeWrite);
 	}
+	WaitForTerminatingWorkers(pstate);
 
 	/*
 	 * Remove the pstate again, so the exit handler in the parent will now
@@ -785,7 +763,12 @@ WaitForCommands(ArchiveHandle *AH, int pipefd[2])
 
 	for(;;)
 	{
-		command = getMessageFromMaster(pipefd);
+		if (!(command = getMessageFromMaster(pipefd)))
+		{
+			PQfinish(AH->connection);
+			AH->connection = NULL;
+			return;
+		}
 
 		if (messageStartsWith(command, "DUMP "))
 		{
@@ -833,12 +816,6 @@ WaitForCommands(ArchiveHandle *AH, int pipefd[2])
 			Assert(AH->connection != NULL);
 			sendMessageToMaster(pipefd, str);
 			free(str);
-		}
-		else if (messageEquals(command, "TERMINATE"))
-		{
-			PQfinish(AH->connection);
-			AH->connection = NULL;
-			return;
 		}
 		else
 			exit_horribly(modulename,
