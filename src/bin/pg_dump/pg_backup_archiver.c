@@ -3237,17 +3237,6 @@ dumpTimestamp(ArchiveHandle *AH, const char *msg, time_t tim)
 		ahprintf(AH, "-- %s %s\n\n", msg, buf);
 }
 
-/*
- * Main engine for parallel restore.
- *
- * Work is done in three phases.
- * First we process all SECTION_PRE_DATA tocEntries, in a single connection,
- * just as for a standard restore.	Second we process the remaining non-ACL
- * steps in parallel worker children (threads on Windows, processes on Unix),
- * each of which connects separately to the database.  Finally we process all
- * the ACL entries in a single connection (that happens back in
- * RestoreArchive).
- */
 static void
 restore_toc_entries_prefork(ArchiveHandle *AH)
 {
@@ -3256,14 +3245,6 @@ restore_toc_entries_prefork(ArchiveHandle *AH)
 	TocEntry   *next_work_item;
 
 	ahlog(AH, 2, "entering restore_toc_entries_prefork\n");
-
-	/* we haven't got round to making this work for all archive formats */
-	if (AH->ClonePtr == NULL || AH->ReopenPtr == NULL)
-		exit_horribly(modulename, "parallel restore is not supported with this archive file format\n");
-
-	/* doesn't work if the archive represents dependencies as OIDs, either */
-	if (AH->version < K_VERS_1_8)
-		exit_horribly(modulename, "parallel restore is not supported with archives made by pre-8.0 pg_dump\n");
 
 	/* Adjust dependency information */
 	fix_dependencies(AH);
@@ -3358,7 +3339,7 @@ restore_toc_entries_parallel(ArchiveHandle *AH, ParallelState *pstate,
 
 	/*
 	 * Initialize the lists of ready items, the list for pending items has
-	 * already been initialized in the parent.  After this setup, the pending
+	 * already been initialized in the caller.  After this setup, the pending
 	 * list is everything that needs to be done but is blocked by one or more
 	 * dependencies, while the ready list contains items that have no remaining
 	 * dependencies. Note: we don't yet filter out entries that aren't going
