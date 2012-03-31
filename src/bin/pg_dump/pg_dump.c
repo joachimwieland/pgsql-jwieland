@@ -255,7 +255,7 @@ static void binary_upgrade_extension_member(PQExpBuffer upgrade_buffer,
 static const char *getAttrName(int attrnum, TableInfo *tblInfo);
 static const char *fmtCopyColumnList(const TableInfo *ti, PQExpBuffer buffer);
 static char *get_synchronized_snapshot(Archive *fout);
-static PGresult *ExecuteSqlQueryForSingleRow(Archive *fout, const char *query);
+static PGresult *ExecuteSqlQueryForSingleRow(Archive *fout, char *query);
 
 int
 main(int argc, char **argv)
@@ -983,7 +983,7 @@ _SetupWorker(Archive *AHX, RestoreOptions *ropt)
 static char*
 get_synchronized_snapshot(Archive *fout)
 {
-	const char *query = "select pg_export_snapshot()";
+	char	   *query = "select pg_export_snapshot()";
 	char	   *result;
 	PGresult   *res;
 
@@ -14386,7 +14386,7 @@ fmtCopyColumnList(const TableInfo *ti, PQExpBuffer buffer)
  * Execute an SQL query and verify that we got exactly one row back.
  */
 static PGresult *
-ExecuteSqlQueryForSingleRow(Archive *fout, const char *query)
+ExecuteSqlQueryForSingleRow(Archive *fout, char *query)
 {
 	PGresult   *res;
 	int			ntups;
