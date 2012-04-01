@@ -31,7 +31,7 @@ my $contrib_defines = {'refint' => 'REFINT_VERBOSE'};
 my @contrib_uselibpq = ('dblink', 'oid2name', 'pgbench', 'pg_upgrade','vacuumlo');
 my @contrib_uselibpgport =(
     'oid2name', 'pgbench', 'pg_standby','pg_archivecleanup',
-    'pg_test_fsync', 'pg_upgrade', 'vacuumlo'
+    'pg_test_fsync', 'pg_test_timing', 'pg_upgrade', 'vacuumlo'
 );
 my $contrib_extralibs = {'pgbench' => ['wsock32.lib']};
 my $contrib_extraincludes = {'tsearch2' => ['contrib/tsearch2'], 'dblink' => ['src/backend']};
@@ -73,7 +73,6 @@ sub mkvcbuild
     $postgres->ReplaceFile('src\backend\port\pg_shmem.c','src\backend\port\win32_shmem.c');
     $postgres->ReplaceFile('src\backend\port\pg_latch.c','src\backend\port\win32_latch.c');
     $postgres->AddFiles('src\port',@pgportfiles);
-    $postgres->AddFile('src\backend\port\pipe.c');
     $postgres->AddDir('src\timezone');
     $postgres->AddFiles('src\backend\parser','scan.l','gram.y');
     $postgres->AddFiles('src\backend\bootstrap','bootscanner.l','bootparse.y');
