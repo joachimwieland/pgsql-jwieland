@@ -108,6 +108,7 @@ getThreadLocalPQExpBuffer(void)
 #else
 		s_id_return = id_return;
 #endif
+
 	}
 
 	return id_return;

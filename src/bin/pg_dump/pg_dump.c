@@ -352,6 +352,10 @@ main(int argc, char **argv)
 
 	set_pglocale_pgservice(argv[0], PG_TEXTDOMAIN("pg_dump"));
 
+	/*
+	 * Initialize what we need for parallel execution, especially for thread
+	 * support on Windows.
+	 */
 	init_parallel_dump_utils();
 
 	g_verbose = false;

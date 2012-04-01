@@ -363,7 +363,6 @@ extern void WriteToc(ArchiveHandle *AH);
 extern void ReadToc(ArchiveHandle *AH);
 extern void WriteDataChunks(ArchiveHandle *AH, struct _parallel_state *pstate);
 extern void WriteDataChunksForTocEntry(ArchiveHandle *AH, TocEntry *te);
-
 extern ArchiveHandle *CloneArchive(ArchiveHandle *AH);
 extern void DeCloneArchive(ArchiveHandle *AH);
 
