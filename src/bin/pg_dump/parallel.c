@@ -39,9 +39,13 @@ static unsigned int	tMasterThreadId = 0;
 static HANDLE		termEvent = INVALID_HANDLE_VALUE;
 static int pgpipe(int handles[2]);
 static int piperead(int s, char *buf, int len);
+#define pipewrite(a,b,c)	send(a,b,c,0)
 #else
 static volatile sig_atomic_t wantAbort = 0;
 static bool aborting = false;
+#define pgpipe(a)			pipe(a)
+#define piperead(a,b,c)		read(a,b,c)
+#define pipewrite(a,b,c)	write(a,b,c)
 #endif
 
 typedef struct ShutdownInformation
