@@ -61,9 +61,18 @@ init_parallel_dump_utils(void)
 #ifdef WIN32
 	if (!parallel_init_done)
 	{
+		WSADATA	wsaData;
+		int		err;
+
 		tls_index = TlsAlloc();
-		parallel_init_done = true;
 		mainThreadId = GetCurrentThreadId();
+		err = WSAStartup(MAKEWORD(2, 2), &wsaData);
+		if (err != 0)
+		{
+			fprintf(stderr, _("WSAStartup failed: %d\n"), err);
+			exit_nicely(1);
+		}
+		parallel_init_done = true;
 	}
 #endif
 }
