@@ -55,6 +55,16 @@ static DWORD tls_index;
 static DWORD mainThreadId;
 #endif
 
+static void
+shutdown_parallel_dump_utils(int code, void* unused)
+{
+#ifdef WIN32
+	/* Call the cleanup function only from the main thread */
+	if (mainThreadId == GetCurrentThreadId())
+		WSACleanup();
+#endif
+}
+
 void
 init_parallel_dump_utils(void)
 {
@@ -72,6 +82,7 @@ init_parallel_dump_utils(void)
 			fprintf(stderr, _("WSAStartup failed: %d\n"), err);
 			exit_nicely(1);
 		}
+		on_exit_nicely(shutdown_parallel_dump_utils, NULL);
 		parallel_init_done = true;
 	}
 #endif
