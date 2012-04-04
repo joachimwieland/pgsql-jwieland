@@ -344,6 +344,8 @@ sub mkvcbuild
     $pgdump->AddFile('src\bin\pg_dump\pg_dump_sort.c');
     $pgdump->AddFile('src\bin\pg_dump\keywords.c');
     $pgdump->AddFile('src\backend\parser\kwlookup.c');
+    $pgdump->AddLibrary('wsock32.lib');
+    $pgdump->AddLibrary('ws2_32.lib');
 
     my $pgdumpall = AddSimpleFrontend('pg_dump', 1);
 
@@ -368,6 +370,8 @@ sub mkvcbuild
     $pgrestore->AddFile('src\bin\pg_dump\pg_restore.c');
     $pgrestore->AddFile('src\bin\pg_dump\keywords.c');
     $pgrestore->AddFile('src\backend\parser\kwlookup.c');
+    $pgrestore->AddLibrary('wsock32.lib');
+    $pgrestore->AddLibrary('ws2_32.lib');
 
     my $zic = $solution->AddProject('zic','exe','utils');
     $zic->AddFiles('src\timezone','zic.c','ialloc.c','scheck.c','localtime.c');
