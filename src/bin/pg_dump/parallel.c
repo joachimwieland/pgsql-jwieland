@@ -73,7 +73,6 @@ static void sigTermHandler(int signum);
 #endif
 static void SetupWorker(ArchiveHandle *AH, int pipefd[2], int worker,
 						RestoreOptions *ropt);
-static void PrintStatus(ParallelState *pstate);
 static bool HasEveryWorkerTerminated(ParallelState *pstate);
 
 static void lockTableNoWait(ArchiveHandle *AH, TocEntry *te);
@@ -289,8 +288,6 @@ WaitForTerminatingWorkers(ParallelState *pstate)
 		Assert(slot);
 
 		slot->workerStatus = WRKR_TERMINATED;
-
-		PrintStatus(pstate);
 	}
 	Assert(HasEveryWorkerTerminated(pstate));
 }
@@ -520,7 +517,6 @@ ParallelBackupEnd(ArchiveHandle *AH, ParallelState *pstate)
 	if (pstate->numWorkers == 1)
 		return;
 
-	PrintStatus(pstate);
 	Assert(IsEveryWorkerIdle(pstate));
 
 	/* close the sockets so that the workers know they can exit */
@@ -619,37 +615,7 @@ DispatchJobForTocEntry(ArchiveHandle *AH, ParallelState *pstate, TocEntry *te,
 
 	pstate->parallelSlot[worker].workerStatus = WRKR_WORKING;
 	pstate->parallelSlot[worker].args->te = te;
-	PrintStatus(pstate);
 }
-
-static void
-PrintStatus(ParallelState *pstate)
-{
-	int			i;
-	printf("------Status------\n");
-	for (i = 0; i < pstate->numWorkers; i++)
-	{
-		printf("Status of worker %d: ", i);
-		switch (pstate->parallelSlot[i].workerStatus)
-		{
-			case WRKR_IDLE:
-				printf("IDLE");
-				break;
-			case WRKR_WORKING:
-				printf("WORKING");
-				break;
-			case WRKR_FINISHED:
-				printf("FINISHED");
-				break;
-			case WRKR_TERMINATED:
-				printf("TERMINATED");
-				break;
-		}
-		printf("\n");
-	}
-	printf("------------\n");
-}
-
 
 /*
  * Find the first free parallel slot (if any).
@@ -891,8 +857,6 @@ ListenToWorkers(ArchiveHandle *AH, ParallelState *pstate, bool do_wait)
 	else
 		exit_horribly(modulename, "Invalid message received from worker: %s\n", msg);
 
-	PrintStatus(pstate);
-
 	/* both Unix and Win32 return pg_malloc()ed space, so we free it */
 	free(msg);
 }
@@ -916,7 +880,6 @@ ReapWorkerStatus(ParallelState *pstate, int *status)
 			*status = pstate->parallelSlot[i].status;
 			pstate->parallelSlot[i].status = 0;
 			pstate->parallelSlot[i].workerStatus = WRKR_IDLE;
-			PrintStatus(pstate);
 			return i;
 		}
 	}
