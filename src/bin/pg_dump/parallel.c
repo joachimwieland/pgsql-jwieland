@@ -433,7 +433,7 @@ ParallelBackupStart(ArchiveHandle *AH, RestoreOptions *ropt)
 		wi->pipeRead = pstate->parallelSlot[i].pipeRevRead = pipeMW[PIPE_READ];
 		wi->pipeWrite = pstate->parallelSlot[i].pipeRevWrite = pipeWM[PIPE_WRITE];
 
-		handle = _beginthreadex(NULL, 0, &init_spawned_worker_win32,
+		handle = _beginthreadex(NULL, 0, (void *) &init_spawned_worker_win32,
 								wi, 0, &(pstate->parallelSlot[i].threadId));
 		pstate->parallelSlot[i].hThread = handle;
 #else
