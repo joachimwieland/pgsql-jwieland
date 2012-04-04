@@ -54,20 +54,19 @@ static void AddAcl(PQExpBuffer aclbuf, const char *keyword,
 static PQExpBuffer getThreadLocalPQExpBuffer(void);
 
 #ifdef WIN32
+static void shutdown_parallel_dump_utils(int code, void* unused);
 static bool parallel_init_done = false;
 static DWORD tls_index;
 static DWORD mainThreadId;
-#endif
 
 static void
 shutdown_parallel_dump_utils(int code, void* unused)
 {
-#ifdef WIN32
 	/* Call the cleanup function only from the main thread */
 	if (mainThreadId == GetCurrentThreadId())
 		WSACleanup();
-#endif
 }
+#endif
 
 void
 init_parallel_dump_utils(void)

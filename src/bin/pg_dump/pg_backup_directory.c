@@ -668,31 +668,65 @@ _EndBlobs(ArchiveHandle *AH, TocEntry *te)
 }
 
 static void
-createDirectory(const char *dir)
+createDirectory(const char *directory)
 {
 	struct stat st;
 
-	/* the directory must not exist yet. */
-	if (stat(dir, &st) == 0)
+	/* the directory must either not exist or must be empty. */
+	if (stat(directory, &st) == 0)
 	{
 		if (S_ISDIR(st.st_mode))
-			exit_horribly(modulename,
-						  "cannot create directory %s, it exists already\n",
-						  dir);
+		{
+			DIR	   *dir;
+			struct dirent *entry;
+			bool	empty = true;
+
+			dir = opendir(directory);
+			if (!dir)
+				exit_horribly(modulename,
+							  "cannot create directory %s, it exists already\n",
+							  directory);
+
+			while ((entry = readdir(dir))) {
+				if (strcmp(entry->d_name, ".") == 0)
+					continue;
+				if (strcmp(entry->d_name, "..") == 0)
+					continue;
+				empty = false;
+				break;
+			}
+			closedir(dir);
+
+			if (!empty)
+				exit_horribly(modulename,
+							  "cannot create directory %s, it exists already "
+							  "and is not empty\n",
+							  directory);
+
+			/*
+			 * Down here we know that the directory exists and is empty. This
+			 * doesn't mean that we can create files in it, but we will soon
+			 * find out. We could test-create a file and delete it again
+			 * already now but we need to be prepared for failing later
+			 * anyway...
+			 */
+		}
 		else
 			exit_horribly(modulename,
 						  "cannot create directory %s, a file with this name "
-						  "exists already\n", dir);
+						  "exists already\n", directory);
 	}
-
-	/*
-	 * Now we create the directory. Note that for some race condition we could
-	 * also run into the situation that the directory has been created just
-	 * between our two calls.
-	 */
-	if (mkdir(dir, 0700) < 0)
-		exit_horribly(modulename, "could not create directory %s: %s",
-					  dir, strerror(errno));
+	else
+	{
+		/*
+		 * Now we create the directory. Note that for some race condition we could
+		 * also run into the situation that the directory has been created just
+		 * between our two calls.
+		 */
+		if (mkdir(directory, 0700) < 0)
+			exit_horribly(modulename, "could not create directory %s: %s",
+						  directory, strerror(errno));
+	}
 }
 
 /*

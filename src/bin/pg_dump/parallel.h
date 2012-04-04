@@ -29,21 +29,21 @@ typedef enum
 	WRKR_FINISHED
 } T_WorkerStatus;
 
-typedef enum _action
+typedef enum T_Action
 {
 	ACT_DUMP,
 	ACT_RESTORE,
 } T_Action;
 
 /* Arguments needed for a worker process */
-typedef struct _parallel_args
+typedef struct ParallelArgs
 {
 	struct _archiveHandle *AH;
 	struct _tocEntry	  *te;
 } ParallelArgs;
 
 /* State for each parallel activity slot */
-typedef struct _parallel_slot
+typedef struct ParallelSlot
 {
 	ParallelArgs	   *args;
 	T_WorkerStatus		workerStatus;
@@ -62,7 +62,7 @@ typedef struct _parallel_slot
 
 #define NO_SLOT (-1)
 
-typedef struct _parallel_state
+typedef struct ParallelState
 {
 	int			numWorkers;
 	ParallelSlot *parallelSlot;

@@ -112,9 +112,9 @@ typedef z_stream *z_streamp;
 struct _archiveHandle;
 struct _tocEntry;
 struct _restoreList;
-struct _parallel_args;
-struct _parallel_state;
-enum _action;
+struct ParallelArgs;
+struct ParallelState;
+enum T_Action;
 
 typedef void (*ClosePtr) (struct _archiveHandle * AH);
 typedef void (*ReopenPtr) (struct _archiveHandle * AH);
@@ -145,9 +145,9 @@ typedef void (*DeClonePtr) (struct _archiveHandle * AH);
 typedef char *(*WorkerJobRestorePtr)(struct _archiveHandle * AH, struct _tocEntry * te);
 typedef char *(*WorkerJobDumpPtr)(struct _archiveHandle * AH, struct _tocEntry * te);
 typedef char *(*MasterStartParallelItemPtr)(struct _archiveHandle * AH, struct _tocEntry * te,
-											enum _action act);
+											enum T_Action act);
 typedef int (*MasterEndParallelItemPtr)(struct _archiveHandle * AH, struct _tocEntry * te,
-										const char *str, enum _action act);
+										const char *str, enum T_Action act);
 
 typedef size_t (*CustomOutPtr) (struct _archiveHandle * AH, const void *buf, size_t len);
 
@@ -350,7 +350,7 @@ typedef struct _tocEntry
 	int			nLockDeps;		/* number of such dependencies */
 } TocEntry;
 
-extern int parallel_restore(struct _parallel_args *args);
+extern int parallel_restore(struct ParallelArgs *args);
 extern void on_exit_close_archive(Archive *AHX);
 
 extern void warn_or_exit_horribly(ArchiveHandle *AH, const char *modulename, const char *fmt,...) __attribute__((format(PG_PRINTF_ATTRIBUTE, 3, 4)));
@@ -361,7 +361,7 @@ extern void WriteHead(ArchiveHandle *AH);
 extern void ReadHead(ArchiveHandle *AH);
 extern void WriteToc(ArchiveHandle *AH);
 extern void ReadToc(ArchiveHandle *AH);
-extern void WriteDataChunks(ArchiveHandle *AH, struct _parallel_state *pstate);
+extern void WriteDataChunks(ArchiveHandle *AH, struct ParallelState *pstate);
 extern void WriteDataChunksForTocEntry(ArchiveHandle *AH, TocEntry *te);
 extern ArchiveHandle *CloneArchive(ArchiveHandle *AH);
 extern void DeCloneArchive(ArchiveHandle *AH);
