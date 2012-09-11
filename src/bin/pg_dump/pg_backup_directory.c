@@ -36,6 +36,7 @@
 #include "compress_io.h"
 #include "dumpmem.h"
 #include "dumputils.h"
+#include "parallel.h"
 
 #include <dirent.h>
 #include <sys/stat.h>
@@ -51,6 +52,7 @@ typedef struct
 	cfp		   *dataFH;			/* currently open data file */
 
 	cfp		   *blobsTocFH;		/* file handle for blobs.toc */
+	ParallelState *pstate;		/* for parallel backup / restore */
 } lclContext;
 
 typedef struct
@@ -71,6 +73,7 @@ static int	_ReadByte(ArchiveHandle *);
 static size_t _WriteBuf(ArchiveHandle *AH, const void *buf, size_t len);
 static size_t _ReadBuf(ArchiveHandle *AH, void *buf, size_t len);
 static void _CloseArchive(ArchiveHandle *AH);
+static void _ReopenArchive(ArchiveHandle *AH);
 static void _PrintTocData(ArchiveHandle *AH, TocEntry *te, RestoreOptions *ropt);
 
 static void _WriteExtraToc(ArchiveHandle *AH, TocEntry *te);
@@ -83,8 +86,17 @@ static void _EndBlob(ArchiveHandle *AH, TocEntry *te, Oid oid);
 static void _EndBlobs(ArchiveHandle *AH, TocEntry *te);
 static void _LoadBlobs(ArchiveHandle *AH, RestoreOptions *ropt);
 
-static char *prependDirectory(ArchiveHandle *AH, char *buf, const char *relativeFilename);
+static void _Clone(ArchiveHandle *AH);
+static void _DeClone(ArchiveHandle *AH);
 
+static char *_MasterStartParallelItem(ArchiveHandle *AH, TocEntry *te, T_Action act);
+static int _MasterEndParallelItem(ArchiveHandle *AH, TocEntry *te,
+								  const char *str, T_Action act);
+static char *_WorkerJobRestoreDirectory(ArchiveHandle *AH, TocEntry *te);
+static char *_WorkerJobDumpDirectory(ArchiveHandle *AH, TocEntry *te);
+
+static char *prependDirectory(ArchiveHandle *AH, char *buf,
+							  const char *relativeFilename);
 
 /*
  *	Init routine required by ALL formats. This is a global routine
@@ -111,7 +123,7 @@ InitArchiveFmt_Directory(ArchiveHandle *AH)
 	AH->WriteBufPtr = _WriteBuf;
 	AH->ReadBufPtr = _ReadBuf;
 	AH->ClosePtr = _CloseArchive;
-	AH->ReopenPtr = NULL;
+	AH->ReopenPtr = _ReopenArchive;
 	AH->PrintTocDataPtr = _PrintTocData;
 	AH->ReadExtraTocPtr = _ReadExtraToc;
 	AH->WriteExtraTocPtr = _WriteExtraToc;
@@ -122,8 +134,14 @@ InitArchiveFmt_Directory(ArchiveHandle *AH)
 	AH->EndBlobPtr = _EndBlob;
 	AH->EndBlobsPtr = _EndBlobs;
 
-	AH->ClonePtr = NULL;
-	AH->DeClonePtr = NULL;
+	AH->ClonePtr = _Clone;
+	AH->DeClonePtr = _DeClone;
+
+	AH->WorkerJobRestorePtr = _WorkerJobRestoreDirectory;
+	AH->WorkerJobDumpPtr = _WorkerJobDumpDirectory;
+
+	AH->MasterStartParallelItemPtr = _MasterStartParallelItem;
+	AH->MasterEndParallelItemPtr = _MasterEndParallelItem;
 
 	/* Set up our private context */
 	ctx = (lclContext *) pg_calloc(1, sizeof(lclContext));
@@ -309,6 +327,9 @@ _WriteData(ArchiveHandle *AH, const void *data, size_t dLen)
 	if (dLen == 0)
 		return 0;
 
+	/* Are we aborting? */
+	checkAborting(AH);
+
 	return cfwrite(data, dLen, ctx->dataFH);
 }
 
@@ -476,6 +497,9 @@ _WriteBuf(ArchiveHandle *AH, const void *buf, size_t len)
 	lclContext *ctx = (lclContext *) AH->formatData;
 	size_t		res;
 
+	/* Are we aborting? */
+	checkAborting(AH);
+
 	res = cfwrite(buf, len, ctx->dataFH);
 	if (res != len)
 		exit_horribly(modulename, "could not write to output file: %s\n",
@@ -524,6 +548,9 @@ _CloseArchive(ArchiveHandle *AH)
 
 		prependDirectory(AH, fname, "toc.dat");
 
+		/* this will actually fork the processes for a parallel backup */
+		ctx->pstate = ParallelBackupStart(AH, NULL);
+
 		/* The TOC is always created uncompressed */
 		tocFH = cfopen_write(fname, PG_BINARY_W, 0);
 		if (tocFH == NULL)
@@ -543,11 +570,24 @@ _CloseArchive(ArchiveHandle *AH)
 		if (cfclose(tocFH) != 0)
 			exit_horribly(modulename, "could not close TOC file: %s\n",
 						  strerror(errno));
-		WriteDataChunks(AH);
+		WriteDataChunks(AH, ctx->pstate);
+
+		ParallelBackupEnd(AH, ctx->pstate);
 	}
 	AH->FH = NULL;
 }
 
+/*
+ * Reopen the archive's file handle.
+ */
+static void
+_ReopenArchive(ArchiveHandle *AH)
+{
+	/*
+	 * Our TOC is in memory, our data files are opened by each child anyway as
+	 * they are separate. We support reopening the archive by just doing nothing.
+	 */
+}
 
 /*
  * BLOB support
@@ -653,4 +693,153 @@ prependDirectory(ArchiveHandle *AH, char *buf, const char *relativeFilename)
 	strcat(buf, relativeFilename);
 
 	return buf;
+}
+
+/*
+ * Clone format-specific fields during parallel restoration.
+ */
+static void
+_Clone(ArchiveHandle *AH)
+{
+	lclContext *ctx = (lclContext *) AH->formatData;
+
+	AH->formatData = (lclContext *) pg_malloc(sizeof(lclContext));
+	memcpy(AH->formatData, ctx, sizeof(lclContext));
+	ctx = (lclContext *) AH->formatData;
+
+	/*
+	 * Note: we do not make a local lo_buf because we expect at most one BLOBS
+	 * entry per archive, so no parallelism is possible.  Likewise,
+	 * TOC-entry-local state isn't an issue because any one TOC entry is
+	 * touched by just one worker child.
+	 */
+
+	/*
+	 * We also don't copy the ParallelState pointer (pstate), only the master
+	 * process ever writes to it.
+	 */
+}
+
+static void
+_DeClone(ArchiveHandle *AH)
+{
+	lclContext *ctx = (lclContext *) AH->formatData;
+	free(ctx);
+}
+
+/*
+ * This function is executed in the parent process. Depending on the desired
+ * action (dump or restore) it creates a string that is understood by the
+ * _WorkerJobDumpDirectory/_WorkerJobRestoreDirectory functions of the
+ * respective dump format.
+ */
+static char *
+_MasterStartParallelItem(ArchiveHandle *AH, TocEntry *te, T_Action act)
+{
+	/*
+	 * A static char is okay here, even on Windows because we call this
+	 * function only from one process (the master).
+	 */
+	static char	buf[64];
+
+	if (act == ACT_DUMP)
+		snprintf(buf, sizeof(buf), "DUMP %d", te->dumpId);
+	else if (act == ACT_RESTORE)
+		snprintf(buf, sizeof(buf), "RESTORE %d", te->dumpId);
+
+	return buf;
+}
+
+/*
+ * This function is executed in the child of a parallel backup for the
+ * directory archive and dumps the actual data.
+ *
+ * We are currently returning only the DumpId so theoretically we could
+ * make this function returning an int (or a DumpId). However, to
+ * facilitate further enhancements and because sooner or later we need to
+ * convert this to a string and send it via a message anyway, we stick with
+ * char *. It is parsed on the other side by the _EndMasterParallel()
+ * function of the respective dump format.
+ */
+static char *
+_WorkerJobDumpDirectory(ArchiveHandle *AH, TocEntry *te)
+{
+	/* short fixed-size string + some ID so far, this needs to be malloc'ed
+	 * instead of static because we work with threads on windows */
+	const int	buflen = 64;
+	char	   *buf = (char*) pg_malloc(buflen);
+	lclTocEntry *tctx = (lclTocEntry *) te->formatData;
+
+	/* This should never happen */
+	if (!tctx)
+		exit_horribly(modulename, "Error during backup\n");
+
+	/*
+	 * This function returns void. We either fail and die horribly or succeed...
+	 * A failure will be detected by the parent when the child dies unexpectedly.
+	 */
+	WriteDataChunksForTocEntry(AH, te);
+
+	snprintf(buf, buflen, "OK DUMP %d", te->dumpId);
+
+	return buf;
+}
+
+/*
+ * This function is executed in the child of a parallel backup for the
+ * directory archive and dumps the actual data.
+ */
+static char *
+_WorkerJobRestoreDirectory(ArchiveHandle *AH, TocEntry *te)
+{
+	/* short fixed-size string + some ID so far, this needs to be malloc'ed
+	 * instead of static because we work with threads on windows */
+	const int	buflen = 64;
+	char	   *buf = (char*) pg_malloc(buflen);
+	ParallelArgs pargs;
+	int			status;
+	lclTocEntry *tctx;
+
+	tctx = (lclTocEntry *) te->formatData;
+
+	pargs.AH = AH;
+	pargs.te = te;
+
+	status = parallel_restore(&pargs);
+
+	snprintf(buf, buflen, "OK RESTORE %d %d %d", te->dumpId, status,
+			 status == WORKER_IGNORED_ERRORS ? AH->public.n_errors : 0);
+
+	return buf;
+}
+/*
+ * This function is executed in the parent process. It analyzes the response of
+ * the _WorkerJobDumpDirectory/_WorkerJobRestoreDirectory functions of the
+ * respective dump format.
+ */
+static int
+_MasterEndParallelItem(ArchiveHandle *AH, TocEntry *te, const char *str, T_Action act)
+{
+	DumpId		dumpId;
+	int			nBytes, n_errors;
+	int			status = 0;
+
+	if (act == ACT_DUMP)
+	{
+		sscanf(str, "%u%n", &dumpId, &nBytes);
+
+		Assert(dumpId == te->dumpId);
+		Assert(nBytes == strlen(str));
+	}
+	else if (act == ACT_RESTORE)
+	{
+		sscanf(str, "%u %u %u%n", &dumpId, &status, &n_errors, &nBytes);
+
+		Assert(dumpId == te->dumpId);
+		Assert(nBytes == strlen(str));
+
+		AH->public.n_errors += n_errors;
+	}
+
+	return status;
 }

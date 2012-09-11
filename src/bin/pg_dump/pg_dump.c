@@ -136,6 +136,7 @@ static int	disable_dollar_quoting = 0;
 static int	dump_inserts = 0;
 static int	column_inserts = 0;
 static int	no_security_labels = 0;
+static int  no_synchronized_snapshots = 0;
 static int	no_unlogged_table_data = 0;
 static int	serializable_deferrable = 0;
 
@@ -259,6 +260,7 @@ static void binary_upgrade_extension_member(PQExpBuffer upgrade_buffer,
 								const char *objlabel);
 static const char *getAttrName(int attrnum, TableInfo *tblInfo);
 static const char *fmtCopyColumnList(const TableInfo *ti, PQExpBuffer buffer);
+static char *get_synchronized_snapshot(Archive *fout);
 static PGresult *ExecuteSqlQueryForSingleRow(Archive *fout, char *query);
 
 
@@ -280,6 +282,7 @@ main(int argc, char **argv)
 	int			numObjs;
 	DumpableObject *boundaryObjs;
 	int			i;
+	int			numWorkers = 1;
 	enum trivalue prompt_password = TRI_DEFAULT;
 	int			compressLevel = -1;
 	int			plainText = 0;
@@ -309,6 +312,7 @@ main(int argc, char **argv)
 		{"format", required_argument, NULL, 'F'},
 		{"host", required_argument, NULL, 'h'},
 		{"ignore-version", no_argument, NULL, 'i'},
+		{"jobs", 1, NULL, 'j'},
 		{"no-reconnect", no_argument, NULL, 'R'},
 		{"oids", no_argument, NULL, 'o'},
 		{"no-owner", no_argument, NULL, 'O'},
@@ -348,12 +352,19 @@ main(int argc, char **argv)
 		{"serializable-deferrable", no_argument, &serializable_deferrable, 1},
 		{"use-set-session-authorization", no_argument, &use_setsessauth, 1},
 		{"no-security-labels", no_argument, &no_security_labels, 1},
+		{"no-synchronized-snapshots", no_argument, &no_synchronized_snapshots, 1},
 		{"no-unlogged-table-data", no_argument, &no_unlogged_table_data, 1},
 
 		{NULL, 0, NULL, 0}
 	};
 
 	set_pglocale_pgservice(argv[0], PG_TEXTDOMAIN("pg_dump"));
+
+	/*
+	 * Initialize what we need for parallel execution, especially for thread
+	 * support on Windows.
+	 */
+	init_parallel_dump_utils();
 
 	g_verbose = false;
 
@@ -385,7 +396,7 @@ main(int argc, char **argv)
 		}
 	}
 
-	while ((c = getopt_long(argc, argv, "abcCE:f:F:h:in:N:oOp:RsS:t:T:U:vwWxZ:",
+	while ((c = getopt_long(argc, argv, "abcCE:f:F:h:ij:n:N:oOp:RsS:t:T:U:vwWxZ:",
 							long_options, &optindex)) != -1)
 	{
 		switch (c)
@@ -424,6 +435,10 @@ main(int argc, char **argv)
 
 			case 'i':
 				/* ignored, deprecated option */
+				break;
+
+			case 'j':			/* number of dump jobs */
+				numWorkers = atoi(optarg);
 				break;
 
 			case 'n':			/* include schema(s) */
@@ -565,6 +580,22 @@ main(int argc, char **argv)
 			compressLevel = 0;
 	}
 
+	/*
+	 * On Windows we can only have at most MAXIMUM_WAIT_OBJECTS (= 64 usually)
+	 * parallel jobs because that's the maximum limit for the
+	 * WaitForMultipleObjects() call.
+	 */
+	if (numWorkers <= 0
+#ifdef WIN32
+			|| numWorkers > MAXIMUM_WAIT_OBJECTS
+#endif
+		)
+		exit_horribly(NULL, "%s: invalid number of parallel jobs\n", progname);
+
+	/* Parallel backup only in the directory archive format so far */
+	if (archiveFormat != archDirectory && numWorkers > 1)
+		exit_horribly(NULL, "parallel backup only supported by the directory format\n");
+
 	/* Open the output file */
 	fout = CreateArchive(filename, archiveFormat, compressLevel, archiveMode);
 
@@ -588,6 +619,8 @@ main(int argc, char **argv)
 	fout->minRemoteVersion = 70000;
 	fout->maxRemoteVersion = (my_version / 100) * 100 + 99;
 
+	fout->numWorkers = numWorkers;
+
 	/*
 	 * Open the database using the Archiver, so it knows about it. Errors mean
 	 * death.
@@ -602,25 +635,6 @@ main(int argc, char **argv)
 	if (fout->remoteVersion < 90100)
 		no_security_labels = 1;
 
-	/*
-	 * Start transaction-snapshot mode transaction to dump consistent data.
-	 */
-	ExecuteSqlStatement(fout, "BEGIN");
-	if (fout->remoteVersion >= 90100)
-	{
-		if (serializable_deferrable)
-			ExecuteSqlStatement(fout,
-								"SET TRANSACTION ISOLATION LEVEL "
-								"SERIALIZABLE, READ ONLY, DEFERRABLE");
-		else
-			ExecuteSqlStatement(fout,
-								"SET TRANSACTION ISOLATION LEVEL "
-								"REPEATABLE READ");
-	}
-	else
-		ExecuteSqlStatement(fout,
-							"SET TRANSACTION ISOLATION LEVEL SERIALIZABLE");
-
 	/* Select the appropriate subquery to convert user IDs to names */
 	if (fout->remoteVersion >= 80100)
 		username_subquery = "SELECT rolname FROM pg_catalog.pg_roles WHERE oid =";
@@ -628,6 +642,14 @@ main(int argc, char **argv)
 		username_subquery = "SELECT usename FROM pg_catalog.pg_user WHERE usesysid =";
 	else
 		username_subquery = "SELECT usename FROM pg_user WHERE usesysid =";
+
+	/* check the version for the synchronized snapshots feature */
+	if (numWorkers > 1 && fout->remoteVersion < 90200
+		&& !no_synchronized_snapshots)
+		exit_horribly(NULL,
+					 "No synchronized snapshots available in this server version. "
+					 "Run with --no-synchronized-snapshots instead if you do not "
+					 "need synchronized snapshots.\n");
 
 	/* Find the last built-in OID, if needed */
 	if (fout->remoteVersion < 70300)
@@ -725,6 +747,10 @@ main(int argc, char **argv)
 	else
 		sortDumpableObjectsByTypeOid(dobjs, numObjs);
 
+	/* If we do a parallel dump, we want the largest tables to go first */
+	if (archiveFormat == archDirectory && numWorkers > 1)
+		sortDataAndIndexObjectsBySize(dobjs, numObjs);
+
 	sortDumpableObjects(dobjs, numObjs,
 						boundaryObjs[0].dumpId, boundaryObjs[1].dumpId);
 
@@ -806,6 +832,7 @@ help(const char *progname)
 	printf(_("  -f, --file=FILENAME          output file or directory name\n"));
 	printf(_("  -F, --format=c|d|t|p         output file format (custom, directory, tar,\n"
 			 "                               plain text (default))\n"));
+	printf(_("  -j, --jobs=NUM               use this many parallel jobs to dump\n"));
 	printf(_("  -v, --verbose                verbose mode\n"));
 	printf(_("  -V, --version                output version information, then exit\n"));
 	printf(_("  -Z, --compress=0-9           compression level for compressed formats\n"));
@@ -835,6 +862,7 @@ help(const char *progname)
 	printf(_("  --exclude-table-data=TABLE   do NOT dump data for the named table(s)\n"));
 	printf(_("  --inserts                    dump data as INSERT commands, rather than COPY\n"));
 	printf(_("  --no-security-labels         do not dump security label assignments\n"));
+	printf(_("  --no-synchronized-snapshots parallel processes should not use synchronized snapshots\n"));
 	printf(_("  --no-tablespaces             do not dump tablespace assignments\n"));
 	printf(_("  --no-unlogged-table-data     do not dump unlogged table data\n"));
 	printf(_("  --quote-all-identifiers      quote all identifiers, even if not key words\n"));
@@ -863,7 +891,12 @@ setup_connection(Archive *AH, const char *dumpencoding, char *use_role)
 	PGconn	   *conn = GetConnection(AH);
 	const char *std_strings;
 
-	/* Set the client encoding if requested */
+	/*
+	 * Set the client encoding if requested. If dumpencoding == NULL then
+	 * either it hasn't been requested or we're a cloned connection and then this
+	 * has already been set in CloneArchive according to the original
+	 * connection encoding.
+	 */
 	if (dumpencoding)
 	{
 		if (PQsetClientEncoding(conn, dumpencoding) < 0)
@@ -881,6 +914,10 @@ setup_connection(Archive *AH, const char *dumpencoding, char *use_role)
 	AH->std_strings = (std_strings && strcmp(std_strings, "on") == 0);
 
 	/* Set the role if requested */
+	if (!use_role && AH->use_role)
+		use_role = AH->use_role;
+
+	/* Set the role if requested */
 	if (use_role && AH->remoteVersion >= 80100)
 	{
 		PQExpBuffer query = createPQExpBuffer();
@@ -888,6 +925,10 @@ setup_connection(Archive *AH, const char *dumpencoding, char *use_role)
 		appendPQExpBuffer(query, "SET ROLE %s", fmtId(use_role));
 		ExecuteSqlStatement(AH, query->data);
 		destroyPQExpBuffer(query);
+
+		/* save this for later use on parallel connections */
+		if (!AH->use_role)
+			AH->use_role = strdup(use_role);
 	}
 
 	/* Set the datestyle to ISO to ensure the dump's portability */
@@ -924,6 +965,59 @@ setup_connection(Archive *AH, const char *dumpencoding, char *use_role)
 	 */
 	if (quote_all_identifiers && AH->remoteVersion >= 90100)
 		ExecuteSqlStatement(AH, "SET quote_all_identifiers = true");
+
+	/*
+	 * Start transaction-snapshot mode transaction to dump consistent data.
+	 */
+	ExecuteSqlStatement(AH, "BEGIN");
+	if (AH->remoteVersion >= 90100)
+	{
+		if (serializable_deferrable)
+			ExecuteSqlStatement(AH,
+						   "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE, "
+						   "READ ONLY, DEFERRABLE");
+		else
+			ExecuteSqlStatement(AH,
+						   "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+	}
+	else
+		ExecuteSqlStatement(AH, "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE");
+
+	if (AH->numWorkers > 1 && AH->remoteVersion >= 90200 && !no_synchronized_snapshots)
+	{
+		if (AH->sync_snapshot_id)
+		{
+			PQExpBuffer query = createPQExpBuffer();
+			appendPQExpBuffer(query, "SET TRANSACTION SNAPSHOT ");
+			appendStringLiteralConn(query, AH->sync_snapshot_id, conn);
+			destroyPQExpBuffer(query);
+		}
+		else
+			AH->sync_snapshot_id = get_synchronized_snapshot(AH);
+	}
+}
+
+/*
+ * Initialize the connection for a new worker process.
+ */
+void
+_SetupWorker(Archive *AHX, RestoreOptions *ropt)
+{
+	setup_connection(AHX, NULL, NULL);
+}
+
+static char*
+get_synchronized_snapshot(Archive *fout)
+{
+	char	   *query = "select pg_export_snapshot()";
+	char	   *result;
+	PGresult   *res;
+
+	res = ExecuteSqlQueryForSingleRow(fout, query);
+	result = strdup(PQgetvalue(res, 0, 0));
+	PQclear(res);
+
+	return result;
 }
 
 static ArchiveFormat

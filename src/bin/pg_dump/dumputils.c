@@ -53,9 +53,18 @@ static void AddAcl(PQExpBuffer aclbuf, const char *keyword,
 static PQExpBuffer getThreadLocalPQExpBuffer(void);
 
 #ifdef WIN32
+static void shutdown_parallel_dump_utils(int code, void* unused);
 static bool parallel_init_done = false;
 static DWORD tls_index;
 static DWORD mainThreadId;
+
+static void
+shutdown_parallel_dump_utils(int code, void* unused)
+{
+	/* Call the cleanup function only from the main thread */
+	if (mainThreadId == GetCurrentThreadId())
+		WSACleanup();
+}
 #endif
 
 void
@@ -64,9 +73,19 @@ init_parallel_dump_utils(void)
 #ifdef WIN32
 	if (!parallel_init_done)
 	{
+		WSADATA	wsaData;
+		int		err;
+
 		tls_index = TlsAlloc();
-		parallel_init_done = true;
 		mainThreadId = GetCurrentThreadId();
+		err = WSAStartup(MAKEWORD(2, 2), &wsaData);
+		if (err != 0)
+		{
+			fprintf(stderr, _("WSAStartup failed: %d\n"), err);
+			exit_nicely(1);
+		}
+		on_exit_nicely(shutdown_parallel_dump_utils, NULL);
+		parallel_init_done = true;
 	}
 #endif
 }

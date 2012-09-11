@@ -374,6 +374,16 @@ main(int argc, char **argv)
 	if (opts->tocFile)
 		SortTocFromFile(AH, opts);
 
+	/* See comments in pg_dump.c */
+#ifdef WIN32
+	if (numWorkers > MAXIMUM_WAIT_OBJECTS)
+	{
+		fprintf(stderr, _("%s: maximum number of parallel jobs is %d\n"),
+				progname, MAXIMUM_WAIT_OBJECTS);
+		exit(1);
+	}
+#endif
+
 	AH->numWorkers = numWorkers;
 
 	if (opts->tocSummary)
@@ -395,6 +405,13 @@ main(int argc, char **argv)
 	CloseArchive(AH);
 
 	return exit_code;
+}
+
+void
+_SetupWorker(Archive *AHX, RestoreOptions *ropt)
+{
+	ArchiveHandle *AH = (ArchiveHandle *) AHX;
+	(AH->ReopenPtr) (AH);
 }
 
 static void
