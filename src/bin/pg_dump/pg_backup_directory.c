@@ -83,7 +83,7 @@ static void _EndBlob(ArchiveHandle *AH, TocEntry *te, Oid oid);
 static void _EndBlobs(ArchiveHandle *AH, TocEntry *te);
 static void _LoadBlobs(ArchiveHandle *AH, RestoreOptions *ropt);
 
-static char *prependDirectory(ArchiveHandle *AH, const char *relativeFilename);
+static char *prependDirectory(ArchiveHandle *AH, char *buf, const char *relativeFilename);
 
 
 /*
@@ -153,10 +153,10 @@ InitArchiveFmt_Directory(ArchiveHandle *AH)
 	}
 	else
 	{							/* Read Mode */
-		char	   *fname;
+		char	   fname[MAXPGPATH];
 		cfp		   *tocFH;
 
-		fname = prependDirectory(AH, "toc.dat");
+		prependDirectory(AH, fname, "toc.dat");
 
 		tocFH = cfopen_read(fname, PG_BINARY_R);
 		if (tocFH == NULL)
@@ -282,9 +282,9 @@ _StartData(ArchiveHandle *AH, TocEntry *te)
 {
 	lclTocEntry *tctx = (lclTocEntry *) te->formatData;
 	lclContext *ctx = (lclContext *) AH->formatData;
-	char	   *fname;
+	char		fname[MAXPGPATH];
 
-	fname = prependDirectory(AH, tctx->filename);
+	prependDirectory(AH, fname, tctx->filename);
 
 	ctx->dataFH = cfopen_write(fname, PG_BINARY_W, AH->compression);
 	if (ctx->dataFH == NULL)
@@ -376,8 +376,9 @@ _PrintTocData(ArchiveHandle *AH, TocEntry *te, RestoreOptions *ropt)
 		_LoadBlobs(AH, ropt);
 	else
 	{
-		char	   *fname = prependDirectory(AH, tctx->filename);
+		char		fname[MAXPGPATH];
 
+		prependDirectory(AH, fname, tctx->filename);
 		_PrintFileData(AH, fname, ropt);
 	}
 }
@@ -387,12 +388,12 @@ _LoadBlobs(ArchiveHandle *AH, RestoreOptions *ropt)
 {
 	Oid			oid;
 	lclContext *ctx = (lclContext *) AH->formatData;
-	char	   *fname;
+	char		fname[MAXPGPATH];
 	char		line[MAXPGPATH];
 
 	StartRestoreBlobs(AH);
 
-	fname = prependDirectory(AH, "blobs.toc");
+	prependDirectory(AH, fname, "blobs.toc");
 
 	ctx->blobsTocFH = cfopen_read(fname, PG_BINARY_R);
 
@@ -519,7 +520,9 @@ _CloseArchive(ArchiveHandle *AH)
 	if (AH->mode == archModeWrite)
 	{
 		cfp		   *tocFH;
-		char	   *fname = prependDirectory(AH, "toc.dat");
+		char		fname[MAXPGPATH];
+
+		prependDirectory(AH, fname, "toc.dat");
 
 		/* The TOC is always created uncompressed */
 		tocFH = cfopen_write(fname, PG_BINARY_W, 0);
@@ -561,9 +564,9 @@ static void
 _StartBlobs(ArchiveHandle *AH, TocEntry *te)
 {
 	lclContext *ctx = (lclContext *) AH->formatData;
-	char	   *fname;
+	char		fname[MAXPGPATH];
 
-	fname = prependDirectory(AH, "blobs.toc");
+	prependDirectory(AH, fname, "blobs.toc");
 
 	/* The blob TOC file is never compressed */
 	ctx->blobsTocFH = cfopen_write(fname, "ab", 0);
@@ -628,12 +631,16 @@ _EndBlobs(ArchiveHandle *AH, TocEntry *te)
 	ctx->blobsTocFH = NULL;
 }
 
-
+/*
+ * Gets a relative file name and prepends the output directory, writing the
+ * result to buf. The caller needs to make sure that buf is MAXPGPATH bytes
+ * big. Can't use a static char[MAXPGPATH] inside the function because we run
+ * multithreaded on Windows.
+ */
 static char *
-prependDirectory(ArchiveHandle *AH, const char *relativeFilename)
+prependDirectory(ArchiveHandle *AH, char *buf, const char *relativeFilename)
 {
 	lclContext *ctx = (lclContext *) AH->formatData;
-	static char buf[MAXPGPATH];
 	char	   *dname;
 
 	dname = ctx->directory;

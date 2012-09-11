@@ -81,6 +81,8 @@ struct Archive
 	int			minRemoteVersion;		/* allowable range */
 	int			maxRemoteVersion;
 
+	int			numWorkers;		/* number of parallel processes */
+
 	/* info needed for string escaping */
 	int			encoding;		/* libpq code for client_encoding */
 	bool		std_strings;	/* standard_conforming_strings */
@@ -141,7 +143,6 @@ typedef struct _restoreOptions
 	int			suppressDumpWarnings;	/* Suppress output of WARNING entries
 										 * to stderr */
 	bool		single_txn;
-	int			number_of_jobs;
 
 	bool	   *idWanted;		/* array showing which dump IDs to emit */
 } RestoreOptions;

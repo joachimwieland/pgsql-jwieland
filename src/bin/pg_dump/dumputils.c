@@ -16,6 +16,7 @@
 
 #include <ctype.h>
 
+#include "dumpmem.h"
 #include "dumputils.h"
 
 #include "parser/keywords.h"
@@ -38,6 +39,7 @@ static struct
 }	on_exit_nicely_list[MAX_ON_EXIT_NICELY];
 
 static int	on_exit_nicely_index;
+void (*on_exit_msg_func)(const char *modulename, const char *fmt, va_list ap) = vwrite_msg;
 
 #define supports_grant_options(version) ((version) >= 70400)
 
@@ -48,6 +50,7 @@ static bool parseAclItem(const char *item, const char *type,
 static char *copyAclUserName(PQExpBuffer output, char *input);
 static void AddAcl(PQExpBuffer aclbuf, const char *keyword,
 	   const char *subname);
+static PQExpBuffer getThreadLocalPQExpBuffer(void);
 
 #ifdef WIN32
 static bool parallel_init_done = false;
@@ -69,15 +72,11 @@ init_parallel_dump_utils(void)
 }
 
 /*
- *	Quotes input string if it's not a legitimate SQL identifier as-is.
- *
- *	Note that the returned string must be used before calling fmtId again,
- *	since we re-use the same return buffer each time.  Non-reentrant but
- *	reduces memory leakage. (On Windows the memory leakage will be one buffer
- *	per thread, which is at least better than one per call).
+ * Non-reentrant but reduces memory leakage. (On Windows the memory leakage
+ * will be one buffer per thread, which is at least better than one per call).
  */
-const char *
-fmtId(const char *rawid)
+static PQExpBuffer
+getThreadLocalPQExpBuffer(void)
 {
 	/*
 	 * The Tls code goes awry if we use a static var, so we provide for both
@@ -85,9 +84,6 @@ fmtId(const char *rawid)
 	 */
 	static PQExpBuffer s_id_return = NULL;
 	PQExpBuffer id_return;
-
-	const char *cp;
-	bool		need_quotes = false;
 
 #ifdef WIN32
 	if (parallel_init_done)
@@ -117,6 +113,23 @@ fmtId(const char *rawid)
 #endif
 
 	}
+
+	return id_return;
+}
+
+/*
+ *	Quotes input string if it's not a legitimate SQL identifier as-is.
+ *
+ *	Note that the returned string must be used before calling fmtId again,
+ *	since we re-use the same return buffer each time.
+ */
+const char *
+fmtId(const char *rawid)
+{
+	PQExpBuffer id_return = getThreadLocalPQExpBuffer();
+
+	const char *cp;
+	bool		need_quotes = false;
 
 	/*
 	 * These checks need to match the identifier production in scan.l. Don't
@@ -185,6 +198,35 @@ fmtId(const char *rawid)
 	return id_return->data;
 }
 
+/*
+ * fmtQualifiedId - convert a qualified name to the proper format for
+ * the source database.
+ *
+ * Like fmtId, use the result before calling again.
+ *
+ * Since we call fmtId and it also uses getThreadLocalPQExpBuffer() we cannot
+ * use it until we're finished with calling fmtId().
+ */
+const char *
+fmtQualifiedId(int remoteVersion, const char *schema, const char *id)
+{
+	PQExpBuffer id_return;
+	PQExpBuffer lcl_pqexp = createPQExpBuffer();
+
+	/* Suppress schema name if fetching from pre-7.3 DB */
+	if (remoteVersion >= 70300 && schema && *schema)
+	{
+		appendPQExpBuffer(lcl_pqexp, "%s.", fmtId(schema));
+	}
+	appendPQExpBuffer(lcl_pqexp, "%s", fmtId(id));
+
+	id_return = getThreadLocalPQExpBuffer();
+
+	appendPQExpBuffer(id_return, "%s", lcl_pqexp->data);
+	destroyPQExpBuffer(lcl_pqexp);
+
+	return id_return->data;
+}
 
 /*
  * Convert a string value to an SQL string literal and append it to
@@ -1312,7 +1354,7 @@ exit_horribly(const char *modulename, const char *fmt,...)
 	va_list		ap;
 
 	va_start(ap, fmt);
-	vwrite_msg(modulename, fmt, ap);
+	on_exit_msg_func(modulename, fmt, ap);
 	va_end(ap);
 
 	exit_nicely(1);

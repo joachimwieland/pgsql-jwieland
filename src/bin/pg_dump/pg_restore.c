@@ -72,6 +72,7 @@ main(int argc, char **argv)
 	RestoreOptions *opts;
 	int			c;
 	int			exit_code;
+	int			numWorkers = 1;
 	Archive    *AH;
 	char	   *inputFileSpec;
 	static int	disable_triggers = 0;
@@ -183,7 +184,7 @@ main(int argc, char **argv)
 				break;
 
 			case 'j':			/* number of restore jobs */
-				opts->number_of_jobs = atoi(optarg);
+				numWorkers = atoi(optarg);
 				break;
 
 			case 'l':			/* Dump the TOC summary */
@@ -314,7 +315,7 @@ main(int argc, char **argv)
 	}
 
 	/* Can't do single-txn mode with multiple connections */
-	if (opts->single_txn && opts->number_of_jobs > 1)
+	if (opts->single_txn && numWorkers > 1)
 	{
 		fprintf(stderr, _("%s: cannot specify both --single-transaction and multiple jobs\n"),
 				progname);
@@ -372,6 +373,8 @@ main(int argc, char **argv)
 
 	if (opts->tocFile)
 		SortTocFromFile(AH, opts);
+
+	AH->numWorkers = numWorkers;
 
 	if (opts->tocSummary)
 		PrintTOCSummary(AH, opts);

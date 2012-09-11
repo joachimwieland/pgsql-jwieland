@@ -338,8 +338,11 @@ extern void ReadHead(ArchiveHandle *AH);
 extern void WriteToc(ArchiveHandle *AH);
 extern void ReadToc(ArchiveHandle *AH);
 extern void WriteDataChunks(ArchiveHandle *AH);
+extern ArchiveHandle *CloneArchive(ArchiveHandle *AH);
+extern void DeCloneArchive(ArchiveHandle *AH);
 
 extern teReqs TocIDRequired(ArchiveHandle *AH, DumpId id);
+TocEntry *getTocEntryByDumpId(ArchiveHandle *AH, DumpId id);
 extern bool checkSeek(FILE *fp);
 
 #define appendStringLiteralAHX(buf,str,AH) \
@@ -379,5 +382,17 @@ int			ahwrite(const void *ptr, size_t size, size_t nmemb, ArchiveHandle *AH);
 int			ahprintf(ArchiveHandle *AH, const char *fmt,...) __attribute__((format(PG_PRINTF_ATTRIBUTE, 2, 3)));
 
 void		ahlog(ArchiveHandle *AH, int level, const char *fmt,...) __attribute__((format(PG_PRINTF_ATTRIBUTE, 3, 4)));
+
+#ifdef USE_ASSERT_CHECKING
+#define Assert(condition) \
+	if (!(condition)) \
+	{ \
+		write_msg(NULL, "Failed assertion in %s, line %d\n", \
+				  __FILE__, __LINE__); \
+		abort();\
+	}
+#else
+#define Assert(condition)
+#endif
 
 #endif

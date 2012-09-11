@@ -137,7 +137,6 @@ static bool _tocEntryIsACL(TocEntry *te);
 static void _disableTriggersIfNecessary(ArchiveHandle *AH, TocEntry *te, RestoreOptions *ropt);
 static void _enableTriggersIfNecessary(ArchiveHandle *AH, TocEntry *te, RestoreOptions *ropt);
 static void buildTocEntryArrays(ArchiveHandle *AH);
-static TocEntry *getTocEntryByDumpId(ArchiveHandle *AH, DumpId id);
 static void _moveBefore(ArchiveHandle *AH, TocEntry *pos, TocEntry *te);
 static int	_discoverArchiveFormat(ArchiveHandle *AH);
 
@@ -150,7 +149,9 @@ static void RestoreOutput(ArchiveHandle *AH, OutputContext savedContext);
 
 static int restore_toc_entry(ArchiveHandle *AH, TocEntry *te,
 				  RestoreOptions *ropt, bool is_parallel);
-static void restore_toc_entries_parallel(ArchiveHandle *AH);
+static void restore_toc_entries_prefork(ArchiveHandle *AH);
+static void restore_toc_entries_parallel(ArchiveHandle *AH, TocEntry *pending_list);
+static void restore_toc_entries_postfork(ArchiveHandle *AH, TocEntry *pending_list);
 static thandle spawn_restore(RestoreArgs *args);
 static thandle reap_child(ParallelSlot *slots, int n_slots, int *work_status);
 static bool work_in_progress(ParallelSlot *slots, int n_slots);
@@ -173,8 +174,6 @@ static void reduce_dependencies(ArchiveHandle *AH, TocEntry *te,
 					TocEntry *ready_list);
 static void mark_create_done(ArchiveHandle *AH, TocEntry *te);
 static void inhibit_data_for_failed_table(ArchiveHandle *AH, TocEntry *te);
-static ArchiveHandle *CloneArchive(ArchiveHandle *AH);
-static void DeCloneArchive(ArchiveHandle *AH);
 
 static void setProcessIdentifier(ParallelStateEntry *pse, ArchiveHandle *AH);
 static void unsetProcessIdentifier(ParallelStateEntry *pse);
@@ -321,7 +320,7 @@ RestoreArchive(Archive *AHX)
 	/*
 	 * If we're going to do parallel restore, there are some restrictions.
 	 */
-	parallel_mode = (ropt->number_of_jobs > 1 && ropt->useDB);
+	parallel_mode = (AH->public.numWorkers > 1 && ropt->useDB);
 	if (parallel_mode)
 	{
 		/* We haven't got round to making this work for all archive formats */
@@ -491,7 +490,22 @@ RestoreArchive(Archive *AHX)
 	 * In parallel mode, turn control over to the parallel-restore logic.
 	 */
 	if (parallel_mode)
-		restore_toc_entries_parallel(AH);
+	{
+		TocEntry pending_list;
+
+		par_list_header_init(&pending_list);
+
+		/* This runs PRE_DATA items and then disconnects from the database */
+		restore_toc_entries_prefork(AH);
+		Assert(AH->connection == NULL);
+
+		/* This will actually fork the processes */
+		restore_toc_entries_parallel(AH, &pending_list);
+
+		/* reconnect the master and see if we missed something */
+		restore_toc_entries_postfork(AH, &pending_list);
+		Assert(AH->connection != NULL);
+	}
 	else
 	{
 		for (te = AH->toc->next; te != AH->toc; te = te->next)
@@ -1629,7 +1643,7 @@ buildTocEntryArrays(ArchiveHandle *AH)
 	}
 }
 
-static TocEntry *
+TocEntry *
 getTocEntryByDumpId(ArchiveHandle *AH, DumpId id)
 {
 	/* build index arrays if we didn't already */
@@ -3455,42 +3469,14 @@ on_exit_close_archive(Archive *AHX)
 	on_exit_nicely(archive_close_connection, &shutdown_info);
 }
 
-/*
- * Main engine for parallel restore.
- *
- * Work is done in three phases.
- * First we process all SECTION_PRE_DATA tocEntries, in a single connection,
- * just as for a standard restore.	Second we process the remaining non-ACL
- * steps in parallel worker children (threads on Windows, processes on Unix),
- * each of which connects separately to the database.  Finally we process all
- * the ACL entries in a single connection (that happens back in
- * RestoreArchive).
- */
 static void
-restore_toc_entries_parallel(ArchiveHandle *AH)
+restore_toc_entries_prefork(ArchiveHandle *AH)
 {
 	RestoreOptions *ropt = AH->ropt;
-	int			n_slots = ropt->number_of_jobs;
-	ParallelSlot *slots;
-	int			work_status;
-	int			next_slot;
 	bool		skipped_some;
-	TocEntry	pending_list;
-	TocEntry	ready_list;
 	TocEntry   *next_work_item;
-	thandle		ret_child;
-	TocEntry   *te;
-	ParallelState *pstate;
-	int			i;
 
-	ahlog(AH, 2, "entering restore_toc_entries_parallel\n");
-
-	slots = (ParallelSlot *) pg_calloc(n_slots, sizeof(ParallelSlot));
-	pstate = (ParallelState *) pg_malloc(sizeof(ParallelState));
-	pstate->pse = (ParallelStateEntry *) pg_calloc(n_slots, sizeof(ParallelStateEntry));
-	pstate->numWorkers = ropt->number_of_jobs;
-	for (i = 0; i < pstate->numWorkers; i++)
-		unsetProcessIdentifier(&(pstate->pse[i]));
+	ahlog(AH, 2, "entering restore_toc_entries_prefork\n");
 
 	/* Adjust dependency information */
 	fix_dependencies(AH);
@@ -3551,12 +3537,6 @@ restore_toc_entries_parallel(ArchiveHandle *AH)
 	 */
 	DisconnectDatabase(&AH->public);
 
-	/*
-	 * Set the pstate in the shutdown_info. The exit handler uses pstate if
-	 * set and falls back to AHX otherwise.
-	 */
-	shutdown_info.pstate = pstate;
-
 	/* blow away any transient state from the old connection */
 	if (AH->currUser)
 		free(AH->currUser);
@@ -3568,17 +3548,59 @@ restore_toc_entries_parallel(ArchiveHandle *AH)
 		free(AH->currTablespace);
 	AH->currTablespace = NULL;
 	AH->currWithOids = -1;
+}
+
+/*
+ * Main engine for parallel restore.
+ *
+ * Work is done in three phases.
+ * First we process all SECTION_PRE_DATA tocEntries, in a single connection,
+ * just as for a standard restore. This is done in restore_toc_entries_prefork().
+ * Second we process the remaining non-ACL steps in parallel worker children
+ * (threads on Windows, processes on Unix), each of which connects separately
+ * to the database.
+ * Finally we process all the ACL entries in a single connection (that happens
+ * back in RestoreArchive).
+ */
+static void
+restore_toc_entries_parallel(ArchiveHandle *AH, TocEntry *pending_list)
+{
+	ParallelState *pstate;
+	ParallelSlot *slots;
+	int			n_slots = AH->public.numWorkers;
+	TocEntry   *next_work_item;
+	int			next_slot;
+	TocEntry	ready_list;
+	int			ret_child;
+	bool		skipped_some;
+	int			work_status;
+	int			i;
+
+	ahlog(AH, 2, "entering restore_toc_entries_parallel\n");
+
+	slots = (ParallelSlot *) pg_calloc(n_slots, sizeof(ParallelSlot));
+	pstate = (ParallelState *) pg_malloc(sizeof(ParallelState));
+	pstate->pse = (ParallelStateEntry *) pg_calloc(n_slots, sizeof(ParallelStateEntry));
+	pstate->numWorkers = AH->public.numWorkers;
+	for (i = 0; i < pstate->numWorkers; i++)
+		unsetProcessIdentifier(&(pstate->pse[i]));
 
 	/*
-	 * Initialize the lists of pending and ready items.  After this setup, the
-	 * pending list is everything that needs to be done but is blocked by one
-	 * or more dependencies, while the ready list contains items that have no
-	 * remaining dependencies.	Note: we don't yet filter out entries that
-	 * aren't going to be restored.  They might participate in dependency
-	 * chains connecting entries that should be restored, so we treat them as
-	 * live until we actually process them.
+	 * Set the pstate in the shutdown_info. The exit handler uses pstate if set
+	 * and falls back to AHX otherwise.
 	 */
-	par_list_header_init(&pending_list);
+	shutdown_info.pstate = pstate;
+
+	/*
+	 * Initialize the lists of ready items, the list for pending items has
+	 * already been initialized in the caller.  After this setup, the pending
+	 * list is everything that needs to be done but is blocked by one or more
+	 * dependencies, while the ready list contains items that have no remaining
+	 * dependencies.	Note: we don't yet filter out entries that aren't going
+	 * to be restored.  They might participate in dependency chains connecting
+	 * entries that should be restored, so we treat them as live until we
+	 * actually process them.
+	 */
 	par_list_header_init(&ready_list);
 	skipped_some = false;
 	for (next_work_item = AH->toc->next; next_work_item != AH->toc; next_work_item = next_work_item->next)
@@ -3603,7 +3625,7 @@ restore_toc_entries_parallel(ArchiveHandle *AH)
 		}
 
 		if (next_work_item->depCount > 0)
-			par_list_append(&pending_list, next_work_item);
+			par_list_append(pending_list, next_work_item);
 		else
 			par_list_append(&ready_list, next_work_item);
 	}
@@ -3687,6 +3709,15 @@ restore_toc_entries_parallel(ArchiveHandle *AH)
 	}
 
 	ahlog(AH, 1, "finished main parallel loop\n");
+}
+
+static void
+restore_toc_entries_postfork(ArchiveHandle *AH, TocEntry *pending_list)
+{
+	RestoreOptions *ropt = AH->ropt;
+	TocEntry   *te;
+
+	ahlog(AH, 2, "entering restore_toc_entries_postfork\n");
 
 	/*
 	 * Remove the pstate again, so the exit handler will now fall back to
@@ -3708,7 +3739,7 @@ restore_toc_entries_parallel(ArchiveHandle *AH)
 	 * dependencies, or some other pathological condition. If so, do it in the
 	 * single parent connection.
 	 */
-	for (te = pending_list.par_next; te != &pending_list; te = te->par_next)
+	for (te = pending_list->par_next; te != pending_list; te = te->par_next)
 	{
 		ahlog(AH, 1, "processing missed item %d %s %s\n",
 			  te->dumpId, te->desc, te->tag);
@@ -4373,10 +4404,8 @@ inhibit_data_for_failed_table(ArchiveHandle *AH, TocEntry *te)
  *
  * Enough of the structure is cloned to ensure that there is no
  * conflict between different threads each with their own clone.
- *
- * These could be public, but no need at present.
  */
-static ArchiveHandle *
+ArchiveHandle *
 CloneArchive(ArchiveHandle *AH)
 {
 	ArchiveHandle *clone;
@@ -4413,7 +4442,7 @@ CloneArchive(ArchiveHandle *AH)
  *
  * Note: we assume any clone-local connection was already closed.
  */
-static void
+void
 DeCloneArchive(ArchiveHandle *AH)
 {
 	/* Clear format-specific state */
