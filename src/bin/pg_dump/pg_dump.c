@@ -647,8 +647,8 @@ main(int argc, char **argv)
 	if (numWorkers > 1 && fout->remoteVersion < 90200
 		&& !no_synchronized_snapshots)
 		exit_horribly(NULL,
-					 "No synchronized snapshots available in this server version. "
-					 "Run with --no-synchronized-snapshots instead if you do not "
+					 "No synchronized snapshots available in this server version.\n"
+					 "Run with --no-synchronized-snapshots instead if you do not\n"
 					 "need synchronized snapshots.\n");
 
 	/* Find the last built-in OID, if needed */

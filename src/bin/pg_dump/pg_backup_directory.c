@@ -165,7 +165,28 @@ InitArchiveFmt_Directory(ArchiveHandle *AH)
 
 	if (AH->mode == archModeWrite)
 	{
-		if (mkdir(ctx->directory, 0700) < 0)
+		struct stat st;
+		bool is_empty = false;
+
+		/* we accept an empty existing directory */
+		if (stat(ctx->directory, &st) == 0 && S_ISDIR(st.st_mode))
+		{
+			DIR* dir = opendir(ctx->directory);
+			if (dir) {
+				struct dirent *d;
+				is_empty = true;
+				while ((d = readdir(dir))) {
+					if (strcmp(d->d_name, ".") != 0 && strcmp(d->d_name, "..") != 0)
+					{
+						is_empty = false;
+						break;
+					}
+				}
+				closedir(dir);
+			}
+		}
+
+		if (!is_empty && mkdir(ctx->directory, 0700) < 0)
 			exit_horribly(modulename, "could not create directory \"%s\": %s\n",
 						  ctx->directory, strerror(errno));
 	}
